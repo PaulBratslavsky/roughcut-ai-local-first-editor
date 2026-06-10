@@ -239,35 +239,77 @@ pub fn generate_rough_cut(
     RoughCutOutcome { timeline, cut_count }
 }
 
-/// Keyword scoring for `find_segments` — the offline fallback (and first
-/// implementation). The agent loop can refine candidates with the LLM.
-pub fn find_segments<'t>(transcript: &'t Transcript, query: &str) -> Vec<&'t TranscriptSegment> {
-    const STOPWORDS: &[&str] = &[
-        "the", "and", "that", "this", "about", "with", "your", "you", "where", "when", "part",
-        "section", "thing", "cut", "remove", "delete",
-    ];
-    let q: Vec<String> = query
+const STOPWORDS: &[&str] = &[
+    "the", "and", "that", "this", "about", "with", "your", "you", "where", "when", "part",
+    "section", "thing", "cut", "remove", "delete",
+];
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
         .split_whitespace()
         .map(normalize_word)
         .filter(|w| !w.is_empty() && w.len() > 2 && !STOPWORDS.contains(&w.as_str()))
-        .collect();
-    if q.is_empty() {
+        .collect()
+}
+
+/// BM25 ranking over speech segments (k1=1.2, b=0.75). The lexical half of
+/// hybrid search; also the full offline fallback when no embedding index
+/// exists. Scores > 0 only.
+pub fn bm25_rank<'t>(
+    transcript: &'t Transcript,
+    query: &str,
+    k: usize,
+) -> Vec<(&'t TranscriptSegment, f32)> {
+    const K1: f32 = 1.2;
+    const B: f32 = 0.75;
+    let terms = query_terms(query);
+    if terms.is_empty() {
         return vec![];
     }
-    let mut scored: Vec<(f64, &TranscriptSegment)> = transcript
+    let docs: Vec<(&TranscriptSegment, Vec<String>)> = transcript
         .segments
         .iter()
         .filter(|s| !s.is_silence && !s.text.is_empty())
-        .map(|s| {
-            let words: std::collections::HashSet<String> =
-                s.text.split_whitespace().map(normalize_word).collect();
-            let hits = q.iter().filter(|w| words.contains(*w)).count() as f64;
-            (hits / q.len() as f64, s)
-        })
-        .filter(|(score, _)| *score > 0.0)
+        .map(|s| (s, s.text.split_whitespace().map(normalize_word).collect()))
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    scored.into_iter().take(8).map(|(_, s)| s).collect()
+    if docs.is_empty() {
+        return vec![];
+    }
+    let n = docs.len() as f32;
+    let avgdl = docs.iter().map(|(_, t)| t.len()).sum::<usize>() as f32 / n;
+    // Document frequency per query term.
+    let df: Vec<f32> = terms
+        .iter()
+        .map(|t| docs.iter().filter(|(_, toks)| toks.contains(t)).count() as f32)
+        .collect();
+    let mut scored: Vec<(&TranscriptSegment, f32)> = docs
+        .iter()
+        .map(|(seg, toks)| {
+            let dl = toks.len() as f32;
+            let mut score = 0.0f32;
+            for (term, &dfi) in terms.iter().zip(&df) {
+                if dfi == 0.0 {
+                    continue;
+                }
+                let tf = toks.iter().filter(|w| *w == term).count() as f32;
+                if tf == 0.0 {
+                    continue;
+                }
+                let idf = (1.0 + (n - dfi + 0.5) / (dfi + 0.5)).ln();
+                score += idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * dl / avgdl));
+            }
+            (*seg, score)
+        })
+        .filter(|(_, score)| *score > 0.0)
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    scored
+}
+
+/// Lexical search used by the offline agent path; thin wrapper over BM25.
+pub fn find_segments<'t>(transcript: &'t Transcript, query: &str) -> Vec<&'t TranscriptSegment> {
+    bm25_rank(transcript, query, 8).into_iter().map(|(s, _)| s).collect()
 }
 
 #[cfg(test)]

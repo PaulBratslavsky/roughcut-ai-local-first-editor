@@ -360,31 +360,39 @@ handler!(h_read_transcript, |e, a, _s| {
 handler!(h_find_segments, |e, a, _s| {
     let project_id = arg_uuid(a, "project_id")?;
     let query = arg_str(a, "query")?;
-    // Semantic first (local embeddings index), keyword fallback.
-    if let Some(hits) = e.semantic_find(project_id, query, 8).await? {
-        let result = e.with_project(project_id, |_, t| {
-            let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-            let segments: Vec<Value> = hits
-                .iter()
-                .filter_map(|(id, score)| {
-                    t.segment(*id).map(|seg| {
-                        let mut v = lean_segment(seg);
-                        v["score"] = json!(score);
-                        v
-                    })
-                })
-                .collect();
-            Ok(segments)
-        })?;
-        if !result.is_empty() {
-            return Ok(json!({ "segments": result, "method": "semantic" }));
-        }
-    }
+    let limit = (a["limit"].as_u64().unwrap_or(8) as usize).clamp(1, 50);
+    // Hybrid retrieval: BM25 (lexical) fused with embedding cosine (semantic)
+    // by reciprocal-rank fusion; BM25 alone when no index exists.
+    let semantic = e.semantic_find(project_id, query, limit * 2).await?;
     e.with_project(project_id, |_, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-        let segments: Vec<Value> =
-            detect::find_segments(t, query).iter().map(|seg| lean_segment(seg)).collect();
-        Ok(json!({ "segments": segments, "method": "keyword" }))
+        let bm25 = detect::bm25_rank(t, query, limit * 2);
+        let mut rrf: std::collections::HashMap<Uuid, f64> = std::collections::HashMap::new();
+        for (rank, (seg, _)) in bm25.iter().enumerate() {
+            *rrf.entry(seg.id).or_default() += 1.0 / (60.0 + rank as f64);
+        }
+        let method = if let Some(hits) = &semantic {
+            for (rank, (id, _)) in hits.iter().enumerate() {
+                *rrf.entry(*id).or_default() += 1.0 / (60.0 + rank as f64);
+            }
+            "hybrid"
+        } else {
+            "bm25"
+        };
+        let mut fused: Vec<(Uuid, f64)> = rrf.into_iter().collect();
+        fused.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        let segments: Vec<Value> = fused
+            .iter()
+            .take(limit)
+            .filter_map(|(id, score)| {
+                t.segment(*id).map(|seg| {
+                    let mut v = lean_segment(seg);
+                    v["score"] = json!(score);
+                    v
+                })
+            })
+            .collect();
+        Ok(json!({ "segments": segments, "method": method }))
     })
 });
 
@@ -560,8 +568,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, h_set_global_padding),
-    tool!("find_segments", "Semantic search over the transcript with a natural-language query (local embeddings; keyword fallback). Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
-        || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}}), &["project_id", "query"]),
+    tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
+        || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}, "limit": {"type": "integer", "description": "max 50, default 8"}}), &["project_id", "query"]),
         agent: true, meta: false, h_find_segments),
     tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). Use offset/limit for long videos instead of get_transcript.",
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),

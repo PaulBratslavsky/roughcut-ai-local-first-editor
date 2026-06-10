@@ -65,7 +65,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `set_global_padding { project_id, start_s, end_s, linked } -> { action, timeline }`
 
 ### Semantic / LLM
-- `find_segments { project_id, query } -> { segments: [LeanSegment & {score?}], method: "semantic"|"keyword" }` — local-embeddings search (Ollama `nomic-embed-text`), keyword fallback when no index
+- `find_segments { project_id, query, limit? } -> { segments: [LeanSegment & {score}], method: "hybrid"|"bm25" }` — BM25 + local embeddings (Ollama `nomic-embed-text`) fused by reciprocal rank; BM25 alone when no index
 - `read_transcript { project_id, offset?, limit? (≤200, default 50), include_words? } -> { total_segments, offset, returned, language, segments: [LeanSegment] }` — paged, word-arrays omitted by default; the right read for MCP clients and long videos
 - `apply_instruction { project_id, instruction } -> { actions: [EditAction], summary: string }` (runs the agent loop; `agent-step` events)
 

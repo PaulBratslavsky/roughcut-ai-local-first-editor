@@ -257,7 +257,7 @@ async fn semantic_search_and_paged_reads() {
         json!({ "project_id": pid, "query": "hiking trip on Saturday" }),
     )
     .await;
-    assert_eq!(found["method"], "semantic");
+    assert_eq!(found["method"], "hybrid");
     let top = found["segments"][0]["text"].as_str().unwrap();
     assert!(top.contains("hiking"), "semantic top hit should be the tangent, got: {top}");
 }
