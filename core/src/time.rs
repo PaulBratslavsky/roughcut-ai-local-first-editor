@@ -58,16 +58,23 @@ pub fn to_frame(seconds: f64, fps: f64) -> i64 {
     (seconds * fps).round() as i64
 }
 
-/// SMPTE-ish timecode (non-drop) used by the EDL writer.
-pub fn timecode(seconds: f64, fps: f64) -> String {
-    let fps_i = fps.round().max(1.0) as i64;
-    let total_frames = to_frame(seconds, fps_i as f64);
+/// SMPTE-ish timecode (non-drop) from a whole frame count. EDL math must be
+/// done in frames end-to-end — rounding endpoints independently can make
+/// source and record durations differ by a frame, which NLE importers reject.
+pub fn timecode_frames(total_frames: i64, fps_i: i64) -> String {
+    let fps_i = fps_i.max(1);
     let f = total_frames % fps_i;
     let total_secs = total_frames / fps_i;
     let s = total_secs % 60;
     let m = (total_secs / 60) % 60;
     let h = total_secs / 3600;
     format!("{h:02}:{m:02}:{s:02}:{f:02}")
+}
+
+/// SMPTE-ish timecode (non-drop) from seconds.
+pub fn timecode(seconds: f64, fps: f64) -> String {
+    let fps_i = fps.round().max(1.0) as i64;
+    timecode_frames(to_frame(seconds, fps_i as f64), fps_i)
 }
 
 #[cfg(test)]

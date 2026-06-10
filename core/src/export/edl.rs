@@ -1,29 +1,33 @@
 //! CMX3600 EDL writer. One event per included clip; record times accumulate.
 
 use crate::model::{Media, Project};
-use crate::time::timecode;
+use crate::time::{timecode_frames, to_frame};
 
 pub fn write(project: &Project, media: &Media) -> String {
-    let fps = media.frame_rate;
+    let fps_i = media.frame_rate.round().max(1.0) as i64;
     let name = std::path::Path::new(&media.file_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| media.file_path.clone());
     let mut out = String::new();
     out.push_str(&format!("TITLE: {}\nFCM: NON-DROP FRAME\n\n", project.name));
-    let mut record = 0.0_f64;
+    // All math in whole frames: source duration and record duration must
+    // match EXACTLY or importers reject the event.
+    let mut record_f: i64 = 0;
     for (i, clip) in project.timeline.included_clips().enumerate() {
-        let dur = clip.duration();
+        let in_f = to_frame(clip.source_in, fps_i as f64);
+        let out_f = to_frame(clip.source_out, fps_i as f64);
+        let dur_f = out_f - in_f;
         out.push_str(&format!(
             "{:03}  AX       AA/V  C        {} {} {} {}\n* FROM CLIP NAME: {}\n\n",
             i + 1,
-            timecode(clip.source_in, fps),
-            timecode(clip.source_out, fps),
-            timecode(record, fps),
-            timecode(record + dur, fps),
+            timecode_frames(in_f, fps_i),
+            timecode_frames(out_f, fps_i),
+            timecode_frames(record_f, fps_i),
+            timecode_frames(record_f + dur_f, fps_i),
             name,
         ));
-        record += dur;
+        record_f += dur_f;
     }
     out
 }
