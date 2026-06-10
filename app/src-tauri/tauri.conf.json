@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.localfirst.roughcut",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix ../../frontend",
+    "beforeDevCommand": "cd ../frontend 2>/dev/null || cd ../../frontend; npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build --prefix ../../frontend",
+    "beforeBuildCommand": "cd ../frontend 2>/dev/null || cd ../../frontend; npm run build",
     "frontendDist": "../../frontend/dist"
   },
   "app": {
@@ -40,6 +40,9 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

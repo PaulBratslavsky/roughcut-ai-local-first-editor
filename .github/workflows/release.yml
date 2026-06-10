@@ -38,6 +38,8 @@ jobs:
         run: npx --yes @tauri-apps/cli@^2 build
         working-directory: app/src-tauri
         env:
+          # whisper.cpp needs std::filesystem (10.15+); we target Apple silicon.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
