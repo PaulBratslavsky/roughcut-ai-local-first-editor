@@ -11,6 +11,8 @@ export interface ViewState {
   playhead: number; // seconds, source time
   /** Bumped whenever a seek is requested so the <video> element follows. */
   seekNonce: number;
+  /** Bumped by arrow-key scrubbing: the preview auditions a short audio burst. */
+  auditionNonce: number;
   playing: boolean;
   playbackRate: number;
   zoom: number; // timeline px per second
@@ -26,6 +28,7 @@ export const viewStore = new Store<ViewState>({
   projectId: null,
   playhead: 0,
   seekNonce: 0,
+  auditionNonce: 0,
   playing: false,
   playbackRate: 1,
   zoom: 6,
@@ -50,6 +53,16 @@ export function seekTo(t: number): void {
     ...s,
     playhead: Math.max(0, t),
     seekNonce: s.seekNonce + 1,
+  }));
+}
+
+/** Arrow-key jog: step the playhead and audition audio at the new position. */
+export function scrubBy(delta: number, max: number): void {
+  viewStore.setState((s) => ({
+    ...s,
+    playhead: Math.min(Math.max(0, s.playhead + delta), max),
+    seekNonce: s.seekNonce + 1,
+    auditionNonce: s.auditionNonce + 1,
   }));
 }
 

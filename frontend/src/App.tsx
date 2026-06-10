@@ -6,7 +6,7 @@ import type { ConfirmRequestEvent } from "./ipc/types";
 import { useStore } from "@tanstack/react-store";
 import { getDemoMode, isTauri } from "./ipc/api";
 import { useCoreEventInvalidation, useProject, useProjects } from "./ipc/queries";
-import { setActiveTab, setProjectId, togglePlaying, viewStore } from "./state/viewStore";
+import { scrubBy, setActiveTab, setProjectId, togglePlaying, viewStore } from "./state/viewStore";
 import { EmptyState } from "./EmptyState";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
@@ -29,11 +29,17 @@ function Editor({ projectId }: { projectId: string }) {
       if (e.code === "Space") {
         e.preventDefault();
         togglePlaying();
+      } else if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        e.preventDefault();
+        const fps = project?.media?.frame_rate || 30;
+        const step = (e.shiftKey ? 1 : 1 / fps) * (e.code === "ArrowLeft" ? -1 : 1);
+        scrubBy(step, project?.timeline.duration ?? Number.MAX_SAFE_INTEGER);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.media?.frame_rate, project?.timeline.duration]);
 
   return (
     <div className="app-shell">

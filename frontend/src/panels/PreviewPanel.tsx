@@ -33,6 +33,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const playing = useStore(viewStore, (s) => s.playing);
   const rate = useStore(viewStore, (s) => s.playbackRate);
   const seekNonce = useStore(viewStore, (s) => s.seekNonce);
+  const auditionNonce = useStore(viewStore, (s) => s.auditionNonce);
   const playhead = useStore(viewStore, (s) => s.playhead);
   const skipCuts = useStore(viewStore, (s) => s.skipCuts);
 
@@ -55,6 +56,25 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     const t = viewStore.state.playhead;
     if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;
   }, [seekNonce]);
+
+  // Scrub audition: each arrow-key jog plays a short audio burst at the new
+  // position (the audible cue for finding edit points). Repeated steps keep
+  // the sound rolling like a jog wheel; irrelevant while already playing.
+  const auditionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (auditionNonce === 0) return;
+    const v = videoRef.current;
+    if (!v || viewStore.state.playing) return;
+    void v.play().catch(() => {});
+    if (auditionTimer.current) clearTimeout(auditionTimer.current);
+    auditionTimer.current = setTimeout(() => {
+      if (!viewStore.state.playing) v.pause();
+    }, 180);
+    return () => {
+      if (auditionTimer.current) clearTimeout(auditionTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auditionNonce]);
 
   // Play / pause / rate on the real video element.
   useEffect(() => {
