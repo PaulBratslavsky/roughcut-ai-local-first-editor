@@ -512,6 +512,14 @@ pub struct Preferences {
     pub model_tier: ModelTier,
     pub inference_endpoint: String,
     pub inference_model: String,
+    /// Local embedding model for semantic transcript search (served by the
+    /// same OpenAI-compatible endpoint as the chat model).
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model: String,
+}
+
+fn default_embedding_model() -> String {
+    std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "nomic-embed-text".into())
 }
 
 impl Default for Preferences {
@@ -528,6 +536,7 @@ impl Default for Preferences {
                 .unwrap_or_else(|_| "http://localhost:11434/v1".into()),
             inference_model: std::env::var("INFERENCE_MODEL")
                 .unwrap_or_else(|_| "gemma4:26b".into()),
+            embedding_model: default_embedding_model(),
         }
     }
 }

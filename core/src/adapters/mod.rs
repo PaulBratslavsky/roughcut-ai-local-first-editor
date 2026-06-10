@@ -3,10 +3,12 @@
 //! that shells out to the bundled binary, and a fixture-backed mock used in
 //! demo mode and tests.
 
+pub mod embed;
 pub mod inference;
 pub mod transcribe;
 pub mod video;
 
+pub use embed::{Embedder, MockEmbedder, OllamaEmbedder};
 pub use inference::{ChatMessage, ChatRequest, ChatResponse, InferenceClient, OpenAiCompatClient, ToolCall};
 pub use transcribe::{AutoTranscriber, MockTranscriber, Transcriber, WhisperCli};
 pub use video::{AutoVideoEngine, FfmpegCli, MockVideoEngine, VideoEngine};

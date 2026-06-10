@@ -23,6 +23,16 @@ pub trait Store: Send + Sync {
     /// Arbitrary small config values (e.g. the MCP auth token).
     fn get_kv(&self, key: &str) -> Result<Option<String>>;
     fn set_kv(&self, key: &str, value: &str) -> Result<()>;
+    /// Per-segment embedding vectors for semantic search (replaces any prior
+    /// index for the project).
+    fn save_embeddings(
+        &self,
+        project_id: Uuid,
+        model: &str,
+        vectors: &[(Uuid, Vec<f32>)],
+    ) -> Result<()>;
+    /// Returns (model, vectors) or None if the project has no index.
+    fn load_embeddings(&self, project_id: Uuid) -> Result<Option<(String, Vec<(Uuid, Vec<f32>)>)>>;
 }
 
 pub struct SqliteStore {
@@ -44,7 +54,11 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS preferences (
                 id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS kv (
-                key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+                key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS embeddings (
+                project_id TEXT NOT NULL, segment_id TEXT NOT NULL,
+                model TEXT NOT NULL, vector BLOB NOT NULL,
+                PRIMARY KEY (project_id, segment_id));",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -60,7 +74,11 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS preferences (
                 id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS kv (
-                key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+                key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS embeddings (
+                project_id TEXT NOT NULL, segment_id TEXT NOT NULL,
+                model TEXT NOT NULL, vector BLOB NOT NULL,
+                PRIMARY KEY (project_id, segment_id));",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -189,5 +207,49 @@ impl Store for SqliteStore {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    fn save_embeddings(
+        &self,
+        project_id: Uuid,
+        model: &str,
+        vectors: &[(Uuid, Vec<f32>)],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM embeddings WHERE project_id = ?1", params![project_id.to_string()])?;
+        for (seg_id, v) in vectors {
+            let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+            tx.execute(
+                "INSERT INTO embeddings (project_id, segment_id, model, vector) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id.to_string(), seg_id.to_string(), model, blob],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn load_embeddings(&self, project_id: Uuid) -> Result<Option<(String, Vec<(Uuid, Vec<f32>)>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT segment_id, model, vector FROM embeddings WHERE project_id = ?1")?;
+        let rows = stmt.query_map(params![project_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+        let mut model = String::new();
+        let mut out = vec![];
+        for row in rows {
+            let (seg_id, m, blob) = row?;
+            model = m;
+            let v: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            out.push((
+                Uuid::parse_str(&seg_id).map_err(|e| CoreError::Storage(e.to_string()))?,
+                v,
+            ));
+        }
+        Ok(if out.is_empty() { None } else { Some((model, out)) })
     }
 }

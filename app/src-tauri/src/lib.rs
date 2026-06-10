@@ -67,6 +67,13 @@ async fn download_whisper_model(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be first: a second launch focuses the existing window instead
+        // of racing it for the MCP endpoint file.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let sink = std::sync::Arc::new(TauriSink(app.handle().clone()));

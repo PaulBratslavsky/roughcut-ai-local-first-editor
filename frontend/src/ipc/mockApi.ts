@@ -254,6 +254,7 @@ const state: MockState = {
     model_tier: "auto",
     inference_endpoint: "http://localhost:11434",
     inference_model: "gemma-4 (mock)",
+    embedding_model: "nomic-embed-text",
   },
 };
 
@@ -422,6 +423,21 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   get_timeline(args): Timeline {
     return clone(requireProject(args.project_id).timeline);
+  },
+
+  read_transcript(args): unknown {
+    requireProject(args.project_id);
+    if (!state.transcript) throw { code: "invalid_argument", message: "no transcript yet" };
+    const offset = Number(args.offset ?? 0);
+    const limit = Math.min(Number(args.limit ?? 50), 200);
+    const segs = state.transcript.segments.slice(offset, offset + limit);
+    return {
+      total_segments: state.transcript.segments.length,
+      offset,
+      returned: segs.length,
+      language: state.transcript.language,
+      segments: segs.map(({ words: _words, ...lean }) => lean),
+    };
   },
 
   get_transcript(args): Transcript | null {

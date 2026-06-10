@@ -3,4 +3,9 @@ import type { Aggressiveness } from "./Aggressiveness";
 import type { ModelTier } from "./ModelTier";
 import type { Padding } from "./Padding";
 
-export type Preferences = { default_padding: Padding, cut_aggressiveness: Aggressiveness, custom_filler_words: Array<string>, silence_min_duration_s: number, export_target: string, language: string, model_tier: ModelTier, inference_endpoint: string, inference_model: string, };
+export type Preferences = { default_padding: Padding, cut_aggressiveness: Aggressiveness, custom_filler_words: Array<string>, silence_min_duration_s: number, export_target: string, language: string, model_tier: ModelTier, inference_endpoint: string, inference_model: string, 
+/**
+ * Local embedding model for semantic transcript search (served by the
+ * same OpenAI-compatible endpoint as the chat model).
+ */
+embedding_model: string, };

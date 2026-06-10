@@ -218,3 +218,46 @@ async fn mcp_server_drives_an_edit_over_http() {
     let rough: Value = serde_json::from_str(text).unwrap();
     assert!(rough["cut_count"].as_u64().unwrap() > 0);
 }
+
+#[tokio::test]
+async fn semantic_search_and_paged_reads() {
+    let editor = Editor::test_instance();
+    editor.set_embedder_for_tests(std::sync::Arc::new(roughcut_core::adapters::MockEmbedder));
+
+    let project = call(
+        &editor,
+        "create_project",
+        json!({ "name": "semantic", "file_path": "/demo/footage.mp4" }),
+    )
+    .await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // Index, then paged lean reads.
+    let pid_u = uuid::Uuid::parse_str(&pid).unwrap();
+    let indexed = editor.index_transcript(pid_u).await.unwrap();
+    assert!(indexed > 10, "expected speech segments indexed, got {indexed}");
+
+    let page = call(&editor, "read_transcript", json!({ "project_id": pid, "limit": 5 })).await;
+    assert_eq!(page["returned"], 5);
+    assert!(page["total_segments"].as_u64().unwrap() > 20);
+    assert!(page["segments"][0].get("words").is_none(), "lean page must not carry word arrays");
+    let page2 = call(
+        &editor,
+        "read_transcript",
+        json!({ "project_id": pid, "offset": 5, "limit": 5 }),
+    )
+    .await;
+    assert_ne!(page["segments"][0]["id"], page2["segments"][0]["id"]);
+
+    // Semantic search beats keyword overlap: the hiking tangent wins.
+    let found = call(
+        &editor,
+        "find_segments",
+        json!({ "project_id": pid, "query": "hiking trip on Saturday" }),
+    )
+    .await;
+    assert_eq!(found["method"], "semantic");
+    let top = found["segments"][0]["text"].as_str().unwrap();
+    assert!(top.contains("hiking"), "semantic top hit should be the tangent, got: {top}");
+}

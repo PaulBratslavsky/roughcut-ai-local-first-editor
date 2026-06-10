@@ -150,6 +150,20 @@ fn arg_aggressiveness(args: &Value) -> Option<Aggressiveness> {
     }
 }
 
+/// LLM/MCP-friendly segment view: text + flags + times, no word arrays.
+fn lean_segment(seg: &crate::model::TranscriptSegment) -> Value {
+    json!({
+        "id": seg.id,
+        "start": seg.start,
+        "end": seg.end,
+        "text": seg.text,
+        "is_filler": seg.is_filler,
+        "is_silence": seg.is_silence,
+        "take_group_id": seg.take_group_id,
+        "is_best_take": seg.is_best_take,
+    })
+}
+
 /// Apply an edit op and shape the standard `{ action, timeline }` result.
 fn edit(editor: &Editor, project_id: Uuid, op: EditOp, source: ActionSource) -> Result<Value> {
     let outcome = editor.apply_edit(project_id, op, source)?;
@@ -296,12 +310,65 @@ handler!(h_set_global_padding, |e, a, s| {
     )
 });
 
+handler!(h_read_transcript, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let offset = a["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = (a["limit"].as_u64().unwrap_or(50) as usize).clamp(1, 200);
+    let include_words = a["include_words"].as_bool().unwrap_or(false);
+    e.with_project(project_id, |_, t| {
+        let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript yet".into()))?;
+        let total = t.segments.len();
+        let page: Vec<Value> = t
+            .segments
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|seg| {
+                if include_words {
+                    serde_json::to_value(seg).unwrap_or(Value::Null)
+                } else {
+                    lean_segment(seg)
+                }
+            })
+            .collect();
+        Ok(json!({
+            "total_segments": total,
+            "offset": offset,
+            "returned": page.len(),
+            "language": t.language,
+            "segments": page,
+        }))
+    })
+});
+
 handler!(h_find_segments, |e, a, _s| {
     let project_id = arg_uuid(a, "project_id")?;
     let query = arg_str(a, "query")?;
+    // Semantic first (local embeddings index), keyword fallback.
+    if let Some(hits) = e.semantic_find(project_id, query, 8).await? {
+        let result = e.with_project(project_id, |_, t| {
+            let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+            let segments: Vec<Value> = hits
+                .iter()
+                .filter_map(|(id, score)| {
+                    t.segment(*id).map(|seg| {
+                        let mut v = lean_segment(seg);
+                        v["score"] = json!(score);
+                        v
+                    })
+                })
+                .collect();
+            Ok(segments)
+        })?;
+        if !result.is_empty() {
+            return Ok(json!({ "segments": result, "method": "semantic" }));
+        }
+    }
     e.with_project(project_id, |_, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-        Ok(json!({ "segments": detect::find_segments(t, query) }))
+        let segments: Vec<Value> =
+            detect::find_segments(t, query).iter().map(|seg| lean_segment(seg)).collect();
+        Ok(json!({ "segments": segments, "method": "keyword" }))
     })
 });
 
@@ -457,9 +524,12 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, h_set_global_padding),
-    tool!("find_segments", "Search the transcript with a natural-language query; returns matching segments with ids and times.",
+    tool!("find_segments", "Semantic search over the transcript with a natural-language query (local embeddings; keyword fallback). Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
         || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}}), &["project_id", "query"]),
         agent: true, meta: false, h_find_segments),
+    tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). Use offset/limit for long videos instead of get_transcript.",
+        || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
+        agent: true, meta: false, h_read_transcript),
     tool!("apply_instruction", "High-level natural-language edit; the local model expands it into tool calls.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
@@ -495,9 +565,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("get_timeline", "Get the current timeline (clips, padding, cut count).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_get_timeline),
-    tool!("get_transcript", "Get the transcript (segments with ids, times, text, flags).",
+    tool!("get_transcript", "Get the FULL transcript including word-level timestamps — large for long videos; prefer read_transcript (paged) or find_segments (semantic search).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
-        agent: true, meta: false, h_get_transcript),
+        agent: false, meta: false, h_get_transcript),
     tool!("undo", "Undo the last edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_undo),
     tool!("redo", "Redo the last undone edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
