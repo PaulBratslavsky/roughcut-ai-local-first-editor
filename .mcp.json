@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "roughcut": {
+      "command": "target/debug/roughcut-mcp-shim",
+      "args": []
+    }
+  }
+}
