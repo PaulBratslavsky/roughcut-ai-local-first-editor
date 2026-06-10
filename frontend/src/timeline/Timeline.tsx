@@ -156,6 +156,10 @@ export function Timeline({ projectId }: { projectId: string }) {
         },
       };
     } else {
+      // Plain click: select the clip under the pointer (NLE behavior),
+      // clear selection on empty track, and scrub.
+      const hit = rects.find((r) => x >= r.x && x <= r.x + r.w);
+      setSelectedClipId(hit ? hit.clip.id : null);
       dragRef.current = { kind: "scrub", preview: null };
       seekTo(map.toSource(x / s.zoom + s.scrollX));
     }
