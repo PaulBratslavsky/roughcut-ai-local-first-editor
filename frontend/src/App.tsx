@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { onAppEvent } from "./ipc/api";
+import type { ConfirmRequestEvent } from "./ipc/types";
 import { useStore } from "@tanstack/react-store";
 import { getDemoMode, isTauri } from "./ipc/api";
 import { useCoreEventInvalidation, useProject, useProjects } from "./ipc/queries";
@@ -87,8 +91,22 @@ function DemoBanner() {
   );
 }
 
+/** External MCP clients asking for destructive ops (export, delete) get a
+ *  native approval dialog — the user always has the last word. */
+function useExternalConfirmations() {
+  useEffect(() => {
+    if (!isTauri) return;
+    return onAppEvent<ConfirmRequestEvent>("confirm-request", (req) => {
+      void ask(req.summary, { title: "External request", kind: "warning" }).then((approved) =>
+        invoke("confirm_action", { id: req.id, approved }),
+      );
+    });
+  }, []);
+}
+
 export default function App() {
   useCoreEventInvalidation();
+  useExternalConfirmations();
   const projects = useProjects();
   const selected = useStore(viewStore, (s) => s.projectId);
   const list = projects.data?.projects ?? [];

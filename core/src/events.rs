@@ -48,6 +48,11 @@ pub enum CoreEvent {
         url: String,
         token: String,
     },
+    /// A destructive op driven by an EXTERNAL client wants user approval.
+    ConfirmRequest {
+        id: Uuid,
+        summary: String,
+    },
 }
 
 impl CoreEvent {
@@ -74,6 +79,7 @@ impl CoreEvent {
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
+            CoreEvent::ConfirmRequest { .. } => "confirm-request",
         }
     }
 

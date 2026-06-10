@@ -445,10 +445,19 @@ handler!(h_generate_captions, |e, a, _s| {
     Ok(json!({ "srt": export::srt::write(&project, &t) }))
 });
 
-handler!(h_export, |e, a, _s| {
-    let path = e
-        .export(arg_uuid(a, "project_id")?, arg_str(a, "target")?, arg_str(a, "out_path")?)
-        .await?;
+handler!(h_export, |e, a, s| {
+    let target = arg_str(a, "target")?.to_string();
+    let out_path = arg_str(a, "out_path")?.to_string();
+    if s == ActionSource::McpClient
+        && !e
+            .request_confirmation(&format!("Export {target} to {out_path}? (requested by an external MCP client)"))
+            .await
+    {
+        return Err(CoreError::Unavailable(
+            "export denied: the user did not approve this externally-requested write".into(),
+        ));
+    }
+    let path = e.export(arg_uuid(a, "project_id")?, &target, &out_path).await?;
     Ok(json!({ "path": path }))
 });
 
@@ -462,8 +471,22 @@ handler!(h_duplicate_project, |e, a, _s| {
     Ok(serde_json::to_value(p)?)
 });
 
-handler!(h_delete_project, |e, a, _s| {
-    e.delete_project(arg_uuid(a, "project_id")?)?;
+handler!(h_delete_project, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    if s == ActionSource::McpClient {
+        let name = e
+            .with_project(project_id, |p, _| Ok(p.name.clone()))
+            .unwrap_or_else(|_| project_id.to_string());
+        if !e
+            .request_confirmation(&format!("Delete project “{name}”? (requested by an external MCP client; the video file is never touched)"))
+            .await
+        {
+            return Err(CoreError::Unavailable(
+                "delete denied: the user did not approve this externally-requested deletion".into(),
+            ));
+        }
+    }
+    e.delete_project(project_id)?;
     Ok(json!({ "deleted": true }))
 });
 

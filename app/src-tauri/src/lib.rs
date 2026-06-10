@@ -50,6 +50,14 @@ fn demo_mode(state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
+fn confirm_action(state: State<'_, AppState>, id: String, approved: bool) -> Result<(), Value> {
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
+    state.editor.resolve_confirmation(id, approved);
+    Ok(())
+}
+
+#[tauri::command]
 async fn setup_status(
     state: State<'_, AppState>,
 ) -> Result<roughcut_core::setup::SetupStatus, Value> {
@@ -99,6 +107,7 @@ pub fn run() {
             list_tools,
             mcp_endpoint_info,
             demo_mode,
+            confirm_action,
             setup_status,
             download_whisper_model
         ])

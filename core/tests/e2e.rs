@@ -336,3 +336,59 @@ async fn setup_status_reports_capabilities() {
     // Unreachable endpoint in tests → chat row reports false fast.
     assert!(!status.inference_reachable);
 }
+
+#[tokio::test]
+async fn external_destructive_ops_require_confirmation() {
+    use std::sync::Arc;
+    struct ChanSink(tokio::sync::mpsc::UnboundedSender<(String, Value)>);
+    impl roughcut_core::events::EventSink for ChanSink {
+        fn emit(&self, event: &str, payload: Value) {
+            let _ = self.0.send((event.to_string(), payload));
+        }
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let editor = Editor::new(
+        Box::new(roughcut_core::store::SqliteStore::open_in_memory().unwrap()),
+        Box::new(roughcut_core::adapters::MockVideoEngine),
+        Box::new(roughcut_core::adapters::MockTranscriber),
+        Arc::new(ChanSink(tx)),
+        true,
+    );
+    editor.require_confirmations_for_tests(true);
+
+    let p = call(&editor, "create_project", json!({ "name": "guard", "file_path": "/demo/x.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    // The "user" denies whatever confirmation arrives.
+    let ed2 = editor.clone();
+    tokio::spawn(async move {
+        while let Some((name, payload)) = rx.recv().await {
+            if name == "confirm-request" {
+                let id = uuid::Uuid::parse_str(payload["id"].as_str().unwrap()).unwrap();
+                ed2.resolve_confirmation(id, false);
+            }
+        }
+    });
+
+    // Externally-driven delete: denied, project survives.
+    let denied = tools::dispatch(
+        &editor,
+        "delete_project",
+        &json!({ "project_id": pid }),
+        ActionSource::McpClient,
+    )
+    .await;
+    assert!(denied.is_err(), "external delete must require approval");
+    let listed = call(&editor, "list_projects", json!({})).await;
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+
+    // The user's own UI needs no approval.
+    let ok = tools::dispatch(
+        &editor,
+        "delete_project",
+        &json!({ "project_id": pid }),
+        ActionSource::Ui,
+    )
+    .await;
+    assert!(ok.is_ok());
+}

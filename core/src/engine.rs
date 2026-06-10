@@ -54,6 +54,10 @@ pub struct Inner {
     pub demo: bool,
     /// Test override; production builds the Ollama embedder from preferences.
     embedder_override: Mutex<Option<Arc<dyn Embedder>>>,
+    /// Pending user confirmations for externally-driven destructive ops.
+    confirms: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<bool>>>,
+    /// Off in headless/test contexts (no UI to answer the prompt).
+    require_confirm: std::sync::atomic::AtomicBool,
     state: Mutex<HashMap<Uuid, ProjectState>>,
 }
 
@@ -78,6 +82,8 @@ impl Editor {
                 sink,
                 demo,
                 embedder_override: Mutex::new(None),
+                confirms: Mutex::new(HashMap::new()),
+                require_confirm: std::sync::atomic::AtomicBool::new(false),
                 state: Mutex::new(HashMap::new()),
             }),
         }
@@ -93,13 +99,16 @@ impl Editor {
     pub fn bootstrap_with_store(store: Box<dyn Store>, sink: SharedSink) -> Result<Self> {
         // Auto adapters resolve real-vs-fixture PER CALL via capabilities::probe(),
         // so installing ffmpeg or downloading a model mid-session just works.
-        Ok(Self::new(
+        let editor = Self::new(
             store,
             Box::new(AutoVideoEngine),
             Box::new(AutoTranscriber),
             sink,
             false,
-        ))
+        );
+        // The app shell has a UI that can answer confirmation prompts.
+        editor.inner.require_confirm.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(editor)
     }
 
     pub fn test_instance() -> Self {
@@ -154,6 +163,42 @@ impl Editor {
 
     pub fn set_embedder_for_tests(&self, embedder: Arc<dyn Embedder>) {
         *self.inner.embedder_override.lock().unwrap() = Some(embedder);
+    }
+
+    // -------------------------------------------------- user confirmations
+
+    /// Ask the user (via the UI) to approve an externally-driven destructive
+    /// op. True when approved; false on deny, 2-minute timeout, or when no
+    /// UI is around to answer.
+    pub async fn request_confirmation(&self, summary: &str) -> bool {
+        if !self.inner.require_confirm.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = Uuid::new_v4();
+        self.inner.confirms.lock().unwrap().insert(id, tx);
+        send(
+            &self.inner.sink,
+            CoreEvent::ConfirmRequest { id, summary: summary.to_string() },
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+            Ok(Ok(approved)) => approved,
+            _ => {
+                self.inner.confirms.lock().unwrap().remove(&id);
+                false
+            }
+        }
+    }
+
+    pub fn require_confirmations_for_tests(&self, on: bool) {
+        self.inner.require_confirm.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// UI answer path (Tauri command).
+    pub fn resolve_confirmation(&self, id: Uuid, approved: bool) {
+        if let Some(tx) = self.inner.confirms.lock().unwrap().remove(&id) {
+            let _ = tx.send(approved);
+        }
     }
 
     // ----------------------------------------------------- semantic index

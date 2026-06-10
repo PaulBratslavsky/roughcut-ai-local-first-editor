@@ -56,7 +56,11 @@ export interface AgentStepEvent {
 export interface TimelineChangedEvent { project_id: string }
 export interface TranscriptChangedEvent { project_id: string }
 
-export type AppEventName = "progress" | "agent-step" | "timeline-changed" | "transcript-changed" | "projects-changed";
+export type AppEventName =
+  | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
+  | "projects-changed" | "confirm-request";
+
+export interface ConfirmRequestEvent { id: string; summary: string }
 
 // ---------------------------------------------------------------------------
 // Common tool result envelopes
