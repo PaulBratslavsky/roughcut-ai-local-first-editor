@@ -22,6 +22,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rand = "0.8"
 dirs = "5"
 async-trait = "0.1"
+sha2 = "0.10"
 
 [profile.release]
 lto = true

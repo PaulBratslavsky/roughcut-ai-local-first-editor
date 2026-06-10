@@ -290,3 +290,15 @@ async fn apply_edits_batches_ops_in_one_call() {
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert_eq!(undone["action"]["kind"], "pad");
 }
+
+#[tokio::test]
+async fn setup_status_reports_capabilities() {
+    let editor = Editor::test_instance();
+    let status = roughcut_core::setup::status(&editor).await;
+    assert!(status.demo, "test instance forces demo");
+    assert!(status.demo_reason.is_some());
+    assert_eq!(status.tiers.len(), 2);
+    assert_eq!(status.tiers.iter().filter(|t| t.recommended).count(), 1);
+    // Unreachable endpoint in tests → chat row reports false fast.
+    assert!(!status.inference_reachable);
+}

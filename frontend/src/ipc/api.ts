@@ -56,6 +56,15 @@ export async function getSetupStatus(): Promise<SetupStatus> {
     whisper_cli: false,
     transcription_ready: true,
     models_dir: "",
+    tiers: [
+      { id: "accurate", file: "ggml-large-v3-turbo-q5_0.bin", approx_mb: 547, downloaded: true, recommended: true },
+      { id: "compact", file: "ggml-small-q5_1.bin", approx_mb: 190, downloaded: false, recommended: false },
+    ],
+    ram_gb: 24,
+    inference_reachable: true,
+    inference_endpoint: "http://localhost:11434/v1",
+    inference_model: "(browser mock)",
+    embedding_model: "nomic-embed-text",
     demo: true,
     demo_reason: "browser mock",
   };

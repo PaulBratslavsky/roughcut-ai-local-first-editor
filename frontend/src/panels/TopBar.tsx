@@ -1,5 +1,6 @@
 // Top chrome: project switcher, new-video button, undo/redo, export menu.
 
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
@@ -7,6 +8,7 @@ import { useProjects, useRedo, useUndo } from "../ipc/queries";
 import { setProjectId } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
+import { SetupPanel } from "./SetupPanel";
 
 export function TopBar({
   projectId,
@@ -19,6 +21,7 @@ export function TopBar({
   const redo = useRedo();
   const projects = useProjects();
   const queryClient = useQueryClient();
+  const [showSetup, setShowSetup] = useState(false);
 
   const onNewVideo = async () => {
     const id = await newProjectFromDialog();
@@ -78,6 +81,13 @@ export function TopBar({
         </button>
       </div>
       <div className="topbar-right">
+        <button className="icon-btn" title="Setup (models & toolchain)" onClick={() => setShowSetup(true)}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+            <circle cx="12" cy="12" r="3.2" />
+            <path d="M19.4 13.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V19.6a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.98 18a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H2.9a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.55 7.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.0a1.7 1.7 0 0 0 1.03-1.56V1.6a2 2 0 1 1 4 0v.09c0 .68.4 1.3 1.03 1.56a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.0c.26.63.88 1.03 1.56 1.03h.09a2 2 0 1 1 0 4h-.09c-.68 0-1.3.4-1.56 1.03z" />
+          </svg>
+        </button>
+        {showSetup && <SetupPanel onClose={() => setShowSetup(false)} />}
         <button
           className="icon-btn"
           title="Undo"

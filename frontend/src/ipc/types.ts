@@ -67,6 +67,14 @@ export type ExportTarget =
 
 // First-run setup (Tauri `setup_status` / `download_whisper_model` commands;
 // Rust side: core/src/setup.rs SetupStatus)
+export interface TierStatus {
+  id: ModelTier;
+  file: string;
+  approx_mb: number;
+  downloaded: boolean;
+  recommended: boolean;
+}
+
 export interface SetupStatus {
   ffmpeg: boolean;
   ffmpeg_path: string | null;
@@ -75,6 +83,12 @@ export interface SetupStatus {
   whisper_cli: boolean;
   transcription_ready: boolean;
   models_dir: string;
+  tiers: TierStatus[];
+  ram_gb: number | null;
+  inference_reachable: boolean;
+  inference_endpoint: string;
+  inference_model: string;
+  embedding_model: string;
   demo: boolean;
   demo_reason: string | null;
 }

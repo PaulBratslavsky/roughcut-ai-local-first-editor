@@ -62,3 +62,28 @@ impl Capabilities {
         None
     }
 }
+
+/// Total system RAM in GB (None when undetectable). Used to recommend model
+/// tiers sized to the machine.
+pub fn system_ram_gb() -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+        let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        return Some(bytes as f64 / 1_073_741_824.0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: u64 = info
+            .lines()
+            .find(|l| l.starts_with("MemTotal:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
+        return Some(kb as f64 / 1_048_576.0);
+    }
+    #[allow(unreachable_code)]
+    None
+}

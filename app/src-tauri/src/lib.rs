@@ -50,8 +50,10 @@ fn demo_mode(state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-fn setup_status(state: State<'_, AppState>) -> roughcut_core::setup::SetupStatus {
-    roughcut_core::setup::status(&state.editor)
+async fn setup_status(
+    state: State<'_, AppState>,
+) -> Result<roughcut_core::setup::SetupStatus, Value> {
+    Ok(roughcut_core::setup::status(&state.editor).await)
 }
 
 #[tauri::command]

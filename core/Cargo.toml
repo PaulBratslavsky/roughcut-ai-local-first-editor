@@ -19,6 +19,7 @@ rusqlite.workspace = true
 rand.workspace = true
 dirs.workspace = true
 async-trait.workspace = true
+sha2.workspace = true
 # whisper-native: in-process whisper.cpp (no PATH dependency, real progress).
 # Off by default so core builds/tests stay light; the app crate turns it on.
 whisper-rs = { version = "0.16", optional = true }
