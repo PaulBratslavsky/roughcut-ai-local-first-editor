@@ -252,21 +252,62 @@ impl Timeline {
     }
 
     /// Move a clip's boundaries, keeping the partition contiguous by giving or
-    /// taking time from the immediate neighbors. Frame snapping happens upstream.
+    /// taking time from the immediate neighbors. Frame snapping happens
+    /// upstream. Dragging an edge all the way across an EXCLUDED neighbor
+    /// consumes it exactly — the cut heals and the included clips merge.
+    /// Included neighbors keep a minimum width so kept content can't be
+    /// silently trimmed to nothing.
     pub fn trim_clip(&mut self, clip_id: Uuid, new_in: f64, new_out: f64) -> Result<(), String> {
+        const MIN_KEEP: f64 = 0.05;
+        let (new_in_req, new_out_req) = (new_in, new_out);
         let idx = self
             .clips
             .iter()
             .position(|c| c.id == clip_id)
             .ok_or_else(|| format!("clip {clip_id} not found"))?;
-        let prev_floor = if idx == 0 { 0.0 } else { self.clips[idx - 1].source_in + EPS };
+        let prev_floor = if idx == 0 {
+            0.0
+        } else {
+            let p = &self.clips[idx - 1];
+            if p.included { p.source_in + MIN_KEEP } else { p.source_in }
+        };
         let next_ceil = if idx + 1 < self.clips.len() {
-            self.clips[idx + 1].source_out - EPS
+            let n = &self.clips[idx + 1];
+            if n.included { n.source_out - MIN_KEEP } else { n.source_out }
         } else {
             self.duration
         };
-        let new_in = new_in.clamp(prev_floor.min(self.clips[idx].source_out), self.clips[idx].source_out - EPS);
-        let new_out = new_out.clamp(new_in + EPS, next_ceil.max(new_in + EPS));
+        let mut new_in = new_in.clamp(prev_floor.min(self.clips[idx].source_out), self.clips[idx].source_out - EPS);
+        let mut new_out = new_out.clamp(new_in + EPS, next_ceil.max(new_in + EPS));
+        // Magnet: when the drag leaves only a sliver (<0.1s) of an excluded
+        // neighbor, snap across it so the cut heals instead of leaving crumbs.
+        // For an INCLUDED neighbor, dragging to (or past) its far edge is the
+        // "dissolve this boundary" gesture: split halves merge back into one
+        // clip — a lossless union, since the source in between is identical.
+        const SNAP: f64 = 0.1;
+        let mut dissolved = false;
+        if idx + 1 < self.clips.len() {
+            let n = &self.clips[idx + 1];
+            if !n.included && n.source_out - new_out < SNAP {
+                new_out = n.source_out;
+            } else if n.included && new_out_req >= n.source_out - SNAP {
+                new_out = n.source_out;
+                dissolved = true;
+            }
+        }
+        if idx > 0 {
+            let p = &self.clips[idx - 1];
+            if !p.included && new_in - p.source_in < SNAP {
+                new_in = p.source_in;
+            } else if p.included && new_in_req <= p.source_in + SNAP {
+                new_in = p.source_in;
+                dissolved = true;
+            }
+        }
+        if dissolved {
+            // The deliberate split boundary is gone; let normalize() merge.
+            self.clips[idx].origin = ClipOrigin::Manual;
+        }
         if idx > 0 {
             self.clips[idx - 1].source_out = new_in;
         }
@@ -622,6 +663,43 @@ mod tests {
         assert_ne!(l, r);
         t.set_range_included(40.0, 60.0, false, ClipOrigin::Manual);
         assert_eq!(t.cut_count, 1);
+    }
+
+    #[test]
+    fn trimming_across_a_cut_heals_it() {
+        let mut t = tl();
+        t.set_range_included(10.0, 20.0, false, ClipOrigin::AiCut);
+        let left = t.clips[0].id;
+        t.trim_clip(left, 0.0, 25.0).unwrap(); // overshoots; clamps to gap end
+        assert_eq!(t.cut_count, 0, "gap should be fully restored");
+        assert_eq!(t.clips.len(), 1, "clips should merge");
+
+        // Stopping a hair short still heals (magnet).
+        let mut t = tl();
+        t.set_range_included(10.0, 20.0, false, ClipOrigin::AiCut);
+        let left = t.clips[0].id;
+        t.trim_clip(left, 0.0, 19.95).unwrap();
+        assert_eq!(t.cut_count, 0, "sliver should snap shut");
+        assert_eq!(t.clips.len(), 1);
+
+        let mut t = tl();
+        t.set_range_included(10.0, 20.0, false, ClipOrigin::AiCut);
+        let right = t.clips[2].id;
+        t.trim_clip(right, 5.0, 100.0).unwrap();
+        assert_eq!(t.cut_count, 0);
+        assert_eq!(t.clips.len(), 1);
+
+        // A partial roll-drag into an included (split) neighbor keeps both…
+        let mut t = tl();
+        let first = t.clips[0].id;
+        t.split_clip(first, 50.0).unwrap();
+        let left = t.clips[0].id;
+        t.trim_clip(left, 0.0, 80.0).unwrap();
+        assert_eq!(t.clips.len(), 2, "partial drag keeps the split");
+        // …but dragging to/past the neighbor's far edge dissolves the split.
+        t.trim_clip(left, 0.0, 150.0).unwrap();
+        assert_eq!(t.clips.len(), 1, "full drag heals the split boundary");
+        assert_eq!(t.cut_count, 0);
     }
 
     #[test]

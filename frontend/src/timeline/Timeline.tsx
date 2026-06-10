@@ -3,7 +3,8 @@
 // wheel to zoom around the playhead / horizontal scroll.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMediaAssets, useTimeline, useTrimClip } from "../ipc/queries";
+import { useCutRange, useMediaAssets, useRestoreRange, useSplitClip, useTimeline, useTrimClip } from "../ipc/queries";
+import type { Clip } from "../ipc/types";
 import { loadTimelineAssets, type TimelineAssets } from "./assets";
 import {
   seekTo,
@@ -30,6 +31,39 @@ export function Timeline({ projectId }: { projectId: string }) {
   const { data: timeline } = useTimeline(projectId);
   const { data: assetMeta } = useMediaAssets(projectId);
   const trimClip = useTrimClip();
+  const cutRange = useCutRange();
+  const restoreRange = useRestoreRange();
+  const splitClip = useSplitClip();
+
+  // Right-click menu on a clip: Restore for cut clips, Cut/Split for kept.
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; clip: Clip } | null>(null);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (ev: KeyboardEvent) => ev.key === "Escape" && close();
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [ctxMenu]);
+
+  const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const x = localX(e);
+    const { rects } = currentLayout();
+    const hit = rects.find((r) => x >= r.x && x <= r.x + r.w);
+    if (!hit) return;
+    setSelectedClipId(hit.clip.id);
+    setCtxMenu({
+      x: Math.min(e.clientX, window.innerWidth - 220),
+      y: Math.min(e.clientY, window.innerHeight - 140),
+      clip: hit.clip,
+    });
+  };
 
   // Real waveform peaks + thumbnails: fetched over the asset protocol once
   // the core reports them; the renderer falls back to synthetic bars until then.
@@ -240,7 +274,51 @@ export function Timeline({ projectId }: { projectId: string }) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onContextMenu={onContextMenu}
       />
+      {ctxMenu && (
+        <div
+          className="context-menu"
+          style={{ left: ctxMenu.x, top: ctxMenu.y, position: "fixed" }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="context-menu-label">
+            {ctxMenu.clip.included ? "Clip" : "Cut"} · {(ctxMenu.clip.source_out - ctxMenu.clip.source_in).toFixed(1)}s
+          </div>
+          {ctxMenu.clip.included ? (
+            <>
+              <button
+                onClick={() => {
+                  cutRange.mutate({ project_id: projectId, start: ctxMenu.clip.source_in, end: ctxMenu.clip.source_out });
+                  setCtxMenu(null);
+                }}
+              >
+                Cut this clip
+              </button>
+              {viewStore.state.playhead > ctxMenu.clip.source_in &&
+                viewStore.state.playhead < ctxMenu.clip.source_out && (
+                  <button
+                    onClick={() => {
+                      splitClip.mutate({ project_id: projectId, clip_id: ctxMenu.clip.id, at_time: viewStore.state.playhead });
+                      setCtxMenu(null);
+                    }}
+                  >
+                    Split at playhead
+                  </button>
+                )}
+            </>
+          ) : (
+            <button
+              onClick={() => {
+                restoreRange.mutate({ project_id: projectId, start: ctxMenu.clip.source_in, end: ctxMenu.clip.source_out });
+                setCtxMenu(null);
+              }}
+            >
+              Restore this cut
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -125,6 +125,21 @@ function DemoBanner() {
 
 /** External MCP clients asking for destructive ops (export, delete) get a
  *  native approval dialog — the user always has the last word. */
+/** The webview's default right-click menu (Reload / Inspect Element) has no
+ *  place in the editor; our own context menus preventDefault at the source. */
+function useSuppressDefaultContextMenu() {
+  useEffect(() => {
+    if (!isTauri) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", handler);
+    return () => document.removeEventListener("contextmenu", handler);
+  }, []);
+}
+
 function useExternalConfirmations() {
   useEffect(() => {
     if (!isTauri) return;
@@ -139,6 +154,7 @@ function useExternalConfirmations() {
 export default function App() {
   useCoreEventInvalidation();
   useExternalConfirmations();
+  useSuppressDefaultContextMenu();
   const projects = useProjects();
   const selected = useStore(viewStore, (s) => s.projectId);
   const list = projects.data?.projects ?? [];

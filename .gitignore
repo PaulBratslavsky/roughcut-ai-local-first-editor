@@ -18,3 +18,7 @@ app/src-tauri/gen/
 # Local env (no secrets in the repo; external keys live in the OS keychain)
 .env
 .env.*
+
+# never commit literal "~" dirs from unexpanded paths
+~/
+**/~/
