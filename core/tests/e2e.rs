@@ -318,7 +318,9 @@ async fn apply_edits_batches_ops_in_one_call() {
         copy["timeline"]["cut_count"].as_u64().unwrap(),
         rough["cut_count"].as_u64().unwrap()
     );
-    // Each op is its own undo step.
+    // Each op is its own undo step: the rough cut undoes first, then padding.
+    let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
+    assert_eq!(undone["action"]["kind"], "ai_batch");
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert_eq!(undone["action"]["kind"], "pad");
 }
