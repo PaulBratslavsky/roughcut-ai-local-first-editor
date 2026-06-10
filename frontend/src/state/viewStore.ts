@@ -13,6 +13,8 @@ export interface ViewState {
   seekNonce: number;
   /** Bumped by arrow-key scrubbing: the preview auditions a short audio burst. */
   auditionNonce: number;
+  /** Length of the audition burst (ms) — word jumps audition the whole word. */
+  auditionMs: number;
   playing: boolean;
   playbackRate: number;
   zoom: number; // timeline px per second
@@ -29,6 +31,7 @@ export const viewStore = new Store<ViewState>({
   playhead: 0,
   seekNonce: 0,
   auditionNonce: 0,
+  auditionMs: 180,
   playing: false,
   playbackRate: 1,
   zoom: 6,
@@ -58,11 +61,17 @@ export function seekTo(t: number): void {
 
 /** Arrow-key jog: step the playhead and audition audio at the new position. */
 export function scrubBy(delta: number, max: number): void {
+  scrubTo(viewStore.state.playhead + delta, max, 180);
+}
+
+/** Jump the playhead to an absolute position with an audition of `ms`. */
+export function scrubTo(t: number, max: number, ms: number): void {
   viewStore.setState((s) => ({
     ...s,
-    playhead: Math.min(Math.max(0, s.playhead + delta), max),
+    playhead: Math.min(Math.max(0, t), max),
     seekNonce: s.seekNonce + 1,
     auditionNonce: s.auditionNonce + 1,
+    auditionMs: ms,
   }));
 }
 

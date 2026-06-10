@@ -78,7 +78,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
         // Snap the frame back to the scrub point the user is parked on.
         v.currentTime = viewStore.state.playhead;
       }
-    }, 180);
+    }, viewStore.state.auditionMs || 180);
     return () => {
       if (auditionTimer.current) clearTimeout(auditionTimer.current);
     };

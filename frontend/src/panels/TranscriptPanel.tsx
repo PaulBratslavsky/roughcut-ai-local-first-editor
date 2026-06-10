@@ -489,8 +489,8 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
         )}
       </div>
       <div className="transcript-hint">
-        Click a word to seek · select text + right-click to cut · ⌘-click paragraphs for multi ·
-        Delete cuts selection
+        Click a word to seek · ←/→ step words (⌥ frames, ⇧ seconds) · select text + right-click to
+        cut · ⌘-click paragraphs for multi · Delete cuts selection
       </div>
 
       {menu && (

@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { onAppEvent } from "./ipc/api";
 import type { ConfirmRequestEvent } from "./ipc/types";
 import { useStore } from "@tanstack/react-store";
 import { getDemoMode, isTauri } from "./ipc/api";
-import { useCoreEventInvalidation, useProject, useProjects } from "./ipc/queries";
-import { scrubBy, setActiveTab, setProjectId, togglePlaying, viewStore } from "./state/viewStore";
+import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from "./ipc/queries";
+import { scrubBy, scrubTo, setActiveTab, setProjectId, togglePlaying, viewStore } from "./state/viewStore";
 import { EmptyState } from "./EmptyState";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
@@ -19,7 +19,17 @@ import { TransportBar } from "./timeline/TransportBar";
 
 function Editor({ projectId }: { projectId: string }) {
   const { data: project } = useProject(projectId);
+  const { data: transcript } = useTranscript(projectId);
   const activeTab = useStore(viewStore, (s) => s.activeTab);
+
+  // Flat, time-ordered word list for ←/→ word navigation.
+  const wordsRef = useRef<{ start: number; end: number }[]>([]);
+  useEffect(() => {
+    wordsRef.current = (transcript?.segments ?? [])
+      .filter((seg) => !seg.is_silence)
+      .flatMap((seg) => seg.words.map((w) => ({ start: w.start, end: w.end })))
+      .sort((a, b) => a.start - b.start);
+  }, [transcript]);
 
   // Space toggles playback (when not typing).
   useEffect(() => {
@@ -31,9 +41,25 @@ function Editor({ projectId }: { projectId: string }) {
         togglePlaying();
       } else if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
         e.preventDefault();
-        const fps = project?.media?.frame_rate || 30;
-        const step = (e.shiftKey ? 1 : 1 / fps) * (e.code === "ArrowLeft" ? -1 : 1);
-        scrubBy(step, project?.timeline.duration ?? Number.MAX_SAFE_INTEGER);
+        const max = project?.timeline.duration ?? Number.MAX_SAFE_INTEGER;
+        const back = e.code === "ArrowLeft";
+        const words = wordsRef.current;
+        if (e.shiftKey) {
+          scrubBy(back ? -1 : 1, max); // coarse: 1 second
+        } else if (e.altKey || words.length === 0) {
+          const fps = project?.media?.frame_rate || 30;
+          scrubBy((back ? -1 : 1) / fps, max); // fine: 1 frame (⌥)
+        } else {
+          // Default: walk the transcript word by word, auditioning the word.
+          const t = viewStore.state.playhead;
+          const target = back
+            ? [...words].reverse().find((w) => w.start < t - 0.02)
+            : words.find((w) => w.start > t + 0.02);
+          if (target) {
+            const ms = Math.min(700, Math.max(160, (target.end - target.start) * 1000));
+            scrubTo(target.start, max, ms);
+          }
+        }
       }
     };
     window.addEventListener("keydown", onKey);
