@@ -1,0 +1,504 @@
+//! The local agent loop: instruction + project context + tool schemas →
+//! Gemma (via llama.cpp/Ollama, OpenAI-compatible) → tool calls → execute →
+//! loop until done. Every step is surfaced as an `agent-step` event and every
+//! mutation is an undoable EditAction tagged `local_ai`.
+
+use crate::detect;
+use crate::engine::Editor;
+use crate::error::{CoreError, Result};
+use crate::events::{send, CoreEvent};
+use crate::model::{ActionSource, EditAction, EditOp};
+use crate::adapters::inference::{ChatMessage, ChatRequest};
+use crate::tools;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+const MAX_STEPS: usize = 12;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstructionOutcome {
+    pub actions: Vec<EditAction>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Chapter {
+    pub title: String,
+    pub start: f64,
+}
+
+fn system_prompt(project_id: Uuid) -> String {
+    format!(
+        "You are the editing orchestrator inside a local-first video editor. \
+         You edit by calling tools against the project with id {project_id}. \
+         The footage is described by its transcript; segment ids are uuids. \
+         Workflow: use find_segments to locate content from the user's description, \
+         inspect the results, then apply the edit (cut_by_transcript for transcript \
+         segments, cut_range for raw time ranges, set_global_padding for breathing \
+         room). Make the requested change and nothing more. Every change is \
+         non-destructive and undoable. When you are done, reply with a one-sentence \
+         summary of what you changed instead of calling more tools. \
+         Always pass project_id=\"{project_id}\" to every tool."
+    )
+}
+
+/// Compact transcript + timeline context the model can ground on.
+fn project_context(editor: &Editor, project_id: Uuid) -> Result<String> {
+    editor.with_project(project_id, |p, t| {
+        let mut out = format!(
+            "Project: {} — source duration {:.1}s, {} cuts currently, included {:.1}s.\n",
+            p.name,
+            p.timeline.duration,
+            p.timeline.cut_count,
+            p.timeline.included_duration()
+        );
+        if let Some(t) = t {
+            out.push_str("Transcript segments (id | start-end | flags | text):\n");
+            for s in &t.segments {
+                if s.is_silence {
+                    continue;
+                }
+                let mut flags = vec![];
+                if s.is_filler {
+                    flags.push("filler");
+                }
+                if s.take_group_id.is_some() {
+                    flags.push(if s.is_best_take { "best-take" } else { "alt-take" });
+                }
+                let flags_s = if flags.is_empty() { "-".to_string() } else { flags.join(",") };
+                let line =
+                    format!("{} | {:.1}-{:.1} | {} | {}\n", s.id, s.start, s.end, flags_s, s.text);
+                if out.len() + line.len() > 24_000 {
+                    out.push_str("… (transcript truncated)\n");
+                    break;
+                }
+                out.push_str(&line);
+            }
+        } else {
+            out.push_str("No transcript yet — call transcribe-like tools via the UI first.\n");
+        }
+        Ok(out)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_step(
+    editor: &Editor,
+    project_id: Uuid,
+    step: usize,
+    kind: &str,
+    tool: Option<String>,
+    args: Option<Value>,
+    result: Option<Value>,
+    text: Option<String>,
+) {
+    send(
+        &editor.sink(),
+        CoreEvent::AgentStep { project_id, step, kind: kind.into(), tool, args, result, text },
+    );
+}
+
+fn step_text(editor: &Editor, project_id: Uuid, step: usize, kind: &str, text: impl Into<String>) {
+    emit_step(editor, project_id, step, kind, None, None, None, Some(text.into()));
+}
+
+/// Collect EditActions out of a tool result (single `action` or arrays).
+fn harvest_actions(result: &Value, into: &mut Vec<EditAction>) {
+    if let Ok(a) = serde_json::from_value::<EditAction>(result["action"].clone()) {
+        into.push(a);
+    }
+}
+
+pub async fn run_instruction(
+    editor: &Editor,
+    project_id: Uuid,
+    instruction: &str,
+    source: ActionSource,
+) -> Result<InstructionOutcome> {
+    let inference = editor.inference()?;
+    if !inference.healthy().await {
+        // Graceful degradation: no local model server. Try the deterministic path.
+        return run_instruction_offline(editor, project_id, instruction, source).await;
+    }
+    let prefs = editor.get_preferences()?;
+    run_instruction_with(editor, project_id, instruction, source, inference.as_ref(), &prefs.inference_model)
+        .await
+}
+
+/// The loop itself, parameterized over the model endpoint — the same code
+/// drives local Gemma and (opt-in) a frontier model.
+pub async fn run_instruction_with(
+    editor: &Editor,
+    project_id: Uuid,
+    instruction: &str,
+    source: ActionSource,
+    inference: &dyn crate::adapters::InferenceClient,
+    model: &str,
+) -> Result<InstructionOutcome> {
+    let context = project_context(editor, project_id)?;
+    let tool_schemas: Vec<Value> = tools::agent_defs()
+        .into_iter()
+        .map(|d| {
+            json!({
+                "type": "function",
+                "function": { "name": d.name, "description": d.description, "parameters": d.input_schema }
+            })
+        })
+        .collect();
+
+    let mut messages = vec![
+        ChatMessage::system(&system_prompt(project_id)),
+        ChatMessage::user(&format!("{context}\n\nInstruction: {instruction}")),
+    ];
+    let mut actions: Vec<EditAction> = vec![];
+    let mut summary = String::new();
+
+    for step in 0..MAX_STEPS {
+        let response = match inference
+            .chat(ChatRequest {
+                model: model.to_string(),
+                messages: messages.clone(),
+                tools: Some(tool_schemas.clone()),
+                temperature: 0.1,
+            })
+            .await
+        {
+            Ok(r) => r,
+            // Server up but model missing/broken before anything happened:
+            // degrade to the deterministic offline editor instead of failing.
+            Err(e) if step == 0 => {
+                step_text(editor, project_id, 0, "thinking", format!("{e} — falling back to offline editing"));
+                return run_instruction_offline(editor, project_id, instruction, source).await;
+            }
+            Err(e) => return Err(e),
+        };
+        let msg = response.message;
+        let tool_calls = msg.tool_calls.clone().unwrap_or_default();
+        if tool_calls.is_empty() {
+            summary = msg.content.clone().unwrap_or_else(|| "Done.".into());
+            step_text(editor, project_id, step, "final", summary.clone());
+            break;
+        }
+        messages.push(msg);
+        for call in tool_calls {
+            let name = call.function.name.clone();
+            let mut args: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
+            // The model sometimes forgets the project id — inject it.
+            if args.get("project_id").and_then(|v| v.as_str()).is_none() {
+                args["project_id"] = json!(project_id.to_string());
+            }
+            emit_step(editor, project_id, step, "tool_call", Some(name.clone()), Some(args.clone()), None, None);
+            let result = match tools::dispatch_basic(editor, &name, &args, source).await {
+                Ok(v) => {
+                    harvest_actions(&v, &mut actions);
+                    v
+                }
+                Err(e) => e.to_json(),
+            };
+            emit_step(
+                editor,
+                project_id,
+                step,
+                "tool_result",
+                Some(name.clone()),
+                None,
+                Some(truncate_json(&result)),
+                None,
+            );
+            messages.push(ChatMessage::tool_result(
+                &call.id,
+                serde_json::to_string(&truncate_json(&result))?,
+            ));
+        }
+    }
+    if summary.is_empty() {
+        summary = format!("Stopped after {MAX_STEPS} steps; {} change(s) applied.", actions.len());
+        step_text(editor, project_id, MAX_STEPS, "final", summary.clone());
+    }
+    Ok(InstructionOutcome { actions, summary })
+}
+
+/// No local model server running: cover the common requests deterministically
+/// (find + cut) so the app still functions fully offline.
+async fn run_instruction_offline(
+    editor: &Editor,
+    project_id: Uuid,
+    instruction: &str,
+    source: ActionSource,
+) -> Result<InstructionOutcome> {
+    step_text(
+        editor,
+        project_id,
+        0,
+        "thinking",
+        "Local model server not reachable — using the built-in offline editor (keyword search + cut).",
+    );
+    let lower = instruction.to_lowercase();
+    let wants_cut = ["cut", "remove", "delete", "trim out", "get rid"]
+        .iter()
+        .any(|k| lower.contains(k));
+    let ids: Vec<Uuid> = editor.with_project(project_id, |_, t| {
+        let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript yet".into()))?;
+        Ok(detect::find_segments(t, instruction).into_iter().map(|s| s.id).collect())
+    })?;
+    if !wants_cut || ids.is_empty() {
+        let summary = if ids.is_empty() {
+            "I couldn't find matching footage for that instruction (offline keyword search). \
+             Start the local model server (Ollama or llama-server) for full conversational editing."
+                .to_string()
+        } else {
+            format!(
+                "Found {} matching segment(s) but the instruction doesn't look like a cut. \
+                 Start the local model server for more than find-and-cut.",
+                ids.len()
+            )
+        };
+        step_text(editor, project_id, 1, "final", summary.clone());
+        return Ok(InstructionOutcome { actions: vec![], summary });
+    }
+    // Keep it conservative: cut only the single best match offline.
+    let target = vec![ids[0]];
+    emit_step(
+        editor,
+        project_id,
+        1,
+        "tool_call",
+        Some("cut_by_transcript".into()),
+        Some(json!({ "segment_ids": target })),
+        None,
+        None,
+    );
+    let outcome =
+        editor.apply_edit(project_id, EditOp::CutSegments { segment_ids: target }, source)?;
+    let action = outcome.action;
+    let summary = format!("Cut the best-matching segment for: “{instruction}”. Undo if it picked wrong.");
+    step_text(editor, project_id, 2, "final", summary.clone());
+    Ok(InstructionOutcome { actions: vec![action], summary })
+}
+
+fn truncate_json(v: &Value) -> Value {
+    // Keep tool results the model sees small (timelines can be large).
+    let s = serde_json::to_string(v).unwrap_or_default();
+    if s.len() <= 6000 {
+        return v.clone();
+    }
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if k == "timeline" {
+                    out.insert(
+                        "timeline".into(),
+                        json!({
+                            "cut_count": val["cut_count"],
+                            "duration": val["duration"],
+                            "clips": format!("{} clips (omitted)", val["clips"].as_array().map(|a| a.len()).unwrap_or(0)),
+                        }),
+                    );
+                } else {
+                    out.insert(k.clone(), truncate_json(val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) if arr.len() > 20 => {
+            Value::Array(arr.iter().take(20).cloned().collect())
+        }
+        other => other.clone(),
+    }
+}
+
+// ----------------------------------------------------- transcript cleanup
+
+/// Gemma post-pass over whisper output: fix casing, punctuation, and obvious
+/// mis-heard words — text only, timestamps untouched. A correction is
+/// rejected unless its word count matches the original segment exactly, so
+/// word-level timing always stays valid. Best-effort: any failure leaves the
+/// whisper transcript as-is.
+pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> {
+    let inference = editor.inference()?;
+    if !inference.healthy().await {
+        return Ok(0);
+    }
+    let prefs = editor.get_preferences()?;
+    let transcript = editor
+        .get_transcript(project_id)?
+        .ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+    let speech: Vec<(Uuid, String)> = transcript
+        .segments
+        .iter()
+        .filter(|s| !s.is_silence && !s.text.is_empty())
+        .map(|s| (s.id, s.text.clone()))
+        .collect();
+    if speech.is_empty() {
+        return Ok(0);
+    }
+    let mut corrections: Vec<(Uuid, String)> = vec![];
+    for chunk in speech.chunks(40) {
+        let numbered: String = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, (_, t))| format!("{i}: {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let response = match inference
+            .chat(ChatRequest {
+                model: prefs.inference_model.clone(),
+                messages: vec![
+                    ChatMessage::system(
+                        "You fix automatic speech-recognition output from a talking-head video. \
+                         For each numbered line, correct casing, punctuation, and mis-heard \
+                         words. ASR often garbles filler sounds — short nonsense words like \
+                         'Wah', 'Erm', 'Hm' at the start of a sentence are usually 'Um' or \
+                         'Uh'; fix those. Also fix clearly mis-heard technical terms from \
+                         context. CRITICAL: keep exactly the same number of words in every \
+                         line — never merge, split, add, remove, or reorder words. Reply with \
+                         ONLY a JSON object mapping line numbers (as strings) to corrected \
+                         lines, including only the lines you changed. Reply {} if nothing \
+                         needs fixing.",
+                    ),
+                    ChatMessage::user(&numbered),
+                ],
+                tools: None,
+                temperature: 0.0,
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let text = response.message.content.unwrap_or_default();
+        let Some(json_str) = text.find('{').and_then(|s| text.rfind('}').map(|e| &text[s..=e]))
+        else {
+            continue;
+        };
+        let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str)
+        else {
+            continue;
+        };
+        for (k, corrected) in map {
+            let Ok(i) = k.trim().parse::<usize>() else { continue };
+            let Some((id, original)) = chunk.get(i) else { continue };
+            let same_word_count =
+                corrected.split_whitespace().count() == original.split_whitespace().count();
+            if same_word_count && corrected != *original {
+                corrections.push((*id, corrected));
+            }
+        }
+    }
+    if corrections.is_empty() {
+        return Ok(0);
+    }
+    editor.update_segment_texts(project_id, &corrections)
+}
+
+// ------------------------------------------------------------- metadata
+
+/// Chapters: LLM when the local server is up, deterministic fallback (silence
+/// boundaries) otherwise.
+pub async fn generate_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
+    let inference = editor.inference()?;
+    if inference.healthy().await {
+        if let Ok(chapters) = llm_chapters(editor, project_id).await {
+            if !chapters.is_empty() {
+                return Ok(chapters);
+            }
+        }
+    }
+    heuristic_chapters(editor, project_id)
+}
+
+async fn llm_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
+    let prefs = editor.get_preferences()?;
+    let context = project_context(editor, project_id)?;
+    let inference = editor.inference()?;
+    let response = inference
+        .chat(ChatRequest {
+            model: prefs.inference_model,
+            messages: vec![
+                ChatMessage::system(
+                    "Produce YouTube chapters for this video. Reply with ONLY a JSON array: \
+                     [{\"title\": string, \"start\": seconds}]. 3-8 chapters, first at 0.",
+                ),
+                ChatMessage::user(&context),
+            ],
+            tools: None,
+            temperature: 0.2,
+        })
+        .await?;
+    let text = response.message.content.unwrap_or_default();
+    let json_str = text
+        .find('[')
+        .and_then(|s| text.rfind(']').map(|e| &text[s..=e]))
+        .ok_or_else(|| CoreError::Inference("no JSON in chapter response".into()))?;
+    Ok(serde_json::from_str(json_str)?)
+}
+
+fn heuristic_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
+    editor.with_project(project_id, |p, t| {
+        let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+        let mut chapters = vec![];
+        let mut last_chapter_at = -f64::INFINITY;
+        let min_gap = (p.timeline.duration / 8.0).max(20.0);
+        let mut prev_end = 0.0_f64;
+        for seg in t.segments.iter().filter(|s| !s.is_silence && !s.is_filler && !s.text.is_empty()) {
+            let opens_after_pause = seg.start - prev_end > 1.0 || chapters.is_empty();
+            if opens_after_pause && seg.start - last_chapter_at >= min_gap {
+                let title: String = seg.text.split_whitespace().take(7).collect::<Vec<_>>().join(" ");
+                chapters.push(Chapter {
+                    title,
+                    start: if chapters.is_empty() { 0.0 } else { p.timeline.source_to_output(seg.start) },
+                });
+                last_chapter_at = seg.start;
+            }
+            prev_end = seg.end;
+        }
+        Ok(chapters)
+    })
+}
+
+pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Result<Value> {
+    let inference = editor.inference()?;
+    let prefs = editor.get_preferences()?;
+    if inference.healthy().await {
+        let context = project_context(editor, project_id)?;
+        let response = inference
+            .chat(ChatRequest {
+                model: prefs.inference_model,
+                messages: vec![
+                    ChatMessage::system(
+                        "Suggest video metadata. Reply with ONLY JSON: \
+                         {\"titles\": [3 strings], \"description\": string}.",
+                    ),
+                    ChatMessage::user(&context),
+                ],
+                tools: None,
+                temperature: 0.6,
+            })
+            .await?;
+        let text = response.message.content.unwrap_or_default();
+        if let Some(json_str) =
+            text.find('{').and_then(|s| text.rfind('}').map(|e| &text[s..=e]))
+        {
+            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+                return Ok(v);
+            }
+        }
+    }
+    // Fallback: first strong sentence as title, opening lines as description.
+    editor.with_project(project_id, |_, t| {
+        let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+        let sentences: Vec<&str> = t
+            .segments
+            .iter()
+            .filter(|s| !s.is_silence && !s.is_filler && s.text.split_whitespace().count() > 5)
+            .map(|s| s.text.as_str())
+            .collect();
+        let title = sentences.get(1).or_else(|| sentences.first()).unwrap_or(&"Untitled video");
+        Ok(json!({
+            "titles": [title],
+            "description": sentences.iter().take(4).cloned().collect::<Vec<_>>().join(" "),
+        }))
+    })
+}

@@ -1,0 +1,15 @@
+[package]
+name = "roughcut-mcp-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "stdio ⇄ localhost proxy so Claude Desktop (which spawns stdio MCP servers) can drive the running RoughCut app."
+
+[[bin]]
+name = "roughcut-mcp-shim"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }

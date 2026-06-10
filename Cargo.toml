@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["core", "app/src-tauri", "mcp-shim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/local-first-ai/roughcut"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"
+dirs = "5"
+async-trait = "0.1"
+
+[profile.release]
+lto = true

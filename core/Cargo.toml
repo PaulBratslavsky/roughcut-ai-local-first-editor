@@ -1,0 +1,35 @@
+[package]
+name = "roughcut-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable core of the local-first AI video editor: models, tool registry, agent loop, adapters, MCP."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+rusqlite.workspace = true
+rand.workspace = true
+dirs.workspace = true
+async-trait.workspace = true
+# whisper-native: in-process whisper.cpp (no PATH dependency, real progress).
+# Off by default so core builds/tests stay light; the app crate turns it on.
+whisper-rs = { version = "0.16", optional = true }
+hound = { version = "3.5", optional = true }
+# ts-bindings: generate the frontend's TypeScript types from these structs
+# (one source of truth for the model). Dev-time only.
+ts-rs = { version = "10", features = ["uuid-impl", "chrono-impl"], optional = true }
+
+[features]
+whisper-native = ["dep:whisper-rs", "dep:hound"]
+ts-bindings = ["dep:ts-rs"]
+
+[dev-dependencies]
+tempfile = "3"
