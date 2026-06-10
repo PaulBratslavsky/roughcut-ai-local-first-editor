@@ -61,14 +61,23 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   // position (the audible cue for finding edit points). Repeated steps keep
   // the sound rolling like a jog wheel; irrelevant while already playing.
   const auditionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const auditioningRef = useRef(false);
   useEffect(() => {
     if (auditionNonce === 0) return;
     const v = videoRef.current;
     if (!v || viewStore.state.playing) return;
+    // While the burst plays, the playhead must NOT follow the video —
+    // otherwise the forward drift of the audio outruns a backward frame step.
+    auditioningRef.current = true;
     void v.play().catch(() => {});
     if (auditionTimer.current) clearTimeout(auditionTimer.current);
     auditionTimer.current = setTimeout(() => {
-      if (!viewStore.state.playing) v.pause();
+      auditioningRef.current = false;
+      if (!viewStore.state.playing) {
+        v.pause();
+        // Snap the frame back to the scrub point the user is parked on.
+        v.currentTime = viewStore.state.playhead;
+      }
     }, 180);
     return () => {
       if (auditionTimer.current) clearTimeout(auditionTimer.current);
@@ -114,6 +123,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const onTimeUpdate = () => {
     const v = videoRef.current;
     if (!v) return;
+    if (auditioningRef.current) return; // scrub audition: playhead stays put
     let t = v.currentTime;
     if (viewStore.state.skipCuts) {
       const jump = skipTarget(t, rangesRef.current);
