@@ -74,6 +74,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Project / state
 - `create_project { name, file_path? } -> Project`
+- `delete_project { project_id } -> { deleted: true }` (removes edit state + journal; never touches the media file)
 - `open_project { project_id } -> Project`
 - `save_project { project_id } -> Project`
 - `list_projects {} -> { projects: [ProjectSummary] }`

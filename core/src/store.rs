@@ -12,6 +12,9 @@ use uuid::Uuid;
 pub trait Store: Send + Sync {
     fn save_project(&self, project: &Project) -> Result<()>;
     fn load_project(&self, id: Uuid) -> Result<Project>;
+    /// Remove the project, its transcript, and its journal. Source media
+    /// files on disk are never touched.
+    fn delete_project(&self, id: Uuid) -> Result<()>;
     fn list_projects(&self) -> Result<Vec<ProjectSummary>>;
     fn save_transcript(&self, project_id: Uuid, transcript: &Transcript) -> Result<()>;
     fn load_transcript(&self, project_id: Uuid) -> Result<Option<Transcript>>;
@@ -95,6 +98,14 @@ impl Store for SqliteStore {
             })
             .map_err(|_| CoreError::NotFound(format!("project {id}")))?;
         Ok(serde_json::from_str(&doc)?)
+    }
+
+    fn delete_project(&self, id: Uuid) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM projects WHERE id = ?1", params![id.to_string()])?;
+        conn.execute("DELETE FROM transcripts WHERE project_id = ?1", params![id.to_string()])?;
+        conn.execute("DELETE FROM kv WHERE key = ?1", params![format!("journal:{id}")])?;
+        Ok(())
     }
 
     fn list_projects(&self) -> Result<Vec<ProjectSummary>> {

@@ -1,6 +1,8 @@
 // Top chrome: project switcher, new-video button, undo/redo, export menu.
 
 import { useQueryClient } from "@tanstack/react-query";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useUndo } from "../ipc/queries";
 import { setProjectId } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
@@ -24,6 +26,17 @@ export function TopBar({
       setProjectId(id);
       await queryClient.invalidateQueries();
     }
+  };
+
+  const onDeleteProject = async () => {
+    const question = `Delete project “${projectName}”? Cuts, transcript and undo history are removed. The video file itself is never touched.`;
+    const confirmed = isTauri
+      ? await ask(question, { title: "Delete project", kind: "warning" })
+      : window.confirm(question);
+    if (!confirmed) return;
+    await callTool("delete_project", { project_id: projectId });
+    setProjectId(null);
+    await queryClient.invalidateQueries();
   };
 
   const list = projects.data?.projects ?? [];
@@ -52,6 +65,16 @@ export function TopBar({
         )}
         <button className="new-video-btn" title="Import another video" onClick={() => void onNewVideo()}>
           + New video
+        </button>
+        <button
+          className="icon-btn delete-project-btn"
+          title="Delete this project (keeps the video file)"
+          onClick={() => void onDeleteProject()}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+            <path d="M2.5 4h11M6.5 4V2.8a.8.8 0 0 1 .8-.8h1.4a.8.8 0 0 1 .8.8V4M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4" />
+            <path d="M6.5 7v4.5M9.5 7v4.5" />
+          </svg>
         </button>
       </div>
       <div className="topbar-right">

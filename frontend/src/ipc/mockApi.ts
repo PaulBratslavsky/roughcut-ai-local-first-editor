@@ -396,6 +396,15 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return clone(state.project);
   },
 
+  delete_project(args): { deleted: boolean } {
+    requireProject(args.project_id);
+    state.project = null;
+    state.transcript = null;
+    state.undoStack = [];
+    state.redoStack = [];
+    return { deleted: true };
+  },
+
   open_project(args): Project {
     return clone(requireProject(args.project_id));
   },

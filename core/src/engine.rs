@@ -187,6 +187,14 @@ impl Editor {
         self.inner.store.list_projects()
     }
 
+    /// Delete a project's edit state (store + memory). Non-destructive to
+    /// media: the source video file is never touched.
+    pub fn delete_project(&self, project_id: Uuid) -> Result<()> {
+        self.inner.store.delete_project(project_id)?;
+        self.inner.state.lock().unwrap().remove(&project_id);
+        Ok(())
+    }
+
     /// Read access to a loaded project (loads it on demand).
     pub fn with_project<T>(
         &self,

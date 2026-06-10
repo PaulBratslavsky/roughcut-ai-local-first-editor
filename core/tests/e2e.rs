@@ -126,6 +126,12 @@ async fn poc_loop_through_the_tool_registry() {
     call(&editor, "save_project", json!({ "project_id": pid })).await;
     let listed = call(&editor, "list_projects", json!({})).await;
     assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+
+    // 10. Delete removes the edit state (never the media file).
+    let deleted = call(&editor, "delete_project", json!({ "project_id": pid })).await;
+    assert_eq!(deleted["deleted"], true);
+    let listed = call(&editor, "list_projects", json!({})).await;
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

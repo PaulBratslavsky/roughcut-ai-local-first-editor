@@ -1010,3 +1010,9 @@ input, select { font: inherit; }
   font-size: inherit;
   text-decoration: underline;
 }
+
+
+.delete-project-btn:hover {
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+}

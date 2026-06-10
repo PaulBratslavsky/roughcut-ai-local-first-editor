@@ -338,6 +338,11 @@ handler!(h_create_project, |e, a, _s| {
     Ok(serde_json::to_value(p)?)
 });
 
+handler!(h_delete_project, |e, a, _s| {
+    e.delete_project(arg_uuid(a, "project_id")?)?;
+    Ok(json!({ "deleted": true }))
+});
+
 handler!(h_open_project, |e, a, _s| {
     Ok(serde_json::to_value(e.open_project(arg_uuid(a, "project_id")?)?)?)
 });
@@ -469,6 +474,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),
+    tool!("delete_project", "Permanently delete a project's edit state (timeline, transcript, undo history). The source video file on disk is never touched.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_delete_project),
     tool!("open_project", "Open an existing project.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_open_project),
