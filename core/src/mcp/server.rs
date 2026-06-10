@@ -95,15 +95,15 @@ async fn handle(
                 "protocolVersion": requested,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "roughcut", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Local-first AI video editor. Use list_projects/open_project to find work, get_transcript + cut_by_transcript to edit, export to hand off to an NLE. All edits are non-destructive and undoable."
+                "instructions": "Local-first AI video editor. YOU are the orchestrator: list_projects to find work, read_transcript (paged) or find_segments (semantic search) to understand the footage, then apply_edits to land a batch of cuts/trims/padding in one call. Everything is non-destructive and undoable; export hands off to an NLE."
             }))
         }
         "ping" => Ok(json!({})),
         "tools/list" => {
-            let defs: Vec<Value> = tools::all_defs()
+            // External clients are orchestrators themselves: granular tools +
+            // the apply_edits batch, no meta-tools (see tools::mcp_defs).
+            let defs: Vec<Value> = tools::mcp_defs()
                 .into_iter()
-                // External clients drive the editor directly; the meta-tool
-                // that spawns the local agent loop stays available too.
                 .map(|d| {
                     json!({ "name": d.name, "description": d.description, "inputSchema": d.input_schema })
                 })

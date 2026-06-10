@@ -261,3 +261,32 @@ async fn semantic_search_and_paged_reads() {
     let top = found["segments"][0]["text"].as_str().unwrap();
     assert!(top.contains("hiking"), "semantic top hit should be the tangent, got: {top}");
 }
+
+#[tokio::test]
+async fn apply_edits_batches_ops_in_one_call() {
+    let editor = Editor::test_instance();
+    let project = call(
+        &editor,
+        "create_project",
+        json!({ "name": "batch", "file_path": "/demo/footage.mp4" }),
+    )
+    .await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    let result = call(
+        &editor,
+        "apply_edits",
+        json!({ "project_id": pid, "edits": [
+            { "type": "cut_range", "start": 10.0, "end": 15.0 },
+            { "type": "cut_range", "start": 40.0, "end": 44.0 },
+            { "type": "set_global_padding", "start_s": 0.15, "end_s": 0.15, "linked": true }
+        ]}),
+    )
+    .await;
+    assert_eq!(result["applied"], 3);
+    assert_eq!(result["timeline"]["cut_count"].as_u64().unwrap(), 2);
+    // Each op is its own undo step.
+    let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
+    assert_eq!(undone["action"]["kind"], "pad");
+}

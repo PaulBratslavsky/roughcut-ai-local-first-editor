@@ -32,7 +32,10 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 
 ### MCP
 Same tools exposed over a localhost HTTP JSON-RPC endpoint guarded by a per-install
-token; `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop.
+token; `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop. Exception:
+the orchestration meta-tools (`apply_instruction`, `connect_external`,
+`escalate_to_frontier`) are not advertised over MCP — an external client IS an
+orchestrator and should compose the granular tools / `apply_edits` itself.
 
 ## Tools
 
@@ -51,6 +54,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { timeline: Timeline, cut_count: number }`
 
 ### Editing
+- `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], timeline }` — batch power tool for orchestrators (≤100 ops/call, each individually undoable)
 - `cut_range { project_id, start, end } -> { action: EditAction, timeline: Timeline }`
 - `restore_range { project_id, start, end } -> { action, timeline }`
 - `cut_by_transcript { project_id, segment_ids: string[] } -> { action, timeline }`

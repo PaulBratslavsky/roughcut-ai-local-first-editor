@@ -54,6 +54,22 @@ pub fn all_defs() -> Vec<ToolDef> {
         .collect()
 }
 
+/// What external MCP clients see: everything EXCEPT the orchestration
+/// meta-tools — an external frontier model IS an orchestrator; handing it
+/// apply_instruction would route editing through the weaker on-device model
+/// (and long sync calls time out MCP clients).
+pub fn mcp_defs() -> Vec<ToolDef> {
+    REGISTRY
+        .iter()
+        .filter(|s| !s.meta)
+        .map(|s| ToolDef {
+            name: s.name.into(),
+            description: s.description.into(),
+            input_schema: (s.schema)(),
+        })
+        .collect()
+}
+
 pub fn agent_defs() -> Vec<ToolDef> {
     REGISTRY
         .iter()
@@ -372,6 +388,26 @@ handler!(h_find_segments, |e, a, _s| {
     })
 });
 
+handler!(h_apply_edits, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let ops: Vec<EditOp> = serde_json::from_value(a["edits"].clone())
+        .map_err(|err| CoreError::InvalidArg(format!("edits: {err}")))?;
+    if ops.is_empty() {
+        return Err(CoreError::InvalidArg("edits must be a non-empty array".into()));
+    }
+    if ops.len() > 100 {
+        return Err(CoreError::InvalidArg("at most 100 edits per call".into()));
+    }
+    let mut actions = vec![];
+    let mut timeline = None;
+    for op in ops {
+        let outcome = e.apply_edit(project_id, op, s)?;
+        actions.push(outcome.action);
+        timeline = Some(outcome.timeline);
+    }
+    Ok(json!({ "applied": actions.len(), "actions": actions, "timeline": timeline }))
+});
+
 handler!(h_apply_instruction, |e, a, s| {
     let outcome = agent::run_instruction(e, arg_uuid(a, "project_id")?, arg_str(a, "instruction")?, s)
         .await?;
@@ -530,7 +566,10 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). Use offset/limit for long videos instead of get_transcript.",
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_read_transcript),
-    tool!("apply_instruction", "High-level natural-language edit; the local model expands it into tool calls.",
+    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
+        || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"type": "object", "description": "EditOp object with a type field"}}}), &["project_id", "edits"]),
+        agent: true, meta: false, h_apply_edits),
+    tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
     tool!("generate_chapters", "Generate YouTube-style chapters from the transcript.",
