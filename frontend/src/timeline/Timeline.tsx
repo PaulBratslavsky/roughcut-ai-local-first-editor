@@ -120,6 +120,7 @@ export function Timeline({ projectId }: { projectId: string }) {
     resize();
 
     const unsub = viewStore.subscribe(markDirty);
+    window.addEventListener("rc-theme-changed", markDirty);
 
     const loop = () => {
       rafRef.current = requestAnimationFrame(loop);
@@ -148,6 +149,7 @@ export function Timeline({ projectId }: { projectId: string }) {
     return () => {
       cancelAnimationFrame(rafRef.current);
       ro.disconnect();
+      window.removeEventListener("rc-theme-changed", markDirty);
       unsub();
     };
   }, []);

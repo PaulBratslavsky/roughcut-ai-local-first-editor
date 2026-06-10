@@ -164,7 +164,7 @@ export interface DrawState {
   assets: TimelineAssets | null;
 }
 
-const COLORS = {
+const DARK_COLORS = {
   bg: "#141416",
   ruler: "#1b1b1f",
   rulerText: "#8a8a92",
@@ -181,6 +181,29 @@ const COLORS = {
   selected: "#7ab3ff",
   handle: "#cfe0f5",
 };
+
+const LIGHT_COLORS: typeof DARK_COLORS = {
+  bg: "#e8e7e3",
+  ruler: "#efeeea",
+  rulerText: "#6f6f78",
+  tick: "#c4c3bd",
+  clip: "#c8d4e6",
+  clipTop: "#dbe4f1",
+  clipBorder: "#8aa6cc",
+  clipExcluded: "#dddcd7",
+  clipExcludedBorder: "#c2c1bb",
+  hatch: "#c0bfb9",
+  wave: "#6f8f44",
+  waveDim: "#b3b2ac",
+  playhead: "#2f6fe0",
+  selected: "#2f6fe0",
+  handle: "#3a4d68",
+};
+
+/** Active palette follows <html data-theme>. */
+function theme() {
+  return document.documentElement.dataset.theme === "light" ? LIGHT_COLORS : DARK_COLORS;
+}
 
 function pickTickStep(zoom: number): number {
   const steps = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
@@ -211,7 +234,7 @@ function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
 export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void {
   const { width, height } = s;
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = COLORS.bg;
+  ctx.fillStyle = theme().bg;
   ctx.fillRect(0, 0, width, height);
 
   // Apply trim-drag preview by patching the dragged clip.
@@ -229,7 +252,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
   const rects = layoutClips(clips, map, s.zoom, s.scrollX, s.showCuts);
 
   // --- ruler -----------------------------------------------------------------
-  ctx.fillStyle = COLORS.ruler;
+  ctx.fillStyle = theme().ruler;
   ctx.fillRect(0, 0, width, RULER_H);
   const step = pickTickStep(s.zoom);
   const firstTick = Math.floor(s.scrollX / step) * step;
@@ -238,12 +261,12 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
   ctx.textBaseline = "middle";
   for (let t = firstTick; t <= lastTick; t += step) {
     const x = (t - s.scrollX) * s.zoom;
-    ctx.strokeStyle = COLORS.tick;
+    ctx.strokeStyle = theme().tick;
     ctx.beginPath();
     ctx.moveTo(x + 0.5, RULER_H - 7);
     ctx.lineTo(x + 0.5, RULER_H);
     ctx.stroke();
-    ctx.fillStyle = COLORS.rulerText;
+    ctx.fillStyle = theme().rulerText;
     ctx.fillText(fmtTime(Math.max(0, t)), x + 4, RULER_H / 2);
     // minor ticks
     const minor = step / 5;
@@ -265,12 +288,12 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
 
     roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
     if (excluded) {
-      ctx.fillStyle = COLORS.clipExcluded;
+      ctx.fillStyle = theme().clipExcluded;
       ctx.fill();
       // hatch
       ctx.save();
       ctx.clip();
-      ctx.strokeStyle = COLORS.hatch;
+      ctx.strokeStyle = theme().hatch;
       ctx.lineWidth = 1;
       const spacing = 8;
       for (let hx = r.x - trackH; hx < r.x + r.w; hx += spacing) {
@@ -280,17 +303,17 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
         ctx.stroke();
       }
       ctx.restore();
-      ctx.strokeStyle = isSelected ? COLORS.selected : COLORS.clipExcludedBorder;
+      ctx.strokeStyle = isSelected ? theme().selected : theme().clipExcludedBorder;
       ctx.lineWidth = isSelected ? 2 : 1;
       roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
       ctx.stroke();
     } else {
       const grad = ctx.createLinearGradient(0, TRACK_TOP, 0, TRACK_TOP + trackH);
-      grad.addColorStop(0, COLORS.clipTop);
-      grad.addColorStop(1, COLORS.clip);
+      grad.addColorStop(0, theme().clipTop);
+      grad.addColorStop(1, theme().clip);
       ctx.fillStyle = grad;
       ctx.fill();
-      ctx.strokeStyle = isSelected ? COLORS.selected : COLORS.clipBorder;
+      ctx.strokeStyle = isSelected ? theme().selected : theme().clipBorder;
       ctx.lineWidth = isSelected ? 2 : 1;
       roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
       ctx.stroke();
@@ -335,7 +358,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
     const n = Math.max(4, Math.floor(r.w / (barW + gap)));
     const waveH = hasThumbs ? trackH * 0.36 : trackH * 0.62;
     const baseY = TRACK_TOP + trackH - 4;
-    ctx.fillStyle = excluded ? COLORS.waveDim : COLORS.wave;
+    ctx.fillStyle = excluded ? theme().waveDim : theme().wave;
     const fallback = hasPeaks ? null : waveformPeaks(r.clip.id, 96);
     for (let i = 0; i < n; i++) {
       let p: number;
@@ -360,7 +383,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
       (s.hoverEdge && s.hoverEdge.clip.id === r.clip.id) ||
       (s.drag && s.drag.clipId === r.clip.id);
     if (showHandles && r.w > 14) {
-      ctx.fillStyle = COLORS.handle;
+      ctx.fillStyle = theme().handle;
       roundRectPath(ctx, r.x + 2, TRACK_TOP + trackH / 2 - 9, 3, 18, 2);
       ctx.fill();
       roundRectPath(ctx, r.x + r.w - 5, TRACK_TOP + trackH / 2 - 9, 3, 18, 2);
@@ -371,13 +394,13 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
   // --- playhead -----------------------------------------------------------------
   const px = (map.toDisplay(s.playhead) - s.scrollX) * s.zoom;
   if (px >= -2 && px <= width + 2) {
-    ctx.strokeStyle = COLORS.playhead;
+    ctx.strokeStyle = theme().playhead;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(px, 4);
     ctx.lineTo(px, height - 2);
     ctx.stroke();
-    ctx.fillStyle = COLORS.playhead;
+    ctx.fillStyle = theme().playhead;
     ctx.beginPath();
     ctx.moveTo(px - 5, 2);
     ctx.lineTo(px + 5, 2);
