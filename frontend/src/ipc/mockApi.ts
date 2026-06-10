@@ -287,10 +287,8 @@ function makeAction(kind: string, description: string, before: EditOp): EditActi
     source: "ui",
     timestamp: new Date().toISOString(),
     description,
-    // The mock mirrors the core's shape; `op`/`redo` are snapshot-based here.
+    // The mock mirrors the core's shape; `op` is snapshot-based here.
     op: before,
-    inverse: before,
-    redo: before,
   };
 }
 
@@ -394,7 +392,16 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     state.undoStack = [];
     state.redoStack = [];
     state.transcript = null;
+    emit("projects-changed", {});
     return clone(state.project);
+  },
+
+  duplicate_project(args): Project {
+    const p = requireProject(args.project_id);
+    // Single-project mock: a duplicate just renames a clone in place.
+    const copy = { ...clone(p), id: `project-copy-${Date.now() % 100000}`, name: String(args.name ?? `${p.name} copy`) };
+    emit("projects-changed", {});
+    return copy;
   },
 
   delete_project(args): { deleted: boolean } {
@@ -403,6 +410,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     state.transcript = null;
     state.undoStack = [];
     state.redoStack = [];
+    emit("projects-changed", {});
     return { deleted: true };
   },
 

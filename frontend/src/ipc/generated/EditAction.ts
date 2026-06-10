@@ -5,14 +5,7 @@ import type { EditOp } from "./EditOp";
 export type EditAction = { id: string, kind: string, source: ActionSource, timestamp: string, description: string, 
 /**
  * What was requested, normalized (frame-snapped) — the audit record.
+ * (Exact inverse/redo snapshots live in the journal, NOT here — they are
+ * clip-array dumps that would bloat every tool response.)
  */
-op: EditOp, 
-/**
- * Exact undo: applying this restores the pre-op state.
- */
-inverse: EditOp, 
-/**
- * Exact redo: applying this restores the post-op state (re-running `op`
- * could differ if preferences or the transcript changed since).
- */
-redo: EditOp, };
+op: EditOp, };

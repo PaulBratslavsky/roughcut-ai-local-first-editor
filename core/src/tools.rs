@@ -407,13 +407,21 @@ handler!(h_apply_edits, |e, a, s| {
         return Err(CoreError::InvalidArg("at most 100 edits per call".into()));
     }
     let mut actions = vec![];
-    let mut timeline = None;
+    let mut last: Option<crate::model::Timeline> = None;
     for op in ops {
         let outcome = e.apply_edit(project_id, op, s)?;
         actions.push(outcome.action);
-        timeline = Some(outcome.timeline);
+        last = Some(outcome.timeline);
     }
-    Ok(json!({ "applied": actions.len(), "actions": actions, "timeline": timeline }))
+    // Lean receipt: no clip dumps. Use get_timeline if you need detail.
+    let tl = last.unwrap();
+    Ok(json!({
+        "applied": actions.len(),
+        "actions": actions,
+        "cut_count": tl.cut_count,
+        "included_duration_s": tl.included_duration(),
+        "source_duration_s": tl.duration,
+    }))
 });
 
 handler!(h_apply_instruction, |e, a, s| {
@@ -446,6 +454,11 @@ handler!(h_export, |e, a, _s| {
 
 handler!(h_create_project, |e, a, _s| {
     let p = e.create_project(arg_str(a, "name")?, a["file_path"].as_str()).await?;
+    Ok(serde_json::to_value(p)?)
+});
+
+handler!(h_duplicate_project, |e, a, _s| {
+    let p = e.duplicate_project(arg_uuid(a, "project_id")?, arg_str(a, "name")?)?;
     Ok(serde_json::to_value(p)?)
 });
 
@@ -595,6 +608,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),
+    tool!("duplicate_project", "Save-as: clone a project (same media, current cut state, fresh undo history) under a new name, leaving the original untouched.",
+        || obj(json!({"project_id": pid_schema(), "name": {"type": "string"}}), &["project_id", "name"]),
+        agent: false, meta: false, h_duplicate_project),
     tool!("delete_project", "Permanently delete a project's edit state (timeline, transcript, undo history). The source video file on disk is never touched.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_delete_project),

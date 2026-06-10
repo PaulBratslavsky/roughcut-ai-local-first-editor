@@ -454,16 +454,13 @@ pub struct EditAction {
     pub timestamp: DateTime<Utc>,
     pub description: String,
     /// What was requested, normalized (frame-snapped) — the audit record.
+    /// (Exact inverse/redo snapshots live in the journal, NOT here — they are
+    /// clip-array dumps that would bloat every tool response.)
     pub op: EditOp,
-    /// Exact undo: applying this restores the pre-op state.
-    pub inverse: EditOp,
-    /// Exact redo: applying this restores the post-op state (re-running `op`
-    /// could differ if preferences or the transcript changed since).
-    pub redo: EditOp,
 }
 
 impl EditAction {
-    pub fn new(source: ActionSource, op: EditOp, inverse: EditOp, redo: EditOp) -> Self {
+    pub fn new(source: ActionSource, op: EditOp) -> Self {
         Self {
             id: Uuid::new_v4(),
             kind: op.kind().to_string(),
@@ -471,8 +468,6 @@ impl EditAction {
             timestamp: Utc::now(),
             description: op.describe(),
             op,
-            inverse,
-            redo,
         }
     }
 }

@@ -12,6 +12,7 @@ import {
   setPlaybackRate,
   setPlayhead,
   setPlaying,
+  setSkipCuts,
   skipTarget,
   togglePlaying,
   viewStore,
@@ -33,6 +34,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const rate = useStore(viewStore, (s) => s.playbackRate);
   const seekNonce = useStore(viewStore, (s) => s.seekNonce);
   const playhead = useStore(viewStore, (s) => s.playhead);
+  const skipCuts = useStore(viewStore, (s) => s.skipCuts);
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
   const src = useMemo(
@@ -106,6 +108,23 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const nudge = (delta: number) => {
     seekTo(Math.min(Math.max(0, viewStore.state.playhead + delta), duration));
   };
+
+  // Cut-aware time: when watching the cut, both the clock and the total are
+  // in EDITED time (source time minus everything excluded) — so a 42-min
+  // source with 7 min cut reads "… / 35:06", matching what export produces.
+  const excludedTotal = ranges.reduce((acc, r) => acc + (r.end - r.start), 0);
+  const editedTotal = Math.max(0, duration - excludedTotal);
+  const toEditedTime = (t: number) => {
+    let cut = 0;
+    for (const r of ranges) {
+      if (t >= r.end) cut += r.end - r.start;
+      else if (t > r.start) cut += t - r.start;
+      else break;
+    }
+    return Math.max(0, t - cut);
+  };
+  const shownCurrent = skipCuts ? toEditedTime(Math.min(playhead, duration)) : Math.min(playhead, duration);
+  const shownTotal = skipCuts ? editedTotal : duration;
 
   return (
     <div className="preview-card card">
@@ -191,8 +210,24 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
       </div>
       <div className="preview-meta">
         <span className="cut-counter">{timeline?.cut_count ?? 0} Cuts</span>
+        <div className="preview-version-toggle" role="group" aria-label="Preview version">
+          <button
+            className={skipCuts ? "active" : ""}
+            title="Watch the edited cut (skips removed sections)"
+            onClick={() => setSkipCuts(true)}
+          >
+            Cut · {fmt(editedTotal)}
+          </button>
+          <button
+            className={!skipCuts ? "active" : ""}
+            title="Watch the original footage (plays through cuts)"
+            onClick={() => setSkipCuts(false)}
+          >
+            Original · {fmt(duration)}
+          </button>
+        </div>
         <span className="time-readout">
-          {fmt(Math.min(playhead, duration))} <span className="time-sep">/</span> {fmt(duration)}
+          {fmt(shownCurrent)} <span className="time-sep">/</span> {fmt(shownTotal)}
         </span>
       </div>
     </div>

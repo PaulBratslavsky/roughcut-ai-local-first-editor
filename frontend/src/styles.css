@@ -1223,3 +1223,27 @@ input, select { font: inherit; }
   font-size: 11px;
   color: var(--text-muted);
 }
+
+
+/* Cut / Original preview toggle */
+.preview-version-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-left: 10px;
+}
+.preview-version-toggle button {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preview-version-toggle button.active {
+  background: var(--accent, #5b9bff);
+  color: white;
+}

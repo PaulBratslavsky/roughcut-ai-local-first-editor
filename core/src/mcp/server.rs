@@ -115,7 +115,7 @@ async fn handle(
             let args = req["params"]["arguments"].clone();
             match tools::dispatch(&state.editor, &name, &args, ActionSource::McpClient).await {
                 Ok(v) => Ok(json!({
-                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],
+                    "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }],
                     "isError": false
                 })),
                 Err(e) => Ok(json!({

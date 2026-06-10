@@ -18,16 +18,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-/// Undo/redo entries ARE the EditActions: `inverse` undoes, `redo` redoes.
-/// Journals persist per project, so undo survives restarts.
+/// Journals persist per project, so undo survives restarts. The exact
+/// inverse/redo clip snapshots live HERE, not on the public EditAction.
 const UNDO_CAP: usize = 100;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct JournalEntry {
+    pub action: EditAction,
+    /// Applying this restores the pre-op state exactly.
+    pub inverse: EditOp,
+    /// Applying this restores the post-op state exactly.
+    pub redo: EditOp,
+}
 
 #[derive(Default)]
 pub struct ProjectState {
     pub project: Option<Project>,
     pub transcript: Option<Transcript>,
-    pub undo: Vec<EditAction>,
-    pub redo: Vec<EditAction>,
+    pub undo: Vec<JournalEntry>,
+    pub redo: Vec<JournalEntry>,
 }
 
 pub struct EditOutcome {
@@ -221,12 +230,52 @@ impl Editor {
             project.media = Some(media);
         }
         self.inner.store.save_project(&project)?;
-        let mut state = self.inner.state.lock().unwrap();
-        state.insert(
-            project.id,
-            ProjectState { project: Some(project.clone()), ..Default::default() },
-        );
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            state.insert(
+                project.id,
+                ProjectState { project: Some(project.clone()), ..Default::default() },
+            );
+        }
+        send(&self.inner.sink, CoreEvent::ProjectsChanged {});
         Ok(project)
+    }
+
+    /// Save-as: clone media + current cut state under a new name with a fresh
+    /// undo history. The original project is untouched.
+    pub fn duplicate_project(&self, project_id: Uuid, name: &str) -> Result<Project> {
+        self.ensure_loaded(project_id)?;
+        let (source, transcript) = {
+            let state = self.inner.state.lock().unwrap();
+            let entry =
+                state.get(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            (
+                entry.project.clone().ok_or_else(|| CoreError::NotFound("project".into()))?,
+                entry.transcript.clone(),
+            )
+        };
+        let mut copy = source;
+        copy.id = Uuid::new_v4();
+        copy.name = name.to_string();
+        copy.created_at = Utc::now();
+        copy.updated_at = Utc::now();
+        self.inner.store.save_project(&copy)?;
+        if let Some(t) = &transcript {
+            self.inner.store.save_transcript(copy.id, t)?;
+        }
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            state.insert(
+                copy.id,
+                ProjectState {
+                    project: Some(copy.clone()),
+                    transcript,
+                    ..Default::default()
+                },
+            );
+        }
+        send(&self.inner.sink, CoreEvent::ProjectsChanged {});
+        Ok(copy)
     }
 
     fn ensure_loaded(&self, project_id: Uuid) -> Result<()> {
@@ -272,6 +321,7 @@ impl Editor {
     pub fn delete_project(&self, project_id: Uuid) -> Result<()> {
         self.inner.store.delete_project(project_id)?;
         self.inner.state.lock().unwrap().remove(&project_id);
+        send(&self.inner.sink, CoreEvent::ProjectsChanged {});
         Ok(())
     }
 
@@ -469,16 +519,15 @@ impl Editor {
             apply_op(project, transcript.as_mut(), &op, &prefs, &mut split_ids)?;
             project.timeline.normalize();
             project.updated_at = Utc::now();
-            let action = EditAction::new(
-                source,
-                op,
-                EditOp::SetClips { clips: before_clips, global_padding: before_padding },
-                EditOp::SetClips {
+            let action = EditAction::new(source, op);
+            undo.push(JournalEntry {
+                action: action.clone(),
+                inverse: EditOp::SetClips { clips: before_clips, global_padding: before_padding },
+                redo: EditOp::SetClips {
                     clips: project.timeline.clips.clone(),
                     global_padding: project.timeline.global_padding,
                 },
-            );
-            undo.push(action.clone());
+            });
             if undo.len() > UNDO_CAP {
                 undo.remove(0);
             }
@@ -501,7 +550,7 @@ impl Editor {
         Ok(outcome)
     }
 
-    fn persist_journal(&self, project_id: Uuid, undo: &[EditAction], redo: &[EditAction]) -> Result<()> {
+    fn persist_journal(&self, project_id: Uuid, undo: &[JournalEntry], redo: &[JournalEntry]) -> Result<()> {
         let doc = serde_json::json!({ "undo": undo, "redo": redo }).to_string();
         self.inner.store.set_kv(&format!("journal:{project_id}"), &doc)
     }
@@ -574,16 +623,17 @@ impl Editor {
                 project.as_mut().ok_or_else(|| CoreError::NotFound("project".into()))?;
             let popped = if is_undo { undo.pop() } else { redo.pop() };
             match popped {
-                Some(action) => {
-                    let replay = if is_undo { &action.inverse } else { &action.redo };
+                Some(entry) => {
+                    let replay = if is_undo { &entry.inverse } else { &entry.redo };
                     apply_op(project, transcript.as_mut(), replay, &prefs, &mut vec![])?;
                     project.timeline.normalize();
                     project.updated_at = Utc::now();
                     self.inner.store.save_project(project)?;
+                    let action = entry.action.clone();
                     if is_undo {
-                        redo.push(action.clone());
+                        redo.push(entry);
                     } else {
-                        undo.push(action.clone());
+                        undo.push(entry);
                     }
                     self.persist_journal(project_id, undo, redo)?;
                     (Some(action), project.timeline.clone())

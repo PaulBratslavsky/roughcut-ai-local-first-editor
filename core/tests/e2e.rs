@@ -285,7 +285,19 @@ async fn apply_edits_batches_ops_in_one_call() {
     )
     .await;
     assert_eq!(result["applied"], 3);
-    assert_eq!(result["timeline"]["cut_count"].as_u64().unwrap(), 2);
+    assert_eq!(result["cut_count"].as_u64().unwrap(), 2);
+    assert!(result.get("timeline").is_none(), "batch receipt must stay lean");
+    assert!(result["actions"][0].get("inverse").is_none(), "journal stays internal");
+
+    // Save-as: duplicate carries the cut state, original untouched.
+    let copy = call(
+        &editor,
+        "duplicate_project",
+        json!({ "project_id": pid, "name": "batch-lean-cut" }),
+    )
+    .await;
+    assert_ne!(copy["id"], json!(pid));
+    assert_eq!(copy["timeline"]["cut_count"].as_u64().unwrap(), 2);
     // Each op is its own undo step.
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert_eq!(undone["action"]["kind"], "pad");

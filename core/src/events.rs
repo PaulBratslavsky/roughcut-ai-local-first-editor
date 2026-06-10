@@ -39,6 +39,8 @@ pub enum CoreEvent {
     TimelineChanged {
         project_id: Uuid,
     },
+    /// Project created / duplicated / deleted — refetch the library list.
+    ProjectsChanged {},
     TranscriptChanged {
         project_id: Uuid,
     },
@@ -69,6 +71,7 @@ impl CoreEvent {
             CoreEvent::Progress { .. } => "progress",
             CoreEvent::AgentStep { .. } => "agent-step",
             CoreEvent::TimelineChanged { .. } => "timeline-changed",
+            CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
         }

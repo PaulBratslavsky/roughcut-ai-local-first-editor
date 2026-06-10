@@ -100,9 +100,15 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   const offTranscript = onAppEvent("transcript-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["transcript"] });
   });
+  // Projects created/duplicated/deleted by ANY caller (incl. MCP clients)
+  // refresh the library dropdown live.
+  const offProjects = onAppEvent("projects-changed", () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+  });
   return () => {
     offTimeline();
     offTranscript();
+    offProjects();
   };
 }
 

@@ -219,7 +219,10 @@ impl VideoEngine for FfmpegCli {
     }
 
     async fn media_assets(&self, media: &Media) -> Result<MediaAssets> {
-        let cache = crate::store::data_dir().join("cache").join(media.id.to_string());
+        // Cache by file identity (path + size + mtime), NOT media id: every
+        // project pointing at the same footage — duplicates, re-imports,
+        // MCP-created projects — shares one set of peaks/thumbnails.
+        let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
         std::fs::create_dir_all(&cache)?;
 
         // ---- waveform peaks (u8 per 1/PEAKS_PER_SECOND s) -------------------
@@ -269,6 +272,23 @@ impl VideoEngine for FfmpegCli {
             thumbnails,
         })
     }
+}
+
+/// Stable identity for derived assets: hash of path + size + mtime, so the
+/// cache survives re-imports and invalidates when the file changes.
+pub fn asset_cache_key(media: &Media) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(media.file_path.as_bytes());
+    if let Ok(meta) = std::fs::metadata(&media.file_path) {
+        hasher.update(meta.len().to_le_bytes());
+        if let Ok(modified) = meta.modified() {
+            if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                hasher.update(d.as_secs().to_le_bytes());
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
 /// Max |sample| per bucket, scaled to u8. Pure — unit-tested without ffmpeg.
