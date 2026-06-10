@@ -1,0 +1,20 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Tauri
+app/src-tauri/gen/
+
+# Models are downloaded at runtime, never committed
+/models/
+
+# OS / editor
+.DS_Store
+*.log
+
+# Local env (no secrets in the repo; external keys live in the OS keychain)
+.env
+.env.*
