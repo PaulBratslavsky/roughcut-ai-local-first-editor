@@ -4,7 +4,7 @@
 import { Store } from "@tanstack/react-store";
 import type { Clip } from "../ipc/types";
 
-export type ActiveTab = "script" | "chat";
+export type ActiveTab = "tools" | "chat";
 
 export interface ViewState {
   projectId: string | null;
@@ -40,7 +40,7 @@ export const viewStore = new Store<ViewState>({
   selectedSegmentIds: [],
   showCuts: true,
   skipCuts: true,
-  activeTab: "script",
+  activeTab: "tools",
 });
 
 function patch(p: Partial<ViewState>): void {

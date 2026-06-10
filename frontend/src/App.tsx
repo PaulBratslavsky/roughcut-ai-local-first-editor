@@ -72,30 +72,34 @@ function Editor({ projectId }: { projectId: string }) {
       <TopBar projectId={projectId} projectName={project?.name ?? "…"} />
       <main className="main-row">
         <section className="left-panel card light">
-          <div className="tab-switcher">
-            <button
-              className={`tab${activeTab === "script" ? " active" : ""}`}
-              onClick={() => setActiveTab("script")}
-            >
-              Script
-            </button>
-            <button
-              className={`tab${activeTab === "chat" ? " active" : ""}`}
-              onClick={() => setActiveTab("chat")}
-            >
-              Chat
-            </button>
-          </div>
-          {activeTab === "script" ? (
-            <TranscriptPanel projectId={projectId} />
-          ) : (
-            <ChatPanel projectId={projectId} />
-          )}
+          <TranscriptPanel projectId={projectId} />
         </section>
         <aside className="right-col">
           <PreviewPanel projectId={projectId} />
-          <InspectorPanel projectId={projectId} />
-          <MetadataPanel projectId={projectId} />
+          <div className="right-tabs card">
+            <div className="tab-switcher">
+              <button
+                className={`tab${activeTab === "tools" ? " active" : ""}`}
+                onClick={() => setActiveTab("tools")}
+              >
+                Tools
+              </button>
+              <button
+                className={`tab${activeTab === "chat" ? " active" : ""}`}
+                onClick={() => setActiveTab("chat")}
+              >
+                Chat
+              </button>
+            </div>
+            {activeTab === "chat" ? (
+              <ChatPanel projectId={projectId} />
+            ) : (
+              <div className="tools-scroll">
+                <InspectorPanel projectId={projectId} />
+                <MetadataPanel projectId={projectId} />
+              </div>
+            )}
+          </div>
         </aside>
       </main>
       <footer className="bottom-area">

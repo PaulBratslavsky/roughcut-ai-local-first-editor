@@ -1465,3 +1465,30 @@ input[type="search"],
   background: var(--accent);
   transition: width 0.3s ease;
 }
+
+
+/* Right column: video on top, Chat/Tools tabs below. */
+.right-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.right-tabs .tab-switcher {
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+}
+.tools-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.tools-scroll .card,
+.tools-scroll .metadata-card,
+.tools-scroll .inspector-card {
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.right-tabs .chat-panel { flex: 1; min-height: 0; }
