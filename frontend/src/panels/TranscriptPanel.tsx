@@ -31,15 +31,17 @@ function WordSpan({
   isFiller,
   highlight,
   cutWord,
+  current,
 }: {
   word: Word;
   isFiller: boolean;
   highlight: boolean;
   cutWord: boolean;
+  current: boolean;
 }) {
   return (
     <span
-      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}`}
+      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}${current ? " current" : ""}`}
       data-wstart={word.start}
       data-wend={word.end}
       onClick={(e) => {
@@ -73,6 +75,17 @@ function SegmentBlock({
   excludedRanges: Array<[number, number]>;
   showCuts: boolean;
 }) {
+  // Word under the playhead — selector returns an index, so this block only
+  // re-renders when the spoken word changes (and only while it's active).
+  const currentWordIdx = useStore(viewStore, (s) => {
+    if (!active) return -1;
+    for (let i = 0; i < seg.words.length; i++) {
+      const w = seg.words[i]!;
+      if (s.playhead >= w.start && s.playhead < w.end) return i;
+    }
+    return -1;
+  });
+
   if (seg.is_silence) {
     return (
       <div
@@ -117,6 +130,7 @@ function SegmentBlock({
               isFiller={fillerSet.has(normalize(w.text))}
               highlight={q.length > 0 && normalize(w.text).includes(q)}
               cutWord={wordCut}
+              current={i === currentWordIdx}
             />
           );
         })}
@@ -229,6 +243,17 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     const seg = segments.find((x) => s.playhead >= x.start && s.playhead < x.end);
     return seg?.id ?? null;
   });
+
+  // Follow the playhead: scroll the active segment into view while scrubbing
+  // or playing — but yield to the user's own scrolling for a moment.
+  const userScrollAtRef = useRef(0);
+  useEffect(() => {
+    if (!activeSegId) return;
+    if (Date.now() - userScrollAtRef.current < 2500) return;
+    const idx = visible.findIndex((seg) => seg.id === activeSegId);
+    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "auto" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSegId]);
 
   // Delete/Backspace cuts the selected segments.
   useEffect(() => {
@@ -385,7 +410,13 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      <div className="transcript-scroll" ref={parentRef} onContextMenu={onContextMenu}>
+      <div
+        className="transcript-scroll"
+        ref={parentRef}
+        onContextMenu={onContextMenu}
+        onWheel={() => { userScrollAtRef.current = Date.now(); }}
+        onTouchMove={() => { userScrollAtRef.current = Date.now(); }}
+      >
         {visible.length === 0 ? (
           segments.length === 0 && (transcribeProgress || transcribeStarting) ? (
             <div className="transcribe-progress">
