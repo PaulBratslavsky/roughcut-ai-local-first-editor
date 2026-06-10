@@ -9,6 +9,7 @@ import { TranscriptPanel } from "./panels/TranscriptPanel";
 import { ChatPanel } from "./panels/ChatPanel";
 import { PreviewPanel } from "./panels/PreviewPanel";
 import { InspectorPanel } from "./panels/InspectorPanel";
+import { MetadataPanel } from "./panels/MetadataPanel";
 import { Timeline } from "./timeline/Timeline";
 import { TransportBar } from "./timeline/TransportBar";
 
@@ -58,6 +59,7 @@ function Editor({ projectId }: { projectId: string }) {
         <aside className="right-col">
           <PreviewPanel projectId={projectId} />
           <InspectorPanel projectId={projectId} />
+          <MetadataPanel projectId={projectId} />
         </aside>
       </main>
       <footer className="bottom-area">
