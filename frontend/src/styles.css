@@ -1016,3 +1016,112 @@ input, select { font: inherit; }
   color: #ff6b6b;
   border-color: #ff6b6b;
 }
+
+
+/* Hover player controls on the preview */
+.preview-frame {
+  position: relative;
+  cursor: pointer;
+}
+
+.preview-center-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.preview-frame:hover .preview-center-play {
+  opacity: 1;
+}
+
+.preview-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 26px 12px 10px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  cursor: default;
+}
+
+.preview-frame:hover .preview-overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.preview-scrubber {
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.preview-scrubber::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+}
+
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overlay-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  cursor: pointer;
+}
+
+.overlay-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.overlay-btn.play {
+  width: 34px;
+  height: 34px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #111;
+}
+
+.overlay-time {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.92);
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+}
+
+.overlay-rate {
+  margin-left: auto;
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  border: none;
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+}

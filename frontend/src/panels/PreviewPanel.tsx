@@ -8,9 +8,12 @@ import { isTauri, mediaSrc } from "../ipc/api";
 import { useProject, useTimeline } from "../ipc/queries";
 import {
   excludedRanges,
+  seekTo,
+  setPlaybackRate,
   setPlayhead,
   setPlaying,
   skipTarget,
+  togglePlaying,
   viewStore,
   type Range,
 } from "../state/viewStore";
@@ -100,9 +103,13 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     setPlayhead(t);
   };
 
+  const nudge = (delta: number) => {
+    seekTo(Math.min(Math.max(0, viewStore.state.playhead + delta), duration));
+  };
+
   return (
     <div className="preview-card card">
-      <div className="preview-frame">
+      <div className="preview-frame" onClick={() => togglePlaying()}>
         {src ? (
           <video
             ref={videoRef}
@@ -122,6 +129,65 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             <span>Demo footage (mock mode)</span>
           </div>
         )}
+
+        {/* Big center affordance while paused */}
+        {!playing && (
+          <div className="preview-center-play" aria-hidden>
+            <svg width="56" height="56" viewBox="0 0 56 56">
+              <circle cx="28" cy="28" r="27" fill="rgba(0,0,0,0.45)" />
+              <path d="M22 17v22l18-11z" fill="white" />
+            </svg>
+          </div>
+        )}
+
+        {/* Hover controls overlay */}
+        <div className="preview-overlay" onClick={(e) => e.stopPropagation()}>
+          <input
+            className="preview-scrubber"
+            type="range"
+            min={0}
+            max={Math.max(0.01, duration)}
+            step={0.01}
+            value={Math.min(playhead, duration)}
+            onChange={(e) => seekTo(Number(e.target.value))}
+          />
+          <div className="preview-controls">
+            <button className="overlay-btn" title="Back 5s" onClick={() => nudge(-5)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M11 18V6l-8.5 6zM11.5 12l8.5 6V6z" transform="scale(-1,1) translate(-24,0)" />
+              </svg>
+            </button>
+            <button className="overlay-btn play" title={playing ? "Pause (Space)" : "Play (Space)"} onClick={() => togglePlaying()}>
+              {playing ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              )}
+            </button>
+            <button className="overlay-btn" title="Forward 5s" onClick={() => nudge(5)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M11 18V6l-8.5 6zM11.5 12l8.5 6V6z" />
+              </svg>
+            </button>
+            <span className="overlay-time">
+              {fmt(Math.min(playhead, duration))} / {fmt(duration)}
+            </span>
+            <select
+              className="overlay-rate"
+              value={rate}
+              title="Playback speed"
+              onChange={(e) => setPlaybackRate(Number(e.target.value))}
+            >
+              <option value={1}>1x</option>
+              <option value={1.5}>1.5x</option>
+              <option value={2}>2x</option>
+            </select>
+          </div>
+        </div>
       </div>
       <div className="preview-meta">
         <span className="cut-counter">{timeline?.cut_count ?? 0} Cuts</span>
