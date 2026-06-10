@@ -107,7 +107,9 @@ impl Editor {
             false,
         );
         // The app shell has a UI that can answer confirmation prompts.
-        editor.inner.require_confirm.store(true, std::sync::atomic::Ordering::Relaxed);
+        // ROUGHCUT_NO_CONFIRM=1 bypasses them (scripted/CI runs).
+        let confirm = std::env::var("ROUGHCUT_NO_CONFIRM").map(|v| v != "1").unwrap_or(true);
+        editor.inner.require_confirm.store(confirm, std::sync::atomic::Ordering::Relaxed);
         Ok(editor)
     }
 

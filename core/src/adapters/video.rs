@@ -42,8 +42,15 @@ pub const PEAKS_PER_SECOND: u32 = 50;
 pub trait VideoEngine: Send + Sync {
     /// Probe a local file's metadata (no decode).
     async fn probe(&self, file_path: &str) -> Result<Media>;
-    /// Render the included clips of `timeline` to an MP4 at `out_path`.
-    async fn render_mp4(&self, media: &Media, timeline: &Timeline, out_path: &str) -> Result<()>;
+    /// Render the included clips of `timeline` to an MP4 at `out_path`,
+    /// emitting `progress` events (task "export") as ffmpeg advances.
+    async fn render_mp4(
+        &self,
+        media: &Media,
+        timeline: &Timeline,
+        out_path: &str,
+        sink: &crate::events::SharedSink,
+    ) -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
     async fn extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()>;
     /// Waveform peaks + thumbnail filmstrip, generated once and cached in
@@ -180,11 +187,18 @@ impl VideoEngine for FfmpegCli {
         })
     }
 
-    async fn render_mp4(&self, media: &Media, timeline: &Timeline, out_path: &str) -> Result<()> {
+    async fn render_mp4(
+        &self,
+        media: &Media,
+        timeline: &Timeline,
+        out_path: &str,
+        sink: &crate::events::SharedSink,
+    ) -> Result<()> {
         let clips: Vec<_> = timeline.included_clips().collect();
         if clips.is_empty() {
             return Err(CoreError::InvalidArg("timeline has no included clips".into()));
         }
+        let total_us = (timeline.included_duration() * 1_000_000.0).max(1.0);
         // Build a trim/concat filtergraph over the single source. Each clip's
         // audio gets a 20ms fade at both edges so joins never click — video
         // stays a hard cut, timing is untouched.
@@ -207,10 +221,55 @@ impl VideoEngine for FfmpegCli {
         filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
         let mut cmd = ffmpeg_cmd()?;
         cmd.args([
-            "-y", "-i", &media.file_path, "-filter_complex", &filter, "-map", "[v]", "-map",
+            "-y", "-nostats", "-progress", "pipe:1",
+            "-i", &media.file_path, "-filter_complex", &filter, "-map", "[v]", "-map",
             "[a]", "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", out_path,
         ]);
-        Self::run(&mut cmd, "ffmpeg render").await?;
+        // Stream ffmpeg's key=value progress lines into UI events.
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| CoreError::Unavailable(format!("ffmpeg render: {e}")))?;
+        let stdout = child.stdout.take();
+        let sink2 = sink.clone();
+        let progress_task = tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            if let Some(stdout) = stdout {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                let mut last = 0u8;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
+                        let frac = (us / total_us).clamp(0.0, 0.99);
+                        let pct = (frac * 100.0) as u8;
+                        if pct != last {
+                            last = pct;
+                            crate::events::send(
+                                &sink2,
+                                crate::events::CoreEvent::progress(
+                                    "export", None, frac, format!("rendering MP4… {pct}%"),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| CoreError::Other(format!("ffmpeg render: {e}")))?;
+        let _ = progress_task.await;
+        if !out.status.success() {
+            return Err(CoreError::Other(format!(
+                "ffmpeg render failed: {}",
+                String::from_utf8_lossy(&out.stderr).chars().take(800).collect::<String>()
+            )));
+        }
+        crate::events::send(
+            sink,
+            crate::events::CoreEvent::progress("export", None, 1.0, "render complete"),
+        );
         Ok(())
     }
 
@@ -349,7 +408,13 @@ impl VideoEngine for MockVideoEngine {
         })
     }
 
-    async fn render_mp4(&self, _m: &Media, _t: &Timeline, _o: &str) -> Result<()> {
+    async fn render_mp4(
+        &self,
+        _m: &Media,
+        _t: &Timeline,
+        _o: &str,
+        _sink: &crate::events::SharedSink,
+    ) -> Result<()> {
         Err(CoreError::Unavailable(
             "MP4 render needs ffmpeg on PATH (demo mode active). NLE XML/EDL/SRT export still works.".into(),
         ))
@@ -380,11 +445,17 @@ impl VideoEngine for AutoVideoEngine {
         }
     }
 
-    async fn render_mp4(&self, media: &Media, timeline: &Timeline, out_path: &str) -> Result<()> {
+    async fn render_mp4(
+        &self,
+        media: &Media,
+        timeline: &Timeline,
+        out_path: &str,
+        sink: &crate::events::SharedSink,
+    ) -> Result<()> {
         if crate::capabilities::probe().media_ready() {
-            FfmpegCli.render_mp4(media, timeline, out_path).await
+            FfmpegCli.render_mp4(media, timeline, out_path, sink).await
         } else {
-            MockVideoEngine.render_mp4(media, timeline, out_path).await
+            MockVideoEngine.render_mp4(media, timeline, out_path, sink).await
         }
     }
 

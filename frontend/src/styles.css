@@ -1448,3 +1448,20 @@ input[type="search"],
   cursor: pointer;
   flex: none;
 }
+
+
+/* Export progress bar inside the status chip. */
+.export-bar {
+  width: 90px;
+  height: 6px;
+  flex: none;
+  background: var(--border-soft);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.export-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}

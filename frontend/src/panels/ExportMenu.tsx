@@ -2,7 +2,8 @@
 // sensible Downloads path for the chosen format.
 
 import { useEffect, useRef, useState } from "react";
-import { revealPath } from "../ipc/api";
+import { onAppEvent, revealPath } from "../ipc/api";
+import type { ProgressEvent } from "../ipc/types";
 import { useExport } from "../ipc/queries";
 import type { ExportTarget } from "../ipc/types";
 
@@ -24,7 +25,12 @@ export function ExportMenu({
   projectName: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<{ text: string; path?: string } | null>(null);
+  const [status, setStatus] = useState<{
+    text: string;
+    path?: string;
+    fraction?: number;
+    busy?: boolean;
+  } | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const exportMutation = useExport();
 
@@ -37,17 +43,31 @@ export function ExportMenu({
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [open]);
 
+  // Only terminal states auto-clear — an in-flight export stays visible
+  // for as long as it actually runs.
   useEffect(() => {
-    if (!status) return;
-    const t = setTimeout(() => setStatus(null), status.path ? 12000 : 4000);
+    if (!status || status.busy) return;
+    const t = setTimeout(() => setStatus(null), status.path ? 15000 : 6000);
     return () => clearTimeout(t);
   }, [status]);
+
+  // Live render progress from the core (ffmpeg percentage).
+  useEffect(() => {
+    return onAppEvent<ProgressEvent>("progress", (p) => {
+      if (p.task !== "export") return;
+      setStatus((cur) =>
+        cur?.busy || p.fraction < 1
+          ? { text: p.message, fraction: p.fraction, busy: p.fraction < 1, path: cur?.path }
+          : cur,
+      );
+    });
+  }, []);
 
   const slug = projectName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
 
   const run = (target: ExportTarget, ext: string, label: string) => {
     setOpen(false);
-    setStatus({ text: `Exporting ${label}…` });
+    setStatus({ text: `Exporting ${label}…`, busy: true, fraction: 0 });
     exportMutation.mutate(
       {
         project_id: projectId,
@@ -56,11 +76,12 @@ export function ExportMenu({
       },
       {
         onSuccess: (res) => {
-          setStatus({ text: `Saved ${res.path.split("/").pop()}`, path: res.path });
+          setStatus({ text: `Saved ${res.path.split("/").pop()}`, path: res.path, busy: false });
           // Surface the result physically: open Finder with the file selected.
           void revealPath(res.path);
         },
-        onError: (err) => setStatus({ text: `Export failed: ${String((err as Error)?.message ?? err)}` }),
+        onError: (err) =>
+          setStatus({ text: `Export failed: ${String((err as Error)?.message ?? err)}`, busy: false }),
       },
     );
   };
@@ -69,6 +90,14 @@ export function ExportMenu({
     <div className="export-menu" ref={rootRef}>
       {status && (
         <span className="export-status" title={status.path}>
+          {status.busy && (
+            <span className="export-bar">
+              <span
+                className="export-bar-fill"
+                style={{ width: `${Math.round((status.fraction ?? 0) * 100)}%` }}
+              />
+            </span>
+          )}
           {status.text}
           {status.path && (
             <button className="reveal-btn" onClick={() => void revealPath(status.path!)}>

@@ -78,7 +78,7 @@ impl Editor {
         if target == "mp4" {
             let (project, _) = self.snapshot(project_id)?;
             let media = require_media(&project)?.clone();
-            self.video().render_mp4(&media, &project.timeline, out_path).await?;
+            self.video().render_mp4(&media, &project.timeline, out_path, &self.sink()).await?;
             return Ok(out_path.to_string());
         }
         let (project, transcript) = self.snapshot(project_id)?;
