@@ -286,7 +286,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
     const excluded = !r.clip.included;
     const isSelected = s.selectedClipId === r.clip.id;
 
-    roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
+    roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 2);
     if (excluded) {
       ctx.fillStyle = theme().clipExcluded;
       ctx.fill();
@@ -305,7 +305,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
       ctx.restore();
       ctx.strokeStyle = isSelected ? theme().selected : theme().clipExcludedBorder;
       ctx.lineWidth = isSelected ? 2 : 1;
-      roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
+      roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 2);
       ctx.stroke();
     } else {
       const grad = ctx.createLinearGradient(0, TRACK_TOP, 0, TRACK_TOP + trackH);
@@ -315,7 +315,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
       ctx.fill();
       ctx.strokeStyle = isSelected ? theme().selected : theme().clipBorder;
       ctx.lineWidth = isSelected ? 2 : 1;
-      roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
+      roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 2);
       ctx.stroke();
     }
 
@@ -325,7 +325,7 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
     const clipDur = r.clip.source_out - r.clip.source_in;
 
     ctx.save();
-    roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
+    roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 2);
     ctx.clip();
 
     if (hasThumbs) {

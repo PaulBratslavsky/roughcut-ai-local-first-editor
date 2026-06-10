@@ -1351,3 +1351,71 @@ input, select { font: inherit; }
 .word.filler {
   border-radius: 3px;
 }
+
+
+/* ============================================================
+   SHARP & DENSE — flat surfaces, hairline seams, minimal radii,
+   no floating-card gaps. Lower visual noise, lower cognitive load.
+   ============================================================ */
+
+:root, [data-theme="light"], [data-theme="dark"] {
+  --radius: 4px;
+  --radius-sm: 3px;
+}
+
+/* Panels sit flush: hairline seams instead of gaps. */
+.main-row { gap: 1px; padding: 0; background: var(--border-soft); }
+.right-col { gap: 1px; background: var(--border-soft); }
+.bottom-area { padding: 0; border-top: 1px solid var(--border-soft); }
+.card { border: none; border-radius: 0; }
+.left-panel { min-width: 420px; }
+.topbar { border-bottom: 1px solid var(--border-soft); }
+
+/* Pills become rectangles. */
+.primary-btn,
+.export-btn,
+.meta-btn,
+.new-video-btn,
+.tier-btn,
+.restore-btn,
+.overlay-rate,
+.silence-chip,
+.cut-counter {
+  border-radius: var(--radius-sm);
+}
+.overlay-btn { border-radius: var(--radius-sm); }
+.context-menu { border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); }
+.setup-panel { border-radius: var(--radius); }
+.preview-version-toggle { border-radius: var(--radius-sm); }
+.project-select { border-radius: var(--radius-sm); }
+.icon-btn { border-radius: var(--radius-sm); }
+
+/* Tabs: flat text with an underline, not bubbles. */
+.tab {
+  background: transparent !important;
+  border-radius: 0;
+  padding: 8px 2px 7px;
+  margin-right: 16px;
+  border-bottom: 2px solid transparent;
+  font-weight: 600;
+}
+.tab.active {
+  border-bottom-color: var(--text);
+  color: var(--text);
+}
+
+/* Inputs: rectangles with hairline borders. */
+input[type="search"],
+.search-box,
+.text-input,
+.gguf-input,
+.chat-input {
+  border-radius: var(--radius-sm) !important;
+}
+
+/* Quieter chrome: no decorative shadows. */
+.preview-card,
+.metadata-card,
+.inspector-card {
+  box-shadow: none;
+}
