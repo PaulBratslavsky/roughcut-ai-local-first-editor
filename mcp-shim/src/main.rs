@@ -4,8 +4,12 @@
 //! running app's localhost MCP endpoint (with the per-install auth token),
 //! and writes responses back to stdout.
 //!
+//! The app binds a NEW random port each launch and rewrites its endpoint
+//! file, so discovery is re-run lazily: on the first request, and again
+//! whenever a send fails. A long-lived shim therefore survives app restarts.
+//!
 //! Endpoint discovery, in order:
-//!   1. --endpoint <url> --token <token> arguments
+//!   1. --endpoint <url> --token <token> arguments (pinned; no re-discovery)
 //!   2. ROUGHCUT_MCP_ENDPOINT / ROUGHCUT_MCP_TOKEN environment variables
 //!   3. `<data dir>/roughcut/mcp.json` written by the running app
 //!
@@ -16,9 +20,12 @@
 
 use std::io::{BufRead, Write};
 
+#[derive(Clone)]
 struct Endpoint {
     url: String,
     token: String,
+    /// From args/env — never re-discovered.
+    pinned: bool,
 }
 
 fn discover() -> Result<Endpoint, String> {
@@ -27,12 +34,12 @@ fn discover() -> Result<Endpoint, String> {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
     };
     if let (Some(url), Some(token)) = (flag("--endpoint"), flag("--token")) {
-        return Ok(Endpoint { url, token });
+        return Ok(Endpoint { url, token, pinned: true });
     }
     if let (Ok(url), Ok(token)) =
         (std::env::var("ROUGHCUT_MCP_ENDPOINT"), std::env::var("ROUGHCUT_MCP_TOKEN"))
     {
-        return Ok(Endpoint { url, token });
+        return Ok(Endpoint { url, token, pinned: true });
     }
     let path = dirs::data_dir()
         .ok_or("no data dir on this platform")?
@@ -50,6 +57,7 @@ fn discover() -> Result<Endpoint, String> {
     Ok(Endpoint {
         url: v["url"].as_str().unwrap_or_default().to_string(),
         token: v["token"].as_str().unwrap_or_default().to_string(),
+        pinned: false,
     })
 }
 
@@ -62,29 +70,10 @@ fn error_response(id: &serde_json::Value, message: &str) -> String {
 }
 
 fn main() {
-    let endpoint = match discover() {
-        Ok(e) => e,
-        Err(msg) => {
-            // Without an endpoint we can still speak enough JSON-RPC to fail clearly.
-            let stdin = std::io::stdin();
-            let mut stdout = std::io::stdout();
-            for line in stdin.lock().lines().map_while(Result::ok) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
-                if let Some(id) = v.get("id") {
-                    let _ = writeln!(stdout, "{}", error_response(id, &msg));
-                    let _ = stdout.flush();
-                }
-            }
-            return;
-        }
-    };
-
     let client = reqwest::blocking::Client::new();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    let mut endpoint: Option<Endpoint> = None;
 
     for line in stdin.lock().lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -95,20 +84,54 @@ fn main() {
             Err(_) => continue,
         };
         let is_notification = parsed.get("id").is_none();
-        let response = client
-            .post(&endpoint.url)
-            .bearer_auth(&endpoint.token)
-            .header("content-type", "application/json")
-            .body(line)
-            .send();
+        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+        // Send with one re-discovery retry: the app may have (re)started since
+        // the endpoint was last read, on a fresh port.
+        let mut response: Result<String, String> = Err(String::new());
+        for attempt in 0..2 {
+            if endpoint.is_none() {
+                match discover() {
+                    Ok(ep) => endpoint = Some(ep),
+                    Err(msg) => {
+                        response = Err(msg);
+                        break;
+                    }
+                }
+            }
+            let ep = endpoint.as_ref().unwrap();
+            match client
+                .post(&ep.url)
+                .bearer_auth(&ep.token)
+                .header("content-type", "application/json")
+                .body(line.clone())
+                .send()
+                .and_then(|r| r.text())
+            {
+                Ok(body) => {
+                    response = Ok(body);
+                    break;
+                }
+                Err(e) => {
+                    response = Err(format!(
+                        "RoughCut app unreachable ({e}). Start the app, then retry."
+                    ));
+                    // Stale port? Re-discover and retry once (unless pinned).
+                    if ep.pinned || attempt == 1 {
+                        break;
+                    }
+                    endpoint = None;
+                }
+            }
+        }
+
         if is_notification {
             continue; // notifications get no response on stdout
         }
-        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
-        let out = match response.and_then(|r| r.text()) {
+        let out = match response {
             Ok(body) if !body.trim().is_empty() => body,
             Ok(_) => error_response(&id, "empty response from app"),
-            Err(e) => error_response(&id, &format!("app unreachable: {e}")),
+            Err(msg) => error_response(&id, &msg),
         };
         let _ = writeln!(stdout, "{}", out.trim());
         let _ = stdout.flush();
