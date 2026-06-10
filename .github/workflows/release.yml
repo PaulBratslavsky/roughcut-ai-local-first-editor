@@ -1,0 +1,56 @@
+# Release: tag vX.Y.Z → build the macOS app bundle (.dmg) and attach it to a
+# GitHub release. macOS-first per project direction; the CI matrix still
+# compile-checks Linux/Windows on every push.
+#
+# SIGNING / NOTARIZATION (currently UNSIGNED — Gatekeeper will warn):
+# when an Apple Developer ID is available, add these repo secrets and the
+# build picks them up automatically via tauri's environment integration:
+#   APPLE_CERTIFICATE              base64 .p12
+#   APPLE_CERTIFICATE_PASSWORD
+#   APPLE_SIGNING_IDENTITY         "Developer ID Application: …"
+#   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   (notarization)
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend
+        run: npm ci && npm run build
+        working-directory: frontend
+      - name: Build app bundle (.app + .dmg)
+        run: npx --yes @tauri-apps/cli@^2 build
+        working-directory: app/src-tauri
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build MCP shim (release)
+        run: cargo build --release -p roughcut-mcp-shim
+      - name: Attach artifacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/roughcut-mcp-shim
+          generate_release_notes: true

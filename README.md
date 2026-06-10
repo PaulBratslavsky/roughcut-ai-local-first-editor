@@ -144,6 +144,16 @@ monitor.
 5. Frame-exact time internally, seconds at the API edge.
 6. No accounts, no secrets in the repo.
 
+## Releases & packaging
+
+Tagging `vX.Y.Z` builds an **unsigned macOS .dmg** plus the MCP shim via
+`.github/workflows/release.yml` (signing/notarization activates automatically
+once Apple Developer secrets are added — see the workflow header).
+Deliberately NOT bundled, per the lean-app design: ffmpeg (Setup screen
+guides a brew install; picked up live), whisper/Gemma weights (downloaded
+in-app, checksum-verified), and the llama-server sidecar (installed in-app
+when there's no Ollama).
+
 ## License
 
 [GPL-3.0](LICENSE). Dependency licensing notes (FFmpeg build flavor, Gemma
