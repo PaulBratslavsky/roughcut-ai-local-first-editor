@@ -55,7 +55,11 @@ export function ExportMenu({
         out_path: `~/Downloads/${slug}-export.${ext}`,
       },
       {
-        onSuccess: (res) => setStatus({ text: `Saved ${res.path.split("/").pop()}`, path: res.path }),
+        onSuccess: (res) => {
+          setStatus({ text: `Saved ${res.path.split("/").pop()}`, path: res.path });
+          // Surface the result physically: open Finder with the file selected.
+          void revealPath(res.path);
+        },
         onError: (err) => setStatus({ text: `Export failed: ${String((err as Error)?.message ?? err)}` }),
       },
     );
