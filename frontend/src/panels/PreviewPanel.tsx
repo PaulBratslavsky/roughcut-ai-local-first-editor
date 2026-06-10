@@ -55,6 +55,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     if (!v) return;
     const t = viewStore.state.playhead;
     if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;
+    v.volume = 1; // a manual seek always lands at full volume
   }, [seekNonce]);
 
   // Scrub audition: each arrow-key jog plays a short audio burst at the new
@@ -118,6 +119,43 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [src, playing]);
+
+  // Smooth skip-cut playback: a rAF watcher fades audio out over the last
+  // ~50ms before an excluded range, jumps, then fades back in — no abrupt
+  // pop at cuts. (timeupdate is far too coarse for this.)
+  useEffect(() => {
+    if (!src) return;
+    const FADE_S = 0.05;
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const v = videoRef.current;
+      if (!v || v.paused) return;
+      const st = viewStore.state;
+      if (!st.skipCuts) {
+        if (v.volume < 1) v.volume = Math.min(1, v.volume + 0.15);
+        return;
+      }
+      const t = v.currentTime;
+      const upcoming = rangesRef.current.find((r) => t >= r.start - FADE_S && t < r.end);
+      if (upcoming) {
+        if (t < upcoming.start) {
+          // Approaching the cut: proportional fade-out.
+          v.volume = Math.max(0, (upcoming.start - t) / FADE_S);
+        } else {
+          // Inside the cut: jump silently to the other side.
+          v.volume = 0;
+          v.currentTime = upcoming.end;
+          setPlayhead(upcoming.end);
+        }
+      } else if (v.volume < 1) {
+        // Past the cut: quick ramp back up (~6 frames).
+        v.volume = Math.min(1, v.volume + 0.15);
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [src]);
 
   // Drive the playhead from the video element; skip excluded ranges.
   const onTimeUpdate = () => {

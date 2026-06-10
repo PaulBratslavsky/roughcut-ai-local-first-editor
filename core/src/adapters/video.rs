@@ -185,14 +185,20 @@ impl VideoEngine for FfmpegCli {
         if clips.is_empty() {
             return Err(CoreError::InvalidArg("timeline has no included clips".into()));
         }
-        // Build a trim/concat filtergraph over the single source.
+        // Build a trim/concat filtergraph over the single source. Each clip's
+        // audio gets a 20ms fade at both edges so joins never click — video
+        // stays a hard cut, timing is untouched.
         let mut filter = String::new();
         for (i, c) in clips.iter().enumerate() {
+            let dur = c.duration();
+            let fade = (0.02_f64).min(dur / 4.0);
             filter.push_str(&format!(
                 "[0:v]trim=start={in_}:end={out},setpts=PTS-STARTPTS[v{i}];\
-                 [0:a]atrim=start={in_}:end={out},asetpts=PTS-STARTPTS[a{i}];",
+                 [0:a]atrim=start={in_}:end={out},asetpts=PTS-STARTPTS,\
+                 afade=t=in:st=0:d={fade:.3},afade=t=out:st={fo:.3}:d={fade:.3}[a{i}];",
                 in_ = c.source_in,
                 out = c.source_out,
+                fo = (dur - fade).max(0.0),
             ));
         }
         for i in 0..clips.len() {
