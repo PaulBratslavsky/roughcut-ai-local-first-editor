@@ -764,9 +764,17 @@ fn apply_op(
                 &prefs.custom_filler_words,
                 prefs.silence_min_duration_s,
             );
-            let keep_id = project.timeline.id;
-            project.timeline = outcome.timeline;
-            project.timeline.id = keep_id;
+            // COMPOSE with the existing cut: AI exclusions are added on top of
+            // whatever is already cut (manual or MCP edits survive — and the
+            // whole pass is still one undo step).
+            for c in outcome.timeline.clips.iter().filter(|c| !c.included) {
+                project.timeline.cut_linked(
+                    c.source_in,
+                    c.source_out,
+                    &c.linked_segment_ids,
+                    ClipOrigin::AiCut,
+                );
+            }
             let padding = prefs.default_padding;
             if padding.start_s > 0.0 || padding.end_s > 0.0 {
                 project.timeline.apply_padding(padding.start_s, padding.end_s, padding.linked);

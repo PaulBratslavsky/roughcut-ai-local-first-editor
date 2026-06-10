@@ -289,6 +289,22 @@ async fn apply_edits_batches_ops_in_one_call() {
     assert!(result.get("timeline").is_none(), "batch receipt must stay lean");
     assert!(result["actions"][0].get("inverse").is_none(), "journal stays internal");
 
+    // A rough-cut pass COMPOSES: the manual cuts above survive it.
+    let rough = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    let clips = rough["timeline"]["clips"].as_array().unwrap();
+    // (padding breathes gap edges, so check the midpoints, not the bounds)
+    let still_cut = |mid: f64, min_len: f64| {
+        clips.iter().any(|c| {
+            c["included"] == false
+                && c["source_in"].as_f64().unwrap() <= mid
+                && c["source_out"].as_f64().unwrap() >= mid
+                && c["source_out"].as_f64().unwrap() - c["source_in"].as_f64().unwrap() >= min_len
+        })
+    };
+    assert!(still_cut(12.5, 4.0), "manual cut 10-15 wiped by rough cut");
+    assert!(still_cut(42.0, 3.0), "manual cut 40-44 wiped by rough cut");
+    assert!(rough["cut_count"].as_u64().unwrap() > 2, "AI cuts should add to manual ones");
+
     // Save-as: duplicate carries the cut state, original untouched.
     let copy = call(
         &editor,
