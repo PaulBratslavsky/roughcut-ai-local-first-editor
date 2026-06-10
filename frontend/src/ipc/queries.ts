@@ -24,6 +24,7 @@ import type {
   Timeline,
   Transcript,
   UndoResult,
+  MediaAssets,
 } from "./types";
 
 export const queryKeys = {
@@ -50,6 +51,16 @@ export function useProject(projectId: string | null) {
     queryKey: queryKeys.project(projectId ?? "none"),
     queryFn: () => callTool<Project>("open_project", { project_id: projectId }),
     enabled: projectId !== null,
+  });
+}
+
+export function useMediaAssets(projectId: string | null) {
+  return useQuery({
+    queryKey: ["media-assets", projectId],
+    queryFn: () => callTool<MediaAssets>("get_media_assets", { project_id: projectId }),
+    enabled: !!projectId,
+    staleTime: Infinity,
+    retry: false,
   });
 }
 

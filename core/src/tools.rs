@@ -353,6 +353,10 @@ handler!(h_save_project, |e, a, _s| {
 
 handler!(h_list_projects, |e, _a, _s| Ok(json!({ "projects": e.list_projects()? })));
 
+handler!(h_get_media_assets, |e, a, _s| {
+    Ok(serde_json::to_value(e.media_assets(arg_uuid(a, "project_id")?).await?)?)
+});
+
 handler!(h_get_timeline, |e, a, _s| {
     Ok(serde_json::to_value(e.get_timeline(arg_uuid(a, "project_id")?)?)?)
 });
@@ -485,6 +489,9 @@ static REGISTRY: &[ToolSpec] = &[
         agent: false, meta: false, h_save_project),
     tool!("list_projects", "List saved projects.", || obj(json!({}), &[]),
         agent: false, meta: false, h_list_projects),
+    tool!("get_media_assets", "Waveform peaks + thumbnail filmstrip file paths for the project's media (timeline view data; generated and cached on first call).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_get_media_assets),
     tool!("get_timeline", "Get the current timeline (clips, padding, cut count).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_get_timeline),

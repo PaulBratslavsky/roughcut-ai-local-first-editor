@@ -213,6 +213,18 @@ impl Editor {
         self.with_project(project_id, |p, _| Ok(p.timeline.clone()))
     }
 
+    /// Waveform peaks + thumbnails for the project's media (generated on
+    /// first call, cached after). Returns file PATHS for the asset protocol.
+    pub async fn media_assets(
+        &self,
+        project_id: Uuid,
+    ) -> Result<crate::adapters::video::MediaAssets> {
+        let media = self
+            .with_project(project_id, |p, _| Ok(p.media.clone()))?
+            .ok_or_else(|| CoreError::InvalidArg("project has no media".into()))?;
+        self.inner.video.media_assets(&media).await
+    }
+
     pub fn get_transcript(&self, project_id: Uuid) -> Result<Option<Transcript>> {
         self.ensure_loaded(project_id)?;
         let state = self.inner.state.lock().unwrap();

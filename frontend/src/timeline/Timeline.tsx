@@ -2,8 +2,9 @@
 // Interactions: click/drag to seek, edge-drag to trim (-> trim_clip),
 // wheel to zoom around the playhead / horizontal scroll.
 
-import { useEffect, useMemo, useRef } from "react";
-import { useTimeline, useTrimClip } from "../ipc/queries";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMediaAssets, useTimeline, useTrimClip } from "../ipc/queries";
+import { loadTimelineAssets, type TimelineAssets } from "./assets";
 import {
   seekTo,
   setScrollX,
@@ -27,7 +28,23 @@ interface DragState {
 
 export function Timeline({ projectId }: { projectId: string }) {
   const { data: timeline } = useTimeline(projectId);
+  const { data: assetMeta } = useMediaAssets(projectId);
   const trimClip = useTrimClip();
+
+  // Real waveform peaks + thumbnails: fetched over the asset protocol once
+  // the core reports them; the renderer falls back to synthetic bars until then.
+  const [assets, setAssets] = useState<TimelineAssets | null>(null);
+  const assetsRef = useRef<TimelineAssets | null>(null);
+  assetsRef.current = assets;
+  useEffect(() => {
+    let cancelled = false;
+    setAssets(null);
+    if (!assetMeta) return;
+    void loadTimelineAssets(assetMeta).then((loaded) => {
+      if (!cancelled) setAssets(loaded);
+    });
+    return () => { cancelled = true; };
+  }, [assetMeta]);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -89,6 +106,7 @@ export function Timeline({ projectId }: { projectId: string }) {
         selectedClipId: s.selectedClipId,
         hoverEdge: hoverEdgeRef.current,
         drag: dragRef.current?.kind === "trim" ? dragRef.current.preview : null,
+        assets: assetsRef.current,
       });
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -100,11 +118,11 @@ export function Timeline({ projectId }: { projectId: string }) {
     };
   }, []);
 
-  // Redraw when timeline data changes.
+  // Redraw when timeline data or loaded view assets change.
   useEffect(() => {
     // nudge the store so the rAF loop sees a change
     viewStore.setState((s) => ({ ...s }));
-  }, [timeline]);
+  }, [timeline, assets]);
 
   // --- helpers ---------------------------------------------------------------
   const currentLayout = () => {

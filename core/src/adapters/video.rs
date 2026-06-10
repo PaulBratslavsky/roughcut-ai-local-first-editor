@@ -14,6 +14,30 @@ use std::process::Stdio;
 use tokio::process::Command;
 use uuid::Uuid;
 
+/// Derived view data for the timeline: audio peaks + a thumbnail filmstrip.
+/// FILE PATHS, not payloads — the frontend streams them over the asset
+/// protocol (binary never crosses JSON IPC; see docs/05).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MediaAssets {
+    /// Binary file of u8 peaks (0-255), `peaks_per_second` per second.
+    pub peaks_path: Option<String>,
+    pub peaks_per_second: u32,
+    pub thumbnails: Vec<ThumbnailRef>,
+}
+
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ThumbnailRef {
+    /// Source time (seconds) the frame represents.
+    pub time: f64,
+    pub path: String,
+}
+
+pub const PEAKS_PER_SECOND: u32 = 50;
+
 #[async_trait]
 pub trait VideoEngine: Send + Sync {
     /// Probe a local file's metadata (no decode).
@@ -22,6 +46,9 @@ pub trait VideoEngine: Send + Sync {
     async fn render_mp4(&self, media: &Media, timeline: &Timeline, out_path: &str) -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
     async fn extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()>;
+    /// Waveform peaks + thumbnail filmstrip, generated once and cached in
+    /// `<data dir>/cache/<media id>/`.
+    async fn media_assets(&self, media: &Media) -> Result<MediaAssets>;
 }
 
 pub fn ffmpeg_available() -> bool {
@@ -78,6 +105,22 @@ fn ffmpeg_cmd() -> Result<Command> {
 pub struct FfmpegCli;
 
 impl FfmpegCli {
+    async fn run_binary(cmd: &mut Command, what: &str) -> Result<Vec<u8>> {
+        let out = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| CoreError::Unavailable(format!("{what}: {e}")))?;
+        if !out.status.success() {
+            return Err(CoreError::Other(format!(
+                "{what} failed: {}",
+                String::from_utf8_lossy(&out.stderr).chars().take(800).collect::<String>()
+            )));
+        }
+        Ok(out.stdout)
+    }
+
     async fn run(cmd: &mut Command, what: &str) -> Result<String> {
         let out = cmd
             .stdout(Stdio::piped())
@@ -174,6 +217,80 @@ impl VideoEngine for FfmpegCli {
         Self::run(&mut cmd, "ffmpeg audio extract").await?;
         Ok(())
     }
+
+    async fn media_assets(&self, media: &Media) -> Result<MediaAssets> {
+        let cache = crate::store::data_dir().join("cache").join(media.id.to_string());
+        std::fs::create_dir_all(&cache)?;
+
+        // ---- waveform peaks (u8 per 1/PEAKS_PER_SECOND s) -------------------
+        let peaks_file = cache.join("peaks.bin");
+        if !peaks_file.is_file() {
+            const RATE: u32 = 8000;
+            let mut cmd = ffmpeg_cmd()?;
+            cmd.args([
+                "-i", &media.file_path, "-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f",
+                "s16le", "pipe:1",
+            ]);
+            let pcm = Self::run_binary(&mut cmd, "ffmpeg peaks decode").await?;
+            let peaks = compute_peaks(&pcm, RATE, PEAKS_PER_SECOND);
+            std::fs::write(&peaks_file, &peaks)?;
+        }
+
+        // ---- thumbnail filmstrip --------------------------------------------
+        // Interval scales with duration: ~1 thumb per 1-10s, max ~240 frames.
+        let interval = (media.duration / 240.0).clamp(1.0, 10.0);
+        let first = cache.join("thumb_0001.jpg");
+        if !first.is_file() {
+            let mut cmd = ffmpeg_cmd()?;
+            cmd.args([
+                "-y",
+                "-hwaccel", "auto",
+                "-i", &media.file_path,
+                "-vf", &format!("fps=1/{interval},scale=160:-2"),
+                "-q:v", "7",
+                &cache.join("thumb_%04d.jpg").to_string_lossy(),
+            ]);
+            Self::run(&mut cmd, "ffmpeg thumbnails").await?;
+        }
+        let mut thumbnails = vec![];
+        for i in 1.. {
+            let path = cache.join(format!("thumb_{i:04}.jpg"));
+            if !path.is_file() {
+                break;
+            }
+            thumbnails.push(ThumbnailRef {
+                time: (i - 1) as f64 * interval,
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        Ok(MediaAssets {
+            peaks_path: Some(peaks_file.to_string_lossy().into_owned()),
+            peaks_per_second: PEAKS_PER_SECOND,
+            thumbnails,
+        })
+    }
+}
+
+/// Max |sample| per bucket, scaled to u8. Pure — unit-tested without ffmpeg.
+pub fn compute_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) -> Vec<u8> {
+    let bucket = (sample_rate / peaks_per_second).max(1) as usize;
+    let mut peaks = Vec::with_capacity(pcm_s16le.len() / 2 / bucket + 1);
+    let mut max: i32 = 0;
+    let mut n = 0usize;
+    for chunk in pcm_s16le.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+        max = max.max(s.abs());
+        n += 1;
+        if n == bucket {
+            peaks.push(((max * 255) / 32768).min(255) as u8);
+            max = 0;
+            n = 0;
+        }
+    }
+    if n > 0 {
+        peaks.push(((max * 255) / 32768).min(255) as u8);
+    }
+    peaks
 }
 
 fn parse_rate(s: &str) -> f64 {
@@ -215,6 +332,12 @@ impl VideoEngine for MockVideoEngine {
     async fn extract_audio_wav(&self, _m: &Media, _o: &str) -> Result<()> {
         Err(CoreError::Unavailable("audio extraction needs ffmpeg on PATH".into()))
     }
+
+    async fn media_assets(&self, _media: &Media) -> Result<MediaAssets> {
+        // No real audio/video to derive from — the frontend falls back to its
+        // synthetic waveform.
+        Ok(MediaAssets { peaks_path: None, peaks_per_second: PEAKS_PER_SECOND, thumbnails: vec![] })
+    }
 }
 
 /// Resolves the real or mock engine PER CALL via `capabilities::probe()`, so
@@ -245,5 +368,33 @@ impl VideoEngine for AutoVideoEngine {
         } else {
             MockVideoEngine.extract_audio_wav(media, out_path).await
         }
+    }
+
+    async fn media_assets(&self, media: &Media) -> Result<MediaAssets> {
+        if crate::capabilities::probe().media_ready() {
+            FfmpegCli.media_assets(media).await
+        } else {
+            MockVideoEngine.media_assets(media).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_peaks;
+
+    #[test]
+    fn peaks_bucket_max_and_scale() {
+        // 100 samples at 100 Hz, 10 peaks/s => bucket of 10 samples.
+        let mut pcm = vec![];
+        for i in 0..100i16 {
+            let v: i16 = if i == 25 { 16384 } else if i == 95 { -32768 } else { 100 };
+            pcm.extend_from_slice(&v.to_le_bytes());
+        }
+        let peaks = compute_peaks(&pcm, 100, 10);
+        assert_eq!(peaks.len(), 10);
+        assert_eq!(peaks[2], 127); // 16384/32768*255
+        assert_eq!(peaks[9], 255); // clamped full-scale negative
+        assert!(peaks[0] <= 1);
     }
 }

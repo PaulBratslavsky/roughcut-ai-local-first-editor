@@ -1,5 +1,6 @@
 // Pure Canvas2D renderer + layout math for the timeline. No React in here.
 
+import type { TimelineAssets } from "./assets";
 import type { Clip } from "../ipc/types";
 
 export const RULER_H = 26;
@@ -159,6 +160,8 @@ export interface DrawState {
   selectedClipId: string | null;
   hoverEdge: EdgeHit;
   drag: DragPreview | null;
+  /** Real peaks/thumbnails when loaded; null = synthetic waveform fallback. */
+  assets: TimelineAssets | null;
 }
 
 const COLORS = {
@@ -293,19 +296,59 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
       ctx.stroke();
     }
 
-    // waveform
-    const barW = 2;
-    const gap = 1;
-    const n = Math.max(4, Math.floor(r.w / (barW + gap)));
-    const peaks = waveformPeaks(r.clip.id, 96);
-    const waveH = trackH * 0.62;
-    const baseY = TRACK_TOP + trackH - 6;
-    ctx.fillStyle = excluded ? COLORS.waveDim : COLORS.wave;
+    // clip body: thumbnail filmstrip (top) + waveform (bottom)
+    const hasThumbs = !!s.assets && s.assets.thumbs.length > 0;
+    const hasPeaks = !!s.assets?.peaks && s.assets.peaks.length > 0;
+    const clipDur = r.clip.source_out - r.clip.source_in;
+
     ctx.save();
     roundRectPath(ctx, r.x, TRACK_TOP, r.w, trackH, 6);
     ctx.clip();
+
+    if (hasThumbs) {
+      const thumbs = s.assets!.thumbs;
+      const stripH = trackH * 0.56;
+      const aspect = thumbs[0]!.img.width / Math.max(1, thumbs[0]!.img.height);
+      const thumbW = stripH * aspect;
+      // Tile frames across the clip; each tile shows the frame nearest its
+      // own SOURCE time, so cuts stay visually truthful.
+      const firstTile = Math.floor((r.x < 0 ? -r.x : 0) / thumbW);
+      for (let k = firstTile; k * thumbW < r.w; k++) {
+        const tileX = r.x + k * thumbW;
+        if (tileX > width) break;
+        const srcT = r.clip.source_in + ((k + 0.5) * thumbW) / Math.max(1e-6, r.w) * clipDur;
+        let lo = 0, hi = thumbs.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (thumbs[mid]!.time < srcT) lo = mid + 1; else hi = mid;
+        }
+        const best = lo > 0 && srcT - thumbs[lo - 1]!.time < thumbs[lo]!.time - srcT ? lo - 1 : lo;
+        ctx.globalAlpha = excluded ? 0.3 : 1;
+        ctx.drawImage(thumbs[best]!.img, tileX, TRACK_TOP, thumbW, stripH);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // waveform: real peaks mapped by source time, synthetic fallback otherwise
+    const barW = 2;
+    const gap = 1;
+    const n = Math.max(4, Math.floor(r.w / (barW + gap)));
+    const waveH = hasThumbs ? trackH * 0.36 : trackH * 0.62;
+    const baseY = TRACK_TOP + trackH - 4;
+    ctx.fillStyle = excluded ? COLORS.waveDim : COLORS.wave;
+    const fallback = hasPeaks ? null : waveformPeaks(r.clip.id, 96);
     for (let i = 0; i < n; i++) {
-      const p = peaks[Math.floor((i / n) * peaks.length)] ?? 0.3;
+      let p: number;
+      if (hasPeaks) {
+        const srcT = r.clip.source_in + ((i + 0.5) / n) * clipDur;
+        const idx = Math.min(
+          s.assets!.peaks!.length - 1,
+          Math.max(0, Math.floor(srcT * s.assets!.pps)),
+        );
+        p = (s.assets!.peaks![idx] ?? 0) / 255;
+      } else {
+        p = fallback![Math.floor((i / n) * fallback!.length)] ?? 0.3;
+      }
       const bh = Math.max(2, p * waveH);
       ctx.fillRect(r.x + 2 + i * (barW + gap), baseY - bh, barW, bh);
     }

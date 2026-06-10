@@ -19,6 +19,8 @@ export type { ProjectSummary } from "./generated/ProjectSummary";
 export type { Preferences } from "./generated/Preferences";
 export type { Aggressiveness } from "./generated/Aggressiveness";
 export type { ExternalConnection } from "./generated/ExternalConnection";
+export type { MediaAssets } from "./generated/MediaAssets";
+export type { ThumbnailRef } from "./generated/ThumbnailRef";
 
 import type { Clip } from "./generated/Clip";
 import type { EditAction } from "./generated/EditAction";
