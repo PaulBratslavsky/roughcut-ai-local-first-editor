@@ -18,6 +18,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod export;
+pub mod llm_runtime;
 pub mod mcp;
 pub mod model;
 pub mod setup;

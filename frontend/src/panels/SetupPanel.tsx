@@ -3,7 +3,17 @@
 // checksum-verified downloads. The app ships lean; models arrive on demand.
 
 import { useEffect, useState } from "react";
-import { downloadWhisperModel, getSetupStatus, onAppEvent } from "../ipc/api";
+import {
+  downloadWhisperModel,
+  downloadGguf,
+  getLlmRuntimeStatus,
+  getSetupStatus,
+  installLlamaServer,
+  ollamaPullModel,
+  onAppEvent,
+  startManagedLlm,
+  type LlmRuntimeStatus,
+} from "../ipc/api";
 import type { ModelTier, ProgressEvent, SetupStatus } from "../ipc/types";
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -12,19 +22,38 @@ function StatusDot({ ok }: { ok: boolean }) {
 
 export function SetupPanel({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
+  const [runtime, setRuntime] = useState<LlmRuntimeStatus | null>(null);
   const [downloading, setDownloading] = useState<ModelTier | null>(null);
+  const [llmBusy, setLlmBusy] = useState<string | null>(null);
+  const [ggufUrl, setGgufUrl] = useState("");
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
     void getSetupStatus().then(setStatus).catch(() => setStatus(null));
+    void getLlmRuntimeStatus().then(setRuntime).catch(() => setRuntime(null));
+  };
+
+  const llmAction = async (kind: string, fn: () => Promise<unknown>) => {
+    setLlmBusy(kind);
+    setError(null);
+    try {
+      await fn();
+      refresh();
+    } catch (err) {
+      setError(String((err as { message?: string })?.message ?? err));
+    } finally {
+      setLlmBusy(null);
+      setProgress(null);
+    }
   };
 
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 5000); // picks up installs done outside the app
     const off = onAppEvent<ProgressEvent>("progress", (p) => {
-      if (p.task === "model_download") setProgress(p.fraction >= 1 ? null : p);
+      if (["model_download", "model_pull", "runtime_install"].includes(p.task))
+        setProgress(p.fraction >= 1 ? null : p);
     });
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -138,16 +167,78 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                 <strong>Chat editing</strong>
                 <span className="setup-sub">local LLM — “cut the part where…”</span>
               </div>
-              {status.inference_reachable ? (
+              {status.inference_reachable && runtime?.chat_model_present !== false ? (
                 <p className="setup-detail">
                   {status.inference_model} via {status.inference_endpoint}
                 </p>
-              ) : (
+              ) : status.inference_reachable && runtime && !runtime.chat_model_present ? (
+                <div className="setup-detail warn">
+                  Server up, but “{status.inference_model}” isn’t pulled.
+                  {runtime.ollama_cli && (
+                    <button
+                      className="primary-btn tier-btn"
+                      disabled={!!llmBusy}
+                      onClick={() => void llmAction("pull", () => ollamaPullModel(status.inference_model))}
+                    >
+                      {llmBusy === "pull" ? "Pulling…" : `Pull with Ollama`}
+                    </button>
+                  )}
+                </div>
+              ) : runtime?.ollama_cli ? (
                 <p className="setup-detail warn">
-                  No local model server. Install <a href="https://ollama.com" target="_blank" rel="noreferrer">Ollama</a>,
-                  then <code>ollama pull {status.inference_model}</code>. Chat falls back to
-                  keyword find-and-cut meanwhile.
+                  Ollama is installed but not running — start it (<code>ollama serve</code> or the
+                  menu-bar app). Chat falls back to keyword find-and-cut meanwhile.
                 </p>
+              ) : (
+                <div className="setup-detail warn">
+                  No local model server. Either install{" "}
+                  <a href="https://ollama.com" target="_blank" rel="noreferrer">Ollama</a> — or use
+                  the managed runtime:
+                  <div className="managed-runtime">
+                    {!runtime?.llama_server_installed ? (
+                      <button
+                        className="primary-btn tier-btn"
+                        disabled={!!llmBusy}
+                        onClick={() => void llmAction("runtime", installLlamaServer)}
+                      >
+                        {llmBusy === "runtime" ? "Installing…" : "Install llama-server (~10 MB)"}
+                      </button>
+                    ) : (
+                      <>
+                        <input
+                          className="gguf-input"
+                          placeholder="https://…/model.gguf (chat model to download)"
+                          value={ggufUrl}
+                          onChange={(e) => setGgufUrl(e.target.value)}
+                        />
+                        <button
+                          className="primary-btn tier-btn"
+                          disabled={!!llmBusy || !ggufUrl}
+                          onClick={() => void llmAction("gguf", () => downloadGguf(ggufUrl))}
+                        >
+                          {llmBusy === "gguf" ? "Downloading…" : "Download model"}
+                        </button>
+                        {(runtime?.ggufs.length ?? 0) > 0 && (
+                          <button
+                            className="primary-btn tier-btn"
+                            disabled={!!llmBusy}
+                            onClick={() => void llmAction("start", () => startManagedLlm(runtime!.ggufs[0]!))}
+                          >
+                            {llmBusy === "start" ? "Starting…" : "Start local server"}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              {llmBusy && progress && (
+                <>
+                  <div className="progress-track setup-progress">
+                    <div className="progress-fill" style={{ width: `${Math.round(progress.fraction * 100)}%` }} />
+                  </div>
+                  <p className="setup-detail">{progress.message}</p>
+                </>
               )}
             </section>
 
@@ -159,10 +250,21 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                 <span className="setup-sub">transcript embeddings — “find the part about…”</span>
               </div>
               <p className="setup-detail">
-                {status.inference_reachable ? (
+                {status.inference_reachable && runtime?.embedding_model_present ? (
                   <>{status.embedding_model} (same local server). Indexes build automatically after transcription.</>
+                ) : status.inference_reachable && runtime?.ollama_cli ? (
+                  <>
+                    “{status.embedding_model}” isn’t pulled.
+                    <button
+                      className="primary-btn tier-btn"
+                      disabled={!!llmBusy}
+                      onClick={() => void llmAction("pull-embed", () => ollamaPullModel(status.embedding_model))}
+                    >
+                      {llmBusy === "pull-embed" ? "Pulling…" : "Pull with Ollama"}
+                    </button>
+                  </>
                 ) : (
-                  <>Needs the local server above, plus <code>ollama pull {status.embedding_model}</code>. BM25 keyword search works without it.</>
+                  <>Needs the local server above. BM25 keyword search works without it.</>
                 )}
               </p>
             </section>

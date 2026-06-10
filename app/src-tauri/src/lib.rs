@@ -65,6 +65,41 @@ async fn setup_status(
 }
 
 #[tauri::command]
+async fn llm_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<roughcut_core::llm_runtime::LlmRuntimeStatus, Value> {
+    roughcut_core::llm_runtime::status(&state.editor).await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn ollama_pull_model(state: State<'_, AppState>, model: String) -> Result<(), Value> {
+    roughcut_core::llm_runtime::ollama_pull(&state.editor.sink(), &model)
+        .await
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn install_llama_server(state: State<'_, AppState>) -> Result<String, Value> {
+    roughcut_core::llm_runtime::install_llama_server(&state.editor.sink())
+        .await
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn download_gguf(state: State<'_, AppState>, url: String) -> Result<String, Value> {
+    roughcut_core::llm_runtime::download_gguf(&state.editor.sink(), &url)
+        .await
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn start_managed_llm(state: State<'_, AppState>, gguf_path: String) -> Result<String, Value> {
+    roughcut_core::llm_runtime::start_managed(&state.editor, &gguf_path)
+        .await
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -109,8 +144,18 @@ pub fn run() {
             demo_mode,
             confirm_action,
             setup_status,
+            llm_runtime_status,
+            ollama_pull_model,
+            install_llama_server,
+            download_gguf,
+            start_managed_llm,
             download_whisper_model
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running RoughCut");
+        .build(tauri::generate_context!())
+        .expect("error while building RoughCut")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                roughcut_core::llm_runtime::stop_managed();
+            }
+        });
 }

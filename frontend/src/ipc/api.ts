@@ -77,6 +77,39 @@ export async function downloadWhisperModel(tier: ModelTier): Promise<string> {
   return invoke<string>("download_whisper_model", { tier });
 }
 
+export interface LlmRuntimeStatus {
+  ollama_cli: boolean;
+  server_reachable: boolean;
+  models: string[];
+  chat_model_present: boolean;
+  embedding_model_present: boolean;
+  llama_server_installed: boolean;
+  managed_running: boolean;
+  ggufs: string[];
+}
+
+/** Managed LLM runtime status (desktop only; null in the browser). */
+export async function getLlmRuntimeStatus(): Promise<LlmRuntimeStatus | null> {
+  if (!isTauri) return null;
+  return invoke<LlmRuntimeStatus>("llm_runtime_status");
+}
+
+export async function ollamaPullModel(model: string): Promise<void> {
+  return invoke("ollama_pull_model", { model });
+}
+
+export async function installLlamaServer(): Promise<string> {
+  return invoke<string>("install_llama_server");
+}
+
+export async function downloadGguf(url: string): Promise<string> {
+  return invoke<string>("download_gguf", { url });
+}
+
+export async function startManagedLlm(ggufPath: string): Promise<string> {
+  return invoke<string>("start_managed_llm", { ggufPath });
+}
+
 /** Resolve a local media file path to something a <video> tag can play. */
 export function mediaSrc(filePath: string): string | null {
   if (!isTauri) return null;

@@ -1279,3 +1279,12 @@ input, select { font: inherit; }
 .chapter-time { color: #7ab3ff; font-variant-numeric: tabular-nums; margin-right: 6px; }
 .title-list li { display: flex; align-items: center; gap: 6px; padding: 3px 4px; }
 .metadata-description { font-size: 12px; color: var(--text-muted); margin: 0; }
+
+
+.managed-runtime { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.gguf-input {
+  font: inherit; font-size: 12px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: rgba(255,255,255,0.06); color: var(--text);
+}
+.setup-detail .tier-btn { margin-left: 8px; }
