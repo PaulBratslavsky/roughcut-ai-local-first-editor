@@ -1,0 +1,134 @@
+// Video preview card. Plays real media via convertFileSrc inside Tauri;
+// renders a placeholder in mock mode and drives the playhead with a rAF
+// clock. When "Skip cuts" is on, playback jumps over excluded ranges.
+
+import { useEffect, useMemo, useRef } from "react";
+import { useStore } from "@tanstack/react-store";
+import { isTauri, mediaSrc } from "../ipc/api";
+import { useProject, useTimeline } from "../ipc/queries";
+import {
+  excludedRanges,
+  setPlayhead,
+  setPlaying,
+  skipTarget,
+  viewStore,
+  type Range,
+} from "../state/viewStore";
+
+function fmt(t: number): string {
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+export function PreviewPanel({ projectId }: { projectId: string }) {
+  const { data: project } = useProject(projectId);
+  const { data: timeline } = useTimeline(projectId);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const playing = useStore(viewStore, (s) => s.playing);
+  const rate = useStore(viewStore, (s) => s.playbackRate);
+  const seekNonce = useStore(viewStore, (s) => s.seekNonce);
+  const playhead = useStore(viewStore, (s) => s.playhead);
+
+  const duration = timeline?.duration ?? project?.media?.duration ?? 0;
+  const src = useMemo(
+    () => (project?.media && isTauri ? mediaSrc(project.media.file_path) : null),
+    [project?.media],
+  );
+
+  const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
+  const rangesRef = useRef(ranges);
+  rangesRef.current = ranges;
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+
+  // Follow seek requests.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = viewStore.state.playhead;
+    if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;
+  }, [seekNonce]);
+
+  // Play / pause / rate on the real video element.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.playbackRate = rate;
+    if (playing) void v.play().catch(() => setPlaying(false));
+    else v.pause();
+  }, [playing, rate, src]);
+
+  // Mock-mode rAF clock when there's no playable video.
+  useEffect(() => {
+    if (src || !playing) return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      let t = viewStore.state.playhead + dt * viewStore.state.playbackRate;
+      if (viewStore.state.skipCuts) {
+        const jump = skipTarget(t, rangesRef.current);
+        if (jump !== null) t = jump;
+      }
+      if (t >= durationRef.current && durationRef.current > 0) {
+        setPlayhead(durationRef.current);
+        setPlaying(false);
+        return;
+      }
+      setPlayhead(t);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [src, playing]);
+
+  // Drive the playhead from the video element; skip excluded ranges.
+  const onTimeUpdate = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    let t = v.currentTime;
+    if (viewStore.state.skipCuts) {
+      const jump = skipTarget(t, rangesRef.current);
+      if (jump !== null) {
+        v.currentTime = jump;
+        t = jump;
+      }
+    }
+    setPlayhead(t);
+  };
+
+  return (
+    <div className="preview-card card">
+      <div className="preview-frame">
+        {src ? (
+          <video
+            ref={videoRef}
+            src={src}
+            className="preview-video"
+            onTimeUpdate={onTimeUpdate}
+            onEnded={() => setPlaying(false)}
+            playsInline
+          />
+        ) : (
+          <div className="preview-placeholder">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4">
+              <rect x="2" y="4" width="20" height="16" rx="2.5" />
+              <path d="M2 8h20M2 16h20M7 4v16M17 4v16M7 8v4M17 8v4M7 16v4M17 16v4" opacity="0.55" />
+              <path d="M10.5 10.2v3.6l3.2-1.8z" fill="currentColor" stroke="none" />
+            </svg>
+            <span>Demo footage (mock mode)</span>
+          </div>
+        )}
+      </div>
+      <div className="preview-meta">
+        <span className="cut-counter">{timeline?.cut_count ?? 0} Cuts</span>
+        <span className="time-readout">
+          {fmt(Math.min(playhead, duration))} <span className="time-sep">/</span> {fmt(duration)}
+        </span>
+      </div>
+    </div>
+  );
+}

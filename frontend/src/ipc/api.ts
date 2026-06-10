@@ -1,0 +1,78 @@
+// Single IPC entry point. Inside Tauri this proxies to the Rust core's
+// generic `call_tool` command; in a plain browser it falls back to the
+// in-memory mock so the whole app is drivable for testing.
+
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { mockCallTool, mockOn } from "./mockApi";
+import type { AppEventName, ModelTier, SetupStatus } from "./types";
+
+export const isTauri: boolean =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export async function callTool<T = unknown>(
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  if (isTauri) {
+    return invoke<T>("call_tool", { name, args });
+  }
+  return mockCallTool(name, args) as Promise<T>;
+}
+
+/** Subscribe to a core event. Returns an unsubscribe function. */
+export function onAppEvent<T>(event: AppEventName, handler: (payload: T) => void): () => void {
+  if (isTauri) {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }
+  return mockOn(event, handler as (payload: unknown) => void);
+}
+
+/** True when the backend is running on fixture adapters. In a plain browser
+ *  everything is the mock, which is its own kind of demo. */
+export async function getDemoMode(): Promise<boolean> {
+  if (isTauri) return invoke<boolean>("demo_mode");
+  return true;
+}
+
+/** First-run toolchain status. The browser mock reports a complete setup so
+ *  the setup card never shows outside the real app. */
+export async function getSetupStatus(): Promise<SetupStatus> {
+  if (isTauri) return invoke<SetupStatus>("setup_status");
+  return {
+    ffmpeg: true,
+    ffmpeg_path: "(browser mock)",
+    whisper_model: "(browser mock)",
+    whisper_native: false,
+    whisper_cli: false,
+    transcription_ready: true,
+    models_dir: "",
+    demo: true,
+    demo_reason: "browser mock",
+  };
+}
+
+/** Download a whisper model; progress arrives via `progress` events with
+ *  task "model_download". Resolves to the installed model path. */
+export async function downloadWhisperModel(tier: ModelTier): Promise<string> {
+  if (!isTauri) throw new Error("model download is only available in the desktop app");
+  return invoke<string>("download_whisper_model", { tier });
+}
+
+/** Resolve a local media file path to something a <video> tag can play. */
+export function mediaSrc(filePath: string): string | null {
+  if (!isTauri) return null;
+  // A bare file name (no directory) can't be resolved by the asset protocol —
+  // happens for projects imported in demo/browser flows. Show the placeholder.
+  if (!filePath.includes("/") && !filePath.includes("\\")) return null;
+  return convertFileSrc(filePath);
+}
