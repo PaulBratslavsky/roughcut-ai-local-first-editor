@@ -38,10 +38,22 @@ pub async fn start(editor: Editor) -> Result<EndpointInfo> {
         }
     };
 
+    // Stable port across launches: reuse the persisted one when free, fall
+    // back to a fresh ephemeral port only if something else grabbed it.
+    let preferred: Option<u16> =
+        editor.store().get_kv("mcp_port")?.and_then(|p| p.parse().ok());
+    let listener = match preferred {
+        Some(p) => match tokio::net::TcpListener::bind(("127.0.0.1", p)).await {
+            Ok(l) => l,
+            Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await?,
+        },
+        None => tokio::net::TcpListener::bind("127.0.0.1:0").await?,
+    };
+    let port = listener.local_addr()?.port();
+    editor.store().set_kv("mcp_port", &port.to_string())?;
+
     let state = McpState { editor, token: token.clone() };
     let app = Router::new().route("/mcp", post(handle)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/mcp");
 
     let info = EndpointInfo { url: url.clone(), token: token.clone() };

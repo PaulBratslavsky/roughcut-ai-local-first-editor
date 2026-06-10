@@ -86,16 +86,22 @@ fn main() {
         let is_notification = parsed.get("id").is_none();
         let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
 
-        // Send with one re-discovery retry: the app may have (re)started since
-        // the endpoint was last read, on a fresh port.
+        // Send with re-discovery retries spread over ~3s: bridges an app
+        // restart window transparently instead of surfacing an error.
         let mut response: Result<String, String> = Err(String::new());
-        for attempt in 0..2 {
+        for attempt in 0..5 {
             if endpoint.is_none() {
                 match discover() {
                     Ok(ep) => endpoint = Some(ep),
                     Err(msg) => {
+                        // Endpoint file may be mid-rewrite during an app
+                        // restart — keep retrying until the last attempt.
                         response = Err(msg);
-                        break;
+                        if attempt == 4 {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(700));
+                        continue;
                     }
                 }
             }
@@ -116,11 +122,13 @@ fn main() {
                     response = Err(format!(
                         "RoughCut app unreachable ({e}). Start the app, then retry."
                     ));
-                    // Stale port? Re-discover and retry once (unless pinned).
-                    if ep.pinned || attempt == 1 {
+                    // Stale port or app mid-restart? Re-discover and retry
+                    // (unless pinned).
+                    if ep.pinned || attempt == 4 {
                         break;
                     }
                     endpoint = None;
+                    std::thread::sleep(std::time::Duration::from_millis(700));
                 }
             }
         }
