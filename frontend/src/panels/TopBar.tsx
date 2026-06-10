@@ -8,6 +8,7 @@ import { useProjects, useRedo, useUndo } from "../ipc/queries";
 import { setProjectId } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
+import { currentTheme, toggleTheme } from "../theme";
 import { SetupPanel } from "./SetupPanel";
 
 export function TopBar({
@@ -22,6 +23,7 @@ export function TopBar({
   const projects = useProjects();
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
+  const [theme, setTheme] = useState(currentTheme());
 
   const onNewVideo = async () => {
     const id = await newProjectFromDialog();
@@ -81,6 +83,22 @@ export function TopBar({
         </button>
       </div>
       <div className="topbar-right">
+        <button
+          className="icon-btn"
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          onClick={() => setTheme(toggleTheme())}
+        >
+          {theme === "dark" ? (
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+              <circle cx="12" cy="12" r="4.2" />
+              <path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7" />
+            </svg>
+          ) : (
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+              <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" />
+            </svg>
+          )}
+        </button>
         <button className="icon-btn" title="Setup (models & toolchain)" onClick={() => setShowSetup(true)}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
             <circle cx="12" cy="12" r="3.2" />

@@ -1288,3 +1288,19 @@ input, select { font: inherit; }
   background: rgba(255,255,255,0.06); color: var(--text);
 }
 .setup-detail .tier-btn { margin-left: 8px; }
+
+
+/* ---- Dark theme: the light script surfaces go dark too ---- */
+[data-theme="dark"] {
+  --light-bg: #19191d;
+  --light-card: #222227;
+  --light-text: #e6e6ea;
+  --light-muted: #8d8d96;
+  --light-border: #2f2f36;
+}
+
+[data-theme="dark"] .transcribe-message { color: #d5d5da; }
+[data-theme="dark"] .transcribe-progress { color: #9a9aa2; }
+[data-theme="dark"] .transcribe-hint { color: #6f6f78; }
+[data-theme="dark"] .word.current { background: rgba(91, 155, 255, 0.4); }
+[data-theme="dark"] .segment.selected { background: rgba(91, 155, 255, 0.12); }

@@ -110,6 +110,12 @@ export async function startManagedLlm(ggufPath: string): Promise<string> {
   return invoke<string>("start_managed_llm", { ggufPath });
 }
 
+/** Reveal a file in Finder (desktop only). */
+export async function revealPath(path: string): Promise<void> {
+  if (!isTauri) return;
+  return invoke("reveal_path", { path });
+}
+
 /** Resolve a local media file path to something a <video> tag can play. */
 export function mediaSrc(filePath: string): string | null {
   if (!isTauri) return null;

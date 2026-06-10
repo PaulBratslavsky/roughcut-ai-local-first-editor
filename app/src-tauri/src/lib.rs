@@ -50,6 +50,18 @@ fn demo_mode(state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
+fn reveal_path(path: String) -> Result<(), Value> {
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+    Ok(())
+}
+
+#[tauri::command]
 fn confirm_action(state: State<'_, AppState>, id: String, approved: bool) -> Result<(), Value> {
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
@@ -143,6 +155,7 @@ pub fn run() {
             mcp_endpoint_info,
             demo_mode,
             confirm_action,
+            reveal_path,
             setup_status,
             llm_runtime_status,
             ollama_pull_model,

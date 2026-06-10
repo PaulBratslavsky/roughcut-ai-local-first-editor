@@ -60,9 +60,21 @@ pub fn default_extension(target: &str) -> &'static str {
     }
 }
 
+/// Expand a leading `~/` — callers (UI, MCP clients) naturally write
+/// `~/Downloads/...`, and an unexpanded tilde becomes a literal directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 impl Editor {
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
+        let out_path = &expand_tilde(out_path);
         if target == "mp4" {
             let (project, _) = self.snapshot(project_id)?;
             let media = require_media(&project)?.clone();

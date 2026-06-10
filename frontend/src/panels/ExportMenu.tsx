@@ -2,6 +2,7 @@
 // sensible Downloads path for the chosen format.
 
 import { useEffect, useRef, useState } from "react";
+import { revealPath } from "../ipc/api";
 import { useExport } from "../ipc/queries";
 import type { ExportTarget } from "../ipc/types";
 
@@ -23,7 +24,7 @@ export function ExportMenu({
   projectName: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ text: string; path?: string } | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const exportMutation = useExport();
 
@@ -38,7 +39,7 @@ export function ExportMenu({
 
   useEffect(() => {
     if (!status) return;
-    const t = setTimeout(() => setStatus(null), 4000);
+    const t = setTimeout(() => setStatus(null), status.path ? 12000 : 4000);
     return () => clearTimeout(t);
   }, [status]);
 
@@ -46,7 +47,7 @@ export function ExportMenu({
 
   const run = (target: ExportTarget, ext: string, label: string) => {
     setOpen(false);
-    setStatus(`Exporting ${label}…`);
+    setStatus({ text: `Exporting ${label}…` });
     exportMutation.mutate(
       {
         project_id: projectId,
@@ -54,15 +55,24 @@ export function ExportMenu({
         out_path: `~/Downloads/${slug}-export.${ext}`,
       },
       {
-        onSuccess: (res) => setStatus(`Saved ${res.path}`),
-        onError: (err) => setStatus(`Export failed: ${String((err as Error)?.message ?? err)}`),
+        onSuccess: (res) => setStatus({ text: `Saved ${res.path.split("/").pop()}`, path: res.path }),
+        onError: (err) => setStatus({ text: `Export failed: ${String((err as Error)?.message ?? err)}` }),
       },
     );
   };
 
   return (
     <div className="export-menu" ref={rootRef}>
-      {status && <span className="export-status">{status}</span>}
+      {status && (
+        <span className="export-status" title={status.path}>
+          {status.text}
+          {status.path && (
+            <button className="reveal-btn" onClick={() => void revealPath(status.path!)}>
+              Reveal in Finder
+            </button>
+          )}
+        </span>
+      )}
       <button className="export-btn" onClick={() => setOpen((v) => !v)}>
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M8 10V2M5 5l3-3 3 3M3 10v3h10v-3" />
