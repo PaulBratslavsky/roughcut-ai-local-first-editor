@@ -313,7 +313,11 @@ async fn apply_edits_batches_ops_in_one_call() {
     )
     .await;
     assert_ne!(copy["id"], json!(pid));
-    assert_eq!(copy["timeline"]["cut_count"].as_u64().unwrap(), 2);
+    // Carries the full post-rough-cut state (manual + AI cuts).
+    assert_eq!(
+        copy["timeline"]["cut_count"].as_u64().unwrap(),
+        rough["cut_count"].as_u64().unwrap()
+    );
     // Each op is its own undo step.
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert_eq!(undone["action"]["kind"], "pad");
