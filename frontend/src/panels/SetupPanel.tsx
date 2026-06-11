@@ -8,6 +8,7 @@ import {
   downloadGguf,
   getSetupStatus,
   installLlamaServer,
+  installResolvePlugin,
   ollamaPullModel,
   onAppEvent,
   startManagedLlm,
@@ -266,6 +267,46 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                   <>Needs the local server above. BM25 keyword search works without it.</>
                 )}
               </p>
+            </section>
+
+            {/* ---- DaVinci Resolve hand-off ---- */}
+            <section className="setup-row">
+              <div className="setup-row-head">
+                <StatusDot ok={status.resolve.app_installed && status.resolve.plugin_installed && !status.resolve.plugin_outdated} />
+                <strong>DaVinci Resolve</strong>
+                <span className="setup-sub">one-click rough draft from Resolve's Scripts menu</span>
+              </div>
+              {!status.resolve.app_installed ? (
+                <p className="setup-detail">
+                  Resolve not detected. Install{" "}
+                  <a href="https://www.blackmagicdesign.com/products/davinciresolve" target="_blank" rel="noreferrer">
+                    DaVinci Resolve
+                  </a>{" "}
+                  (the free version works) and this lights up.
+                </p>
+              ) : status.resolve.plugin_installed && !status.resolve.plugin_outdated ? (
+                <p className="setup-detail">
+                  Plugin installed. In Resolve: Workspace ▸ Scripts ▸ Utility ▸ RoughCut AI Draft
+                  (select a clip in the media pool first).
+                </p>
+              ) : (
+                <div className="setup-detail warn">
+                  {status.resolve.plugin_outdated
+                    ? "An older plugin version is installed."
+                    : "Resolve found — the RoughCut script isn't installed yet."}
+                  <button
+                    className="primary-btn tier-btn"
+                    disabled={!!llmBusy}
+                    onClick={() => void llmAction("resolve", installResolvePlugin)}
+                  >
+                    {llmBusy === "resolve"
+                      ? "Installing…"
+                      : status.resolve.plugin_outdated
+                        ? "Update plugin"
+                        : "Install plugin"}
+                  </button>
+                </div>
+              )}
             </section>
 
             {error && <p className="setup-detail warn">{error}</p>}

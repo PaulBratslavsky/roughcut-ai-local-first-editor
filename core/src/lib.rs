@@ -21,6 +21,7 @@ pub mod export;
 pub mod llm_runtime;
 pub mod mcp;
 pub mod model;
+pub mod resolve;
 pub mod setup;
 pub mod store;
 pub mod time;

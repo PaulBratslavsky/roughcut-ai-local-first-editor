@@ -74,6 +74,12 @@ export async function getSetupStatus(): Promise<SetupStatus> {
       managed_running: false,
       ggufs: [],
     },
+    resolve: {
+      app_installed: false,
+      plugin_installed: false,
+      plugin_outdated: false,
+      scripts_dir: "(browser mock)",
+    },
     demo: true,
     demo_reason: "browser mock",
   };
@@ -84,6 +90,11 @@ export async function getSetupStatus(): Promise<SetupStatus> {
 export async function downloadWhisperModel(tier: ModelTier): Promise<string> {
   if (!isTauri) throw new Error("model download is only available in the desktop app");
   return invoke<string>("download_whisper_model", { tier });
+}
+
+/** Install/refresh the DaVinci Resolve script (desktop only). */
+export async function installResolvePlugin(): Promise<string> {
+  return invoke<string>("install_resolve_plugin");
 }
 
 export async function ollamaPullModel(model: string): Promise<void> {

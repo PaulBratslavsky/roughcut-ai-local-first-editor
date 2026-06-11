@@ -91,6 +91,14 @@ export interface RuntimeStatus {
   ggufs: string[];
 }
 
+/** DaVinci Resolve hand-off (core/src/resolve.rs ResolveStatus). */
+export interface ResolveStatus {
+  app_installed: boolean;
+  plugin_installed: boolean;
+  plugin_outdated: boolean;
+  scripts_dir: string;
+}
+
 export interface SetupStatus {
   ffmpeg: boolean;
   ffmpeg_path: string | null;
@@ -106,6 +114,7 @@ export interface SetupStatus {
   inference_model: string;
   embedding_model: string;
   runtime: RuntimeStatus;
+  resolve: ResolveStatus;
   demo: boolean;
   demo_reason: string | null;
 }

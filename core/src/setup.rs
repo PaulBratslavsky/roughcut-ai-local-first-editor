@@ -70,6 +70,8 @@ pub struct SetupStatus {
     /// Embedding model (semantic search) endpoint reachable (same server).
     pub embedding_model: String,
     pub runtime: RuntimeStatus,
+    /// DaVinci Resolve hand-off (app detected / plugin installed).
+    pub resolve: crate::resolve::ResolveStatus,
     pub demo: bool,
     /// Why demo mode is active (None when it isn't).
     pub demo_reason: Option<String>,
@@ -125,6 +127,7 @@ pub async fn status(editor: &Editor) -> SetupStatus {
         inference_model: prefs.inference_model,
         embedding_model: prefs.embedding_model,
         runtime,
+        resolve: crate::resolve::status(),
         demo,
         demo_reason: if demo {
             caps.demo_reason().or_else(|| Some("fixture adapters forced (test instance)".into()))

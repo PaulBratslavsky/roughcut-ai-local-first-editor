@@ -105,6 +105,11 @@ async fn start_managed_llm(state: State<'_, AppState>, gguf_path: String) -> Res
 }
 
 #[tauri::command]
+fn install_resolve_plugin() -> Result<String, Value> {
+    roughcut_core::resolve::install_plugin().map_err(|e| e.to_json())
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -154,7 +159,8 @@ pub fn run() {
             install_llama_server,
             download_gguf,
             start_managed_llm,
-            download_whisper_model
+            download_whisper_model,
+            install_resolve_plugin
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")
