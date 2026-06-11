@@ -969,6 +969,22 @@ input, select { font: inherit; }
   font-size: 13px;
   font-weight: 600;
 }
+
+.preview-hide-btn {
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.preview-hide-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
 .time-sep { color: var(--text-muted); margin: 0 2px; }
 
 /* --------------------------------------------------- tools: inspector card */

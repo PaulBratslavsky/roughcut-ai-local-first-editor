@@ -23,6 +23,8 @@ export interface ViewState {
   showCuts: boolean;
   skipCuts: boolean;
   activeTab: ActiveTab;
+  /** Collapse the video picture to give the tabs room (audio keeps playing). */
+  previewCollapsed: boolean;
 }
 
 export const viewStore = new Store<ViewState>({
@@ -40,6 +42,7 @@ export const viewStore = new Store<ViewState>({
   showCuts: true,
   skipCuts: true,
   activeTab: "tools",
+  previewCollapsed: false,
 });
 
 function patch(p: Partial<ViewState>): void {
@@ -99,6 +102,8 @@ export const setPlaybackRate = (playbackRate: number) => patch({ playbackRate })
 export const setShowCuts = (showCuts: boolean) => patch({ showCuts });
 export const setSkipCuts = (skipCuts: boolean) => patch({ skipCuts });
 export const setActiveTab = (activeTab: ActiveTab) => patch({ activeTab });
+export const togglePreviewCollapsed = () =>
+  patch({ previewCollapsed: !viewStore.state.previewCollapsed });
 export const setSelectedClipId = (selectedClipId: string | null) => patch({ selectedClipId });
 export const setSelectedSegmentIds = (selectedSegmentIds: string[]) => patch({ selectedSegmentIds });
 export const setScrollX = (scrollX: number) => patch({ scrollX: Math.max(0, scrollX) });

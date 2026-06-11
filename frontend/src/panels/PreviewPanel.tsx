@@ -14,6 +14,7 @@ import {
   setPlaying,
   setSkipCuts,
   togglePlaying,
+  togglePreviewCollapsed,
   viewStore,
 } from "../state/viewStore";
 
@@ -32,6 +33,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const rate = useStore(viewStore, (s) => s.playbackRate);
   const playhead = useStore(viewStore, (s) => s.playhead);
   const skipCuts = useStore(viewStore, (s) => s.skipCuts);
+  const collapsed = useStore(viewStore, (s) => s.previewCollapsed);
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
   // Some sources can't stream in a <video> tag (mp4 index at the end); the
@@ -72,7 +74,9 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="preview-card card">
-      <div className="preview-stage">
+      {/* Collapsed: the picture hides but the <video> stays MOUNTED, so
+          playback state (and audio, if playing) survives the toggle. */}
+      <div className="preview-stage" style={collapsed ? { display: "none" } : undefined}>
       <div className="preview-frame" style={frameStyle} onClick={() => togglePlaying()}>
         {src ? (
           <video
@@ -189,6 +193,13 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
         <span className="time-readout">
           {fmt(shownCurrent)} <span className="time-sep">/</span> {fmt(shownTotal)}
         </span>
+        <button
+          className="preview-hide-btn"
+          title={collapsed ? "Show the video picture" : "Hide the video picture (audio keeps playing) — more room for tools & chat"}
+          onClick={() => togglePreviewCollapsed()}
+        >
+          {collapsed ? "▸ show video" : "▾ hide video"}
+        </button>
       </div>
     </div>
   );
