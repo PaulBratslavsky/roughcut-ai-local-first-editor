@@ -77,12 +77,13 @@ until MP4 export.
 
 ## Milestones (each shippable, each builds on the last)
 
-**M1 — capture spike + camera-only recording.**
+**M1 — capture spike + camera-only recording.** ✅ SHIPPED
 Device enumeration, TCC permission row in Setup, record camera+mic to mp4
 with a countdown and a stop button; file lands as a normal project
-(auto-import → transcribe). *Spike question this must answer:* can webview
-`getUserMedia` preview and ffmpeg share the camera? (Fallback if not: record
-camera via webview MediaRecorder; ffmpeg keeps screen duty only.)
+(auto-import → transcribe). *Spike answer:* instrumented in the recorder — the preview keeps its own
+getUserMedia stream and watches for track end/mute when ffmpeg starts; on
+modern macOS both readers coexist, and if the OS revokes the preview the UI
+says so explicitly ("recording unaffected") instead of looking frozen.
 → Value shipped: record a talking head directly in the app.
 
 **M2 — screen-only recording.**

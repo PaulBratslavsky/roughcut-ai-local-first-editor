@@ -5,6 +5,7 @@
 
 pub mod embed;
 pub mod inference;
+pub mod record;
 pub mod transcribe;
 pub mod video;
 

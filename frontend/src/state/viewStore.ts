@@ -40,8 +40,11 @@ function savePrefs(s: PersistedPrefs): void {
 }
 
 export type ActiveTab = "tools" | "chat";
+export type AppScreen = "editor" | "recorder";
 
 export interface ViewState {
+  /** App-level screen: the editor (default) or the full-screen recorder. */
+  screen: AppScreen;
   projectId: string | null;
   playhead: number; // seconds, source time
   /** Bumped whenever a seek is requested so the <video> element follows. */
@@ -64,6 +67,7 @@ export interface ViewState {
 }
 
 export const viewStore = new Store<ViewState>({
+  screen: "editor",
   projectId: null,
   playhead: 0,
   seekNonce: 0,
@@ -103,6 +107,7 @@ export function setProjectId(projectId: string | null): void {
     };
   });
 }
+export const setScreen = (screen: AppScreen) => patch({ screen });
 export const setPlayhead = (playhead: number) => patch({ playhead: Math.max(0, playhead) });
 
 /** Seek: moves the playhead AND asks the video element to jump there. */

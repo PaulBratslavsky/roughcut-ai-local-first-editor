@@ -9,6 +9,7 @@ import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from
 import { useEditorKeyboard } from "./hooks/useEditorKeyboard";
 import { setActiveTab, setProjectId, viewStore } from "./state/viewStore";
 import { EmptyState } from "./EmptyState";
+import { RecorderPanel } from "./panels/RecorderPanel";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
 import { ChatPanel } from "./panels/ChatPanel";
@@ -168,6 +169,7 @@ export default function App() {
   useSuppressDefaultContextMenu();
   const projects = useProjects();
   const selected = useStore(viewStore, (s) => s.projectId);
+  const screen = useStore(viewStore, (s) => s.screen);
   const list = projects.data?.projects ?? [];
   // The user's pick wins (if it still exists); otherwise the most recent project.
   const projectId =
@@ -182,6 +184,15 @@ export default function App() {
       <div className="app-loading">
         <span>Loading…</span>
       </div>
+    );
+  }
+
+  if (screen === "recorder") {
+    return (
+      <>
+        <DemoBanner />
+        <RecorderPanel />
+      </>
     );
   }
 

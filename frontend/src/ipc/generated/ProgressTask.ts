@@ -5,4 +5,4 @@
  * emitters pass a variant, the frontend imports the generated union — adding
  * an operation here is the whole registration.
  */
-export type ProgressTask = "transcribe" | "rough_cut" | "export" | "model_download" | "model_pull" | "runtime_install";
+export type ProgressTask = "transcribe" | "rough_cut" | "export" | "model_download" | "recording" | "model_pull" | "runtime_install";

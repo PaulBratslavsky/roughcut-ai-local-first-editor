@@ -148,6 +148,32 @@ async fn send_to_resolve(state: State<'_, AppState>, project_id: String) -> Resu
 }
 
 #[tauri::command]
+async fn record_devices() -> Result<roughcut_core::adapters::record::CaptureDevices, Value> {
+    roughcut_core::adapters::record::list_devices().await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn record_start(
+    state: State<'_, AppState>,
+    camera: u32,
+    microphone: u32,
+) -> Result<String, Value> {
+    roughcut_core::adapters::record::start_camera(&state.editor.sink(), camera, microphone)
+        .await
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+fn record_status() -> roughcut_core::adapters::record::RecordingStatus {
+    roughcut_core::adapters::record::status()
+}
+
+#[tauri::command]
+async fn record_stop() -> Result<String, Value> {
+    roughcut_core::adapters::record::stop().await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -200,13 +226,18 @@ pub fn run() {
             download_whisper_model,
             install_resolve_plugin,
             resolve_status,
-            send_to_resolve
+            send_to_resolve,
+            record_devices,
+            record_start,
+            record_status,
+            record_stop
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 roughcut_core::llm_runtime::stop_managed();
+                roughcut_core::adapters::record::abort_on_exit();
             }
         });
 }

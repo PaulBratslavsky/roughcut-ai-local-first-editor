@@ -1548,3 +1548,96 @@ input, select { font: inherit; }
 [data-theme="light"] .gguf-input { background: rgba(0, 0, 0, 0.04); }
 [data-theme="light"] .project-select:hover { background: rgba(0, 0, 0, 0.05); }
 [data-theme="light"] .chapter-list li:hover { background: rgba(0, 0, 0, 0.05); }
+
+/* ---- recorder (M1) ---------------------------------------------------- */
+.recorder {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 12px 16px;
+  gap: 10px;
+}
+.recorder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.recorder-title {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.rec-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e5484d;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  50% { opacity: 0.25; }
+}
+.recorder-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border: 1px solid var(--line);
+}
+.recorder-preview {
+  max-width: 100%;
+  max-height: 100%;
+  transform: scaleX(-1); /* mirror like every camera UI */
+}
+.recorder-countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 120px;
+  font-weight: 700;
+  color: var(--fg-on-dark, #fff);
+  background: rgba(0, 0, 0, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+.recorder-preview-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ddd;
+}
+.recorder-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  justify-content: center;
+  min-height: 44px;
+}
+.recorder-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.recorder-field select { max-width: 220px; }
+.recorder-go { min-width: 130px; }
+.recorder-stop { min-width: 130px; background: #e5484d; border-color: #e5484d; }
+.recorder-hint, .recorder-note {
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin: 0;
+}

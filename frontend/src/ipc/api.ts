@@ -132,6 +132,32 @@ export async function startManagedLlm(ggufPath: string): Promise<string> {
   return invoke<string>("start_managed_llm", { ggufPath });
 }
 
+// ---- Recording (desktop only; shapes generated from core) ----
+import type { CaptureDevices } from "./generated/CaptureDevices";
+import type { RecordingStatus } from "./generated/RecordingStatus";
+export type { CaptureDevices, RecordingStatus };
+
+export async function recordDevices(): Promise<CaptureDevices> {
+  if (!isTauri) return { cameras: [], screens: [], microphones: [] };
+  return invoke<CaptureDevices>("record_devices");
+}
+
+/** Starts capture; resolves with the output path. First run triggers the
+ *  macOS camera + microphone permission prompts. */
+export async function recordStart(camera: number, microphone: number): Promise<string> {
+  return invoke<string>("record_start", { camera, microphone });
+}
+
+export async function recordStatus(): Promise<RecordingStatus> {
+  if (!isTauri) return { recording: false, elapsed_s: 0, out_path: null };
+  return invoke<RecordingStatus>("record_status");
+}
+
+/** Graceful stop; resolves with the finished file path. */
+export async function recordStop(): Promise<string> {
+  return invoke<string>("record_stop");
+}
+
 /** Reveal a file in Finder (desktop only). */
 export async function revealPath(path: string): Promise<void> {
   if (!isTauri) return;

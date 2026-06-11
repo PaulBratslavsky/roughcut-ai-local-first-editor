@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
-import { setProjectId } from "../state/viewStore";
+import { setProjectId, setScreen } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
 import { currentTheme, toggleTheme } from "../theme";
@@ -151,6 +151,11 @@ export function TopBar({
             <path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3" />
           </svg>
         </button>
+        {isTauri && (
+          <button className="tb-btn" title="Record camera (new project)" onClick={() => setScreen("recorder")}>
+            ● rec
+          </button>
+        )}
         <ExportMenu projectId={projectId} projectName={projectName} />
       </div>
     </header>

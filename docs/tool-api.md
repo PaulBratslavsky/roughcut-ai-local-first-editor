@@ -22,7 +22,8 @@ invoke("mcp_endpoint_info")   // -> { url: string, token: string } for the MCP s
 // plus bespoke shell commands OUTSIDE the registry (ADR-0004): demo_mode,
 // setup_status, download_whisper_model, ollama_pull_model,
 // install_llama_server, download_gguf, start_managed_llm, reveal_path,
-// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve
+// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve,
+// record_devices, record_start, record_status, record_stop
 ```
 
 Events emitted by the core (listen via `@tauri-apps/api/event`):
