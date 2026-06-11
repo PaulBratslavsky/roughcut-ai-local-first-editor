@@ -359,6 +359,28 @@ handler!(h_read_transcript, |e, a, _s| {
     })
 });
 
+handler!(h_outline_transcript, |e, a, _s| {
+    let outline = crate::story::outline(e, arg_uuid(a, "project_id")?).await?;
+    Ok(crate::story::outline_to_value(&outline))
+});
+
+handler!(h_review_flow, |e, a, _s| {
+    let review = crate::story::review_flow(e, arg_uuid(a, "project_id")?).await?;
+    Ok(serde_json::to_value(review)?)
+});
+
+handler!(h_story_edit, |e, a, s| {
+    let outcome = crate::story::story_edit(
+        e,
+        arg_uuid(a, "project_id")?,
+        arg_str(a, "instruction")?,
+        a["target_duration_s"].as_f64(),
+        s,
+    )
+    .await?;
+    Ok(serde_json::to_value(outcome)?)
+});
+
 handler!(h_plan_duration_cut, |e, a, s| {
     let project_id = arg_uuid(a, "project_id")?;
     let plan = e.plan_duration_cut(
@@ -654,6 +676,15 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, h_set_global_padding),
+    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript. The narrative map to plan cohesive edits against.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_outline_transcript),
+    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. Run after a batch of cuts; restore what reads broken.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_review_flow),
+    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several local-model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
+        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
+        agent: true, meta: false, h_story_edit),
     tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: ranks still-included segments by how central they are to the video (least-central tangents cut first; intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
         || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),
         agent: true, meta: false, h_plan_duration_cut),

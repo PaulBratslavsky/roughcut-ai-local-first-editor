@@ -511,3 +511,77 @@ async fn trash_soft_deletes_and_restores() {
     let listed = call(&editor, "list_projects", json!({})).await;
     assert!(listed["trash"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn story_tools_degrade_honestly_without_a_model() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "story", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // Outline: heuristic beats cover the speech, in order.
+    let outline = call(&editor, "outline_transcript", json!({ "project_id": pid })).await;
+    assert_eq!(outline["method"], "heuristic");
+    let beats = outline["beats"].as_array().unwrap();
+    assert!(beats.len() >= 2, "expected sections, got {}", beats.len());
+    assert!(beats.iter().all(|b| !b["segment_ids"].as_array().unwrap().is_empty()));
+
+    // Cached: second call returns identical beats (same kv entry).
+    let outline2 = call(&editor, "outline_transcript", json!({ "project_id": pid })).await;
+    assert_eq!(outline["beats"], outline2["beats"]);
+
+    // Make a cut right before a segment that opens with a connective, then
+    // review: the deterministic pass must flag the abrupt resume.
+    let t = call(&editor, "get_transcript", json!({ "project_id": pid })).await;
+    let segs: Vec<&serde_json::Value> = t["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["is_silence"] == false && s["text"].as_str().unwrap_or("") != "")
+        .collect();
+    let idx = (1..segs.len())
+        .find(|&i| {
+            let txt = segs[i]["text"].as_str().unwrap_or("").to_lowercase();
+            txt.starts_with("and ") || txt.starts_with("but ") || txt.starts_with("so ")
+        })
+        .expect("fixture has a connective-opening segment");
+    call(
+        &editor,
+        "cut_by_transcript",
+        json!({ "project_id": pid, "segment_ids": [segs[idx - 1]["id"]] }),
+    )
+    .await;
+    let review = call(&editor, "review_flow", json!({ "project_id": pid })).await;
+    assert_eq!(review["method"], "deterministic");
+    assert!(review["boundaries_checked"].as_u64().unwrap() >= 1);
+    assert!(
+        review["issues"].as_array().unwrap().iter().any(|i| i["kind"] == "abrupt_start"),
+        "expected an abrupt_start issue: {review}"
+    );
+
+    // story_edit without a model and without a target: honest refusal.
+    let err = tools::dispatch(
+        &editor,
+        "story_edit",
+        &json!({ "project_id": pid, "instruction": "tighten this" }),
+        ActionSource::Ui,
+    )
+    .await;
+    assert!(err.is_err(), "story_edit should refuse without a model server");
+
+    // …but WITH a target it falls back to the duration planner.
+    editor.set_embedder_for_tests(std::sync::Arc::new(roughcut_core::adapters::MockEmbedder));
+    editor.index_transcript(uuid::Uuid::parse_str(&pid).unwrap()).await.unwrap();
+    let before = editor
+        .get_timeline(uuid::Uuid::parse_str(&pid).unwrap())
+        .unwrap()
+        .included_duration();
+    let out = call(
+        &editor,
+        "story_edit",
+        json!({ "project_id": pid, "instruction": "tighten this", "target_duration_s": before * 0.5 }),
+    )
+    .await;
+    assert!(out["after_s"].as_f64().unwrap() <= before * 0.55, "fallback should hit the target: {out}");
+}

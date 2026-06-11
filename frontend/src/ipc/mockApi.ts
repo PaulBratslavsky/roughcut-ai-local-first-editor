@@ -776,6 +776,49 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     };
   },
 
+  outline_transcript(args): unknown {
+    requireProject(args.project_id);
+    const speech = (state.transcript?.segments ?? []).filter((s) => !s.is_silence && s.text);
+    const third = Math.max(1, Math.floor(speech.length / 3));
+    const beat = (segs: TranscriptSegment[], title: string, role: string) => ({
+      title,
+      summary: "(browser mock)",
+      role,
+      cut_priority: role === "tangent" ? 4 : 2,
+      segment_ids: segs.map((s) => s.id),
+      start: segs[0]?.start ?? 0,
+      end: segs[segs.length - 1]?.end ?? 0,
+    });
+    return {
+      method: "heuristic",
+      beats: [
+        beat(speech.slice(0, third), "Opening", "hook"),
+        beat(speech.slice(third, third * 2), "Middle", "point"),
+        beat(speech.slice(third * 2), "Closing", "recap"),
+      ],
+    };
+  },
+
+  review_flow(args): unknown {
+    requireProject(args.project_id);
+    return { coherent: true, boundaries_checked: 0, issues: [], method: "deterministic" };
+  },
+
+  async story_edit(args): Promise<unknown> {
+    const p = requireProject(args.project_id);
+    const before = p.timeline.clips
+      .filter((c) => c.included)
+      .reduce((acc, c) => acc + (c.source_out - c.source_in), 0);
+    return {
+      actions: [],
+      summary: "(browser mock) story edit reviewed the outline and kept every beat.",
+      before_s: before,
+      after_s: before,
+      coherent: true,
+      issues_remaining: 0,
+    };
+  },
+
   // ---- Semantic / LLM ----------------------------------------------------------
 
   find_segments(args) {

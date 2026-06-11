@@ -39,6 +39,12 @@ fn system_prompt(project_id: Uuid) -> String {
          a single cut_by_transcript call with ALL the ids (its segment_ids field is \
          an array), or one apply_edits call for mixed operations. Never cut one \
          segment per call, and never search again after you have results. \
+         STORY EDITS: when the user wants a cohesive narrative pass — \
+         'tighten this', 'make it flow', 'cut the boring parts', 'edit this \
+         into a focused video' — call story_edit ONCE with their words (add \
+         target_duration_s if they named a length). It outlines the story, \
+         cuts whole beats, verifies every cut point still reads, and repairs \
+         the flow. Do not attempt that pipeline yourself. \
          DURATION TARGETS: when the user names a length ('make it 20 minutes', \
          'cut it in half'), make ONE call: plan_duration_cut with \
          target_duration_s and apply=true — it ranks, cuts, and reports the new \
@@ -73,6 +79,7 @@ fn is_mutating(tool: &str) -> bool {
             | "set_global_padding"
             | "apply_edits"
             | "generate_rough_cut"
+            | "story_edit"
             | "undo"
             | "redo"
     )
@@ -138,10 +145,18 @@ fn step_text(editor: &Editor, project_id: Uuid, step: usize, kind: &str, text: i
     emit_step(editor, project_id, step, kind, None, None, None, Some(text.into()));
 }
 
-/// Collect EditActions out of a tool result (single `action` or arrays).
+/// Collect EditActions out of a tool result (single `action` or an
+/// `actions` array — story_edit and apply_edits return batches).
 fn harvest_actions(result: &Value, into: &mut Vec<EditAction>) {
     if let Ok(a) = serde_json::from_value::<EditAction>(result["action"].clone()) {
         into.push(a);
+    }
+    if let Some(arr) = result["actions"].as_array() {
+        for v in arr {
+            if let Ok(a) = serde_json::from_value::<EditAction>(v.clone()) {
+                into.push(a);
+            }
+        }
     }
 }
 
@@ -434,15 +449,15 @@ fn truncate_json(v: &Value) -> Value {
                             "clips": format!("{} clips (omitted)", val["clips"].as_array().map(|a| a.len()).unwrap_or(0)),
                         }),
                     );
-                } else if k == "segment_ids" && val.as_array().map(|a| a.len() > 20).unwrap_or(false) {
+                } else if k.ends_with("segment_ids") && val.as_array().map(|a| a.len() > 20).unwrap_or(false) {
                     // NEVER hand the model a silently-shortened id list — it
                     // will act on the fragment as if it were the whole plan.
                     // (This exact bug shipped a 20-of-408 cut.)
                     out.insert(
                         "segment_ids".into(),
                         json!(format!(
-                            "{} ids (too many to list — re-run plan_duration_cut with apply=true \
-                             to act on all of them)",
+                            "{} ids (too many to list — use a tool that acts on them \
+                             server-side instead of copying ids)",
                             val.as_array().map(|a| a.len()).unwrap_or(0)
                         )),
                     );
@@ -452,8 +467,11 @@ fn truncate_json(v: &Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(arr) if arr.len() > 20 => {
-            Value::Array(arr.iter().take(20).cloned().collect())
+        // Recurse into elements so nested id arrays (beats[i].segment_ids,
+        // issues[i].restore_segment_ids, actions[i].op.segment_ids) get the
+        // same stubbing as top-level ones.
+        Value::Array(arr) => {
+            Value::Array(arr.iter().take(20).map(truncate_json).collect())
         }
         other => other.clone(),
     }

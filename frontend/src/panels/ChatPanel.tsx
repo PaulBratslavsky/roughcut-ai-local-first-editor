@@ -59,6 +59,12 @@ function summarizeCall(tool: string, args?: Record<string, unknown>): string {
       return "scanning for silences";
     case "detect_takes":
       return "looking for repeated takes";
+    case "outline_transcript":
+      return "outlining the story beats";
+    case "review_flow":
+      return "re-reading the cut points for flow";
+    case "story_edit":
+      return `story edit: “${String(a.instruction ?? "")}”`;
     case "plan_duration_cut":
       return `planning cuts to reach ${fmtTime(Number(a.target_duration_s ?? 0))}`;
     case "cut_by_transcript":
@@ -99,6 +105,11 @@ function summarizeResult(result?: Record<string, unknown>): string | null {
     const dur = typeof r.included_duration_s === "number" ? ` — cut runs ${fmtTime(r.included_duration_s)}` : "";
     return `${r.actions.length} edit${r.actions.length === 1 ? "" : "s"} applied${dur}`;
   }
+  if (Array.isArray(r.beats)) return `${r.beats.length} story beats`;
+  if (typeof r.coherent === "boolean" && typeof r.boundaries_checked === "number")
+    return r.coherent
+      ? `flows cleanly (${r.boundaries_checked} cut points checked)`
+      : `${(r.issues ?? []).length} flow issue${(r.issues ?? []).length === 1 ? "" : "s"} found`;
   if (typeof r.applied === "number" && typeof r.target_s === "number")
     return `cut ${r.applied} segments → ${fmtTime(Number(r.included_duration_s ?? 0))} (target ${fmtTime(r.target_s)})`;
   if (r.action?.description) return String(r.action.description);

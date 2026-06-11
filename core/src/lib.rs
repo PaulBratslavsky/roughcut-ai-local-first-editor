@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod model;
 pub mod resolve;
 pub mod setup;
+pub mod story;
 pub mod store;
 pub mod time;
 pub mod tools;
