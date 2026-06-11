@@ -1645,3 +1645,52 @@ input, select { font: inherit; }
 /* + New video is a tiny menu: load a file or record a new one */
 .new-video-menu { position: relative; }
 .new-video-menu .export-dropdown { left: 0; right: auto; }
+
+/* recordings library on the recorder's setup screen */
+.rec-library {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.rec-library-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.rec-library-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.rec-library-list { max-height: 22vh; overflow-y: auto; }
+.rec-library-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.rec-library-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.rec-library-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-library-meta {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.recorder-stop-ghost { border-color: #e5484d; color: #e5484d; }

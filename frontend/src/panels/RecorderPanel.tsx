@@ -6,21 +6,105 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  combineRecordings,
   isTauri,
+  listRecordings,
   recordDevices,
+  recordPause,
+  recordResume,
   recordStart,
   recordStatus,
   recordStop,
   type CaptureDevices,
+  type RecordingFile,
 } from "../ipc/api";
 import { ingestFile } from "../ingest";
 import { setProjectId, setScreen } from "../state/viewStore";
 
-type Phase = "setup" | "countdown" | "recording" | "finishing";
+type Phase = "setup" | "countdown" | "recording" | "paused" | "finishing";
 
 function fmtClock(s: number): string {
   const m = Math.floor(s / 60);
   return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+function fmtDur(s: number): string {
+  if (s <= 0) return "";
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+/** The recordings library (~/Movies/RoughCut): import one as a project, or
+ *  select several takes and stitch them into one — Camtasia-bin style, but
+ *  the result stays a single source the transcript editor can edit. */
+function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string) => void }) {
+  const [files, setFiles] = useState<RecordingFile[] | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void listRecordings().then(setFiles).catch(() => setFiles([]));
+  }, []);
+
+  if (!files || files.length === 0) return null;
+
+  const toggle = (path: string) => {
+    setPicked((old) => {
+      const next = new Set(old);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const combine = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Stitch in recording order (oldest first), not click order.
+      const ordered = [...files].reverse().filter((f) => picked.has(f.path)).map((f) => f.path);
+      const path = await combineRecordings(ordered);
+      onIngest("combined recording", path);
+    } catch (e) {
+      setError(String((e as { message?: string })?.message ?? e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rec-library">
+      <div className="rec-library-head">
+        <span className="rec-library-title">previous recordings</span>
+        {picked.size >= 2 && (
+          <button className="primary-btn" disabled={busy} onClick={() => void combine()}>
+            {busy ? "stitching…" : `stitch ${picked.size} & import`}
+          </button>
+        )}
+      </div>
+      <div className="rec-library-list">
+        {files.map((f) => (
+          <div key={f.path} className="rec-library-row">
+            <label className="rec-library-pick">
+              <input
+                type="checkbox"
+                checked={picked.has(f.path)}
+                onChange={() => toggle(f.path)}
+              />
+              <span className="rec-library-name">{f.name}</span>
+            </label>
+            <span className="rec-library-meta">
+              {fmtDur(f.duration_s)} · {f.size_mb.toFixed(0)} MB
+            </span>
+            <button className="ghost-btn" disabled={busy} onClick={() => onIngest(f.name, f.path)}>
+              import
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <p className="empty-error">{error}</p>}
+    </div>
+  );
 }
 
 export function RecorderPanel() {
@@ -31,6 +115,8 @@ export function RecorderPanel() {
   const [count, setCount] = useState(3);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [take, setTake] = useState(1);
+  const [doneTakesS, setDoneTakesS] = useState(0);
   const [previewNote, setPreviewNote] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -148,6 +234,8 @@ export function RecorderPanel() {
       recordStart(camera, mic)
         .then(() => {
           setElapsed(0);
+          setTake(1);
+          setDoneTakesS(0);
           setPhase("recording");
         })
         .catch((e) => {
@@ -157,12 +245,31 @@ export function RecorderPanel() {
     }, 800);
   }, [camera, mic]);
 
-  const finish = useCallback(async () => {
-    setPhase("finishing");
+  const doPause = useCallback(async () => {
     try {
-      const path = await recordStop();
-      const stamp = new Date();
-      const name = `recording ${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}.${String(stamp.getMinutes()).padStart(2, "0")}`;
+      const st = await recordPause();
+      setDoneTakesS(st.total_s);
+      setTake(st.take);
+      setPhase("paused");
+    } catch (e) {
+      setError(String((e as { message?: string })?.message ?? e));
+    }
+  }, []);
+
+  const doResume = useCallback(async () => {
+    try {
+      const st = await recordResume();
+      setTake(st.take);
+      setElapsed(0);
+      setPhase("recording");
+    } catch (e) {
+      setError(String((e as { message?: string })?.message ?? e));
+    }
+  }, []);
+
+  const ingestRecording = useCallback(
+    (name: string, path: string) => {
+      setPhase("finishing");
       let createdId: string | null = null;
       const done = ingestFile(name, path, { onCreated: (id) => (createdId = id) });
       // Switch to the editor as soon as the project exists; transcription
@@ -176,16 +283,30 @@ export function RecorderPanel() {
         }
       }, 100);
       done
-        .catch((e) => setError(String((e as { message?: string })?.message ?? e)))
+        .catch((e) => {
+          setError(String((e as { message?: string })?.message ?? e));
+          setPhase("setup");
+        })
         .finally(() => {
           clearInterval(poll);
           void queryClient.invalidateQueries();
         });
+    },
+    [queryClient],
+  );
+
+  const finish = useCallback(async () => {
+    setPhase("finishing");
+    try {
+      const path = await recordStop();
+      const stamp = new Date();
+      const name = `recording ${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}.${String(stamp.getMinutes()).padStart(2, "0")}`;
+      ingestRecording(name, path);
     } catch (e) {
       setError(String((e as { message?: string })?.message ?? e));
       setPhase("setup");
     }
-  }, [queryClient]);
+  }, [ingestRecording]);
 
   if (!isTauri) {
     return (
@@ -205,12 +326,16 @@ export function RecorderPanel() {
       <div className="recorder-head">
         <span className="recorder-title">
           {recording ? <span className="rec-dot" aria-hidden /> : null}
-          {recording ? `recording ${fmtClock(elapsed)}` : "record"}
+          {recording
+            ? `recording · take ${take} · ${fmtClock(doneTakesS + elapsed)}`
+            : phase === "paused"
+              ? `paused · ${take} take${take === 1 ? "" : "s"} · ${fmtClock(doneTakesS)}`
+              : "record"}
         </span>
         <button
           className="ghost-btn"
           onClick={() => setScreen("editor")}
-          disabled={recording || phase === "finishing"}
+          disabled={recording || phase === "paused" || phase === "finishing"}
         >
           ✕ close
         </button>
@@ -255,13 +380,28 @@ export function RecorderPanel() {
         )}
         {phase === "countdown" && <span className="recorder-note">starting…</span>}
         {recording && (
-          <button className="primary-btn recorder-stop" onClick={() => void finish()}>
-            ■ stop
-          </button>
+          <>
+            <button className="ghost-btn" onClick={() => void doPause()}>⏸ pause</button>
+            <button className="primary-btn recorder-stop" onClick={() => void finish()}>
+              ■ finish
+            </button>
+          </>
+        )}
+        {phase === "paused" && (
+          <>
+            <span className="recorder-note">break time — takes stitch together when you finish</span>
+            <button className="primary-btn recorder-go" onClick={() => void doResume()}>
+              ● resume
+            </button>
+            <button className="ghost-btn recorder-stop-ghost" onClick={() => void finish()}>
+              ■ finish
+            </button>
+          </>
         )}
         {phase === "finishing" && <span className="recorder-note">finalizing &amp; importing…</span>}
       </div>
       {error && <p className="empty-error">{error}</p>}
+      {phase === "setup" && <RecordingsLibrary onIngest={ingestRecording} />}
       <p className="recorder-hint">
         First recording asks for camera + microphone permission. Files land in
         ~/Movies/RoughCut and open as a project automatically.

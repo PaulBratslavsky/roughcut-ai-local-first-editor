@@ -174,6 +174,28 @@ async fn record_stop() -> Result<String, Value> {
 }
 
 #[tauri::command]
+async fn record_pause() -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
+    roughcut_core::adapters::record::pause().await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn record_resume(
+    state: State<'_, AppState>,
+) -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
+    roughcut_core::adapters::record::resume(&state.editor.sink()).await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn list_recordings() -> Result<Vec<roughcut_core::adapters::record::RecordingFile>, Value> {
+    roughcut_core::adapters::record::list_recordings().await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
+    roughcut_core::adapters::record::combine_recordings(&paths).await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -230,7 +252,11 @@ pub fn run() {
             record_devices,
             record_start,
             record_status,
-            record_stop
+            record_stop,
+            record_pause,
+            record_resume,
+            list_recordings,
+            combine_recordings
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")

@@ -86,6 +86,15 @@ modern macOS both readers coexist, and if the OS revokes the preview the UI
 says so explicitly ("recording unaffected") instead of looking frozen.
 → Value shipped: record a talking head directly in the app.
 
+**M1.5 — takes + the recordings library.** ✅ SHIPPED
+Pause finalizes the current take file (crash loses at most one take);
+resume opens the next; finish stream-copy concats every take into ONE
+mp4 — so transcript editing stays the stitching tool. ~/Movies/RoughCut
+is surfaced as a library on the recorder screen: import any past
+recording, or multi-select takes and stitch them (codec/resolution
+guard). The Camtasia media-bin idea, adapted to the single-source
+invariant.
+
 **M2 — screen-only recording.**
 Display picker, screen-recording permission flow, same landing pipeline.
 → Value: transcribed screen-capture explainers.

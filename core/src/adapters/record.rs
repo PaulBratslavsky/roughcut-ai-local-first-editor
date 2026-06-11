@@ -36,8 +36,28 @@ pub struct CaptureDevices {
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingStatus {
     pub recording: bool,
+    /// Paused between takes (session alive, no ffmpeg running).
+    pub paused: bool,
+    /// 1-based current/most recent take number.
+    pub take: u32,
+    /// Seconds in the CURRENT take (0 while paused).
     pub elapsed_s: f64,
+    /// Seconds across all finished takes + the current one.
+    pub total_s: f64,
     pub out_path: Option<String>,
+}
+
+/// One file in ~/Movies/RoughCut — the recordings library.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingFile {
+    pub path: String,
+    pub name: String,
+    pub size_mb: f64,
+    /// RFC3339; newest first in the listing.
+    pub modified: String,
+    pub duration_s: f64,
 }
 
 /// Parse `ffmpeg -f avfoundation -list_devices true -i ""` stderr.
@@ -109,9 +129,19 @@ fn device_cache() -> &'static Mutex<Option<(std::time::Instant, CaptureDevices)>
 }
 
 struct Session {
-    child: Child,
+    /// None while paused between takes.
+    child: Option<Child>,
     started: std::time::Instant,
-    out_path: PathBuf,
+    /// Wall seconds accumulated in finished takes.
+    finished_s: f64,
+    /// Finished take files, in order.
+    takes: Vec<PathBuf>,
+    /// Path of the take being written (current child's output).
+    current: PathBuf,
+    camera: u32,
+    microphone: u32,
+    /// Base name (no extension) all takes share.
+    base: String,
 }
 
 fn active() -> &'static Mutex<Option<Session>> {
@@ -123,26 +153,10 @@ fn recordings_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Movies/RoughCut")
 }
 
-/// Start a camera+mic recording. The first run triggers macOS camera and
-/// microphone permission prompts attributed to the app. One session at a
-/// time; errors if one is already live.
-pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Result<String> {
-    {
-        let mut guard = active().lock().unwrap();
-        if let Some(session) = guard.as_mut() {
-            if session.child.try_wait().ok().flatten().is_none() {
-                return Err(CoreError::InvalidArg("a recording is already running".into()));
-            }
-            *guard = None; // previous session died on its own
-        }
-    }
+/// Spawn one ffmpeg take writing to `out`. Shared by start and resume.
+async fn spawn_take(sink: &SharedSink, camera: u32, microphone: u32, out: &PathBuf) -> Result<Child> {
     let ffmpeg = super::video::ffmpeg_path()
         .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
-    let dir = recordings_dir();
-    std::fs::create_dir_all(&dir)?;
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let out_path = dir.join(format!("recording-{stamp}.mp4"));
-
     let mut child = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -156,19 +170,16 @@ pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Re
             "-c:a", "aac",
             "-b:a", "192k",
             // graceful 'q' on stdin finalizes the file; faststart rewrites
-            // the index so the recording is immediately web-playable
+            // the index so the take is immediately web-playable
             "-movflags", "+faststart",
             "-progress", "pipe:1",
-            &out_path.to_string_lossy(),
+            &out.to_string_lossy(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| CoreError::Unavailable(format!("ffmpeg capture: {e}")))?;
-
-    // Elapsed feed for any UI that wants it (the recorder shows its own
-    // clock; this keeps the export-style chip honest if one subscribes).
     if let Some(stdout) = child.stdout.take() {
         crate::progress::stream_progress(
             stdout,
@@ -183,72 +194,340 @@ pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Re
             },
         );
     }
+    Ok(child)
+}
 
+/// Gracefully finalize a take ('q' lets ffmpeg write the moov index).
+async fn finalize_take(mut child: Child) -> Result<()> {
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"q\n").await;
+        let _ = stdin.flush().await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(CoreError::Other(format!("ffmpeg capture exited with {status}"))),
+        Ok(Err(e)) => Err(CoreError::Other(format!("ffmpeg capture: {e}"))),
+        Err(_) => {
+            let _ = child.start_kill();
+            Err(CoreError::Other(
+                "capture did not finalize within 10s — killed; the take may be unusable".into(),
+            ))
+        }
+    }
+}
+
+/// Start a recording session (take 1). The first run triggers macOS camera
+/// and microphone permission prompts attributed to the app. One session at
+/// a time.
+pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Result<String> {
+    {
+        let mut guard = active().lock().unwrap();
+        if let Some(session) = guard.as_mut() {
+            let alive = session
+                .child
+                .as_mut()
+                .map(|c| c.try_wait().ok().flatten().is_none())
+                .unwrap_or(true); // paused sessions count as active
+            if alive {
+                return Err(CoreError::InvalidArg("a recording is already running".into()));
+            }
+            *guard = None;
+        }
+    }
+    let dir = recordings_dir();
+    std::fs::create_dir_all(&dir)?;
+    let base = format!("recording-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let current = dir.join(format!("{base}-take1.mp4"));
+    let child = spawn_take(sink, camera, microphone, &current).await?;
     *active().lock().unwrap() = Some(Session {
-        child,
+        child: Some(child),
         started: std::time::Instant::now(),
-        out_path: out_path.clone(),
+        finished_s: 0.0,
+        takes: vec![],
+        current: current.clone(),
+        camera,
+        microphone,
+        base,
     });
-    Ok(out_path.to_string_lossy().into_owned())
+    Ok(current.to_string_lossy().into_owned())
+}
+
+/// Pause: finalize the current take; the session stays alive for resume().
+pub async fn pause() -> Result<RecordingStatus> {
+    let (child, elapsed) = {
+        let mut guard = active().lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::InvalidArg("no recording is running".into()))?;
+        let child = session
+            .child
+            .take()
+            .ok_or_else(|| CoreError::InvalidArg("already paused".into()))?;
+        (child, session.started.elapsed().as_secs_f64())
+    };
+    let result = finalize_take(child).await;
+    let mut guard = active().lock().unwrap();
+    if let Some(session) = guard.as_mut() {
+        session.finished_s += elapsed;
+        let take = session.current.clone();
+        if result.is_ok() && take.is_file() {
+            session.takes.push(take);
+        }
+    }
+    result?;
+    drop(guard);
+    Ok(status())
+}
+
+/// Resume after pause: a new take file, same devices.
+pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
+    let (camera, microphone, next) = {
+        let guard = active().lock().unwrap();
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidArg("no recording session".into()))?;
+        if session.child.is_some() {
+            return Err(CoreError::InvalidArg("not paused".into()));
+        }
+        let n = session.takes.len() + 1 + 1; // finished + the new one
+        (
+            session.camera,
+            session.microphone,
+            recordings_dir().join(format!("{}-take{}.mp4", session.base, n)),
+        )
+    };
+    let child = spawn_take(sink, camera, microphone, &next).await?;
+    {
+        let mut guard = active().lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::InvalidArg("session vanished during resume".into()))?;
+        session.child = Some(child);
+        session.current = next;
+        session.started = std::time::Instant::now();
+    }
+    Ok(status())
 }
 
 pub fn status() -> RecordingStatus {
     let mut guard = active().lock().unwrap();
-    match guard.as_mut() {
-        None => RecordingStatus { recording: false, elapsed_s: 0.0, out_path: None },
-        Some(session) => match session.child.try_wait() {
-            Ok(None) => RecordingStatus {
-                recording: true,
-                elapsed_s: session.started.elapsed().as_secs_f64(),
-                out_path: Some(session.out_path.to_string_lossy().into_owned()),
-            },
+    let Some(session) = guard.as_mut() else {
+        return RecordingStatus {
+            recording: false,
+            paused: false,
+            take: 0,
+            elapsed_s: 0.0,
+            total_s: 0.0,
+            out_path: None,
+        };
+    };
+    let take = (session.takes.len() + 1) as u32;
+    match session.child.as_mut() {
+        None => RecordingStatus {
+            recording: false,
+            paused: true,
+            take: session.takes.len() as u32,
+            elapsed_s: 0.0,
+            total_s: session.finished_s,
+            out_path: Some(session.current.to_string_lossy().into_owned()),
+        },
+        Some(child) => match child.try_wait() {
+            Ok(None) => {
+                let elapsed = session.started.elapsed().as_secs_f64();
+                RecordingStatus {
+                    recording: true,
+                    paused: false,
+                    take,
+                    elapsed_s: elapsed,
+                    total_s: session.finished_s + elapsed,
+                    out_path: Some(session.current.to_string_lossy().into_owned()),
+                }
+            }
             _ => {
-                let path = session.out_path.to_string_lossy().into_owned();
+                let path = session.current.to_string_lossy().into_owned();
                 *guard = None;
-                RecordingStatus { recording: false, elapsed_s: 0.0, out_path: Some(path) }
+                RecordingStatus {
+                    recording: false,
+                    paused: false,
+                    take: 0,
+                    elapsed_s: 0.0,
+                    total_s: 0.0,
+                    out_path: Some(path),
+                }
             }
         },
     }
 }
 
-/// Stop the active recording gracefully ('q' lets ffmpeg finalize the moov
-/// index); escalates to kill after a timeout. Returns the finished file.
+/// Finish the session: finalize the current take (if recording), then
+/// stream-copy concat every take into ONE file. Single-take sessions just
+/// return the take. Take files are kept in the library either way.
 pub async fn stop() -> Result<String> {
-    let mut session = active()
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or_else(|| CoreError::InvalidArg("no recording is running".into()))?;
-    if let Some(mut stdin) = session.child.stdin.take() {
-        let _ = stdin.write_all(b"q\n").await;
-        let _ = stdin.flush().await;
+    let session_exists = active().lock().unwrap().is_some();
+    if !session_exists {
+        return Err(CoreError::InvalidArg("no recording is running".into()));
     }
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(10), session.child.wait())
-        .await;
-    match finished {
-        Ok(Ok(status)) if status.success() => {}
-        Ok(Ok(status)) => {
-            return Err(CoreError::Other(format!("ffmpeg capture exited with {status}")));
+    // Finalize the in-flight take (no-op when paused).
+    let recording = active().lock().unwrap().as_ref().map(|s| s.child.is_some()).unwrap_or(false);
+    if recording {
+        pause().await?;
+    }
+    let (takes, base) = {
+        let mut guard = active().lock().unwrap();
+        let session = guard.take().ok_or_else(|| CoreError::InvalidArg("session vanished".into()))?;
+        (session.takes, session.base)
+    };
+    match takes.len() {
+        0 => Err(CoreError::Other("capture produced no usable takes".into())),
+        1 => Ok(takes[0].to_string_lossy().into_owned()),
+        _ => {
+            let out = recordings_dir().join(format!("{base}.mp4"));
+            concat(&takes, &out).await?;
+            Ok(out.to_string_lossy().into_owned())
         }
-        Ok(Err(e)) => return Err(CoreError::Other(format!("ffmpeg capture: {e}"))),
-        Err(_) => {
-            let _ = session.child.start_kill();
-            return Err(CoreError::Other(
-                "capture did not finalize within 10s — killed; the file may be unusable".into(),
-            ));
+    }
+}
+
+/// Lossless concat (`-f concat -c copy`) — instant, and safe because every
+/// input came from the same encoder settings. For library combines we
+/// verify codec/dimensions first.
+async fn concat(inputs: &[PathBuf], out: &PathBuf) -> Result<()> {
+    let ffmpeg = super::video::ffmpeg_path()
+        .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
+    let list_path = std::env::temp_dir().join(format!(
+        "roughcut-concat-{}.txt",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let list: String = inputs
+        .iter()
+        .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
+        .collect();
+    std::fs::write(&list_path, list)?;
+    let result = Command::new(ffmpeg)
+        .args([
+            "-hide_banner", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", &list_path.to_string_lossy(),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            &out.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| CoreError::Other(format!("concat: {e}")))?;
+    let _ = std::fs::remove_file(&list_path);
+    if !result.status.success() {
+        return Err(CoreError::Other(format!(
+            "concat failed: {}",
+            String::from_utf8_lossy(&result.stderr).chars().take(400).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// The recordings library: every mp4 in ~/Movies/RoughCut, newest first.
+pub async fn list_recordings() -> Result<Vec<RecordingFile>> {
+    let dir = recordings_dir();
+    let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = vec![];
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            files.push((meta.modified().unwrap_or(std::time::UNIX_EPOCH), path, meta.len()));
         }
     }
-    if !session.out_path.is_file() {
-        return Err(CoreError::Other("capture produced no file".into()));
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(50);
+    let mut out = vec![];
+    for (modified, path, size) in files {
+        let duration_s = probe_duration(&path).await.unwrap_or(0.0);
+        out.push(RecordingFile {
+            name: path.file_stem().and_then(|n| n.to_str()).unwrap_or("recording").to_string(),
+            path: path.to_string_lossy().into_owned(),
+            size_mb: size as f64 / 1_048_576.0,
+            modified: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
+            duration_s,
+        });
     }
-    Ok(session.out_path.to_string_lossy().into_owned())
+    Ok(out)
+}
+
+async fn probe_duration(path: &PathBuf) -> Result<f64> {
+    let ffprobe = super::video::ffprobe_path()
+        .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
+    let out = Command::new(ffprobe)
+        .args([
+            "-v", "quiet",
+            "-show_entries", "format=duration:stream=codec_name,width,height",
+            "-of", "json",
+            &path.to_string_lossy(),
+        ])
+        .output()
+        .await
+        .map_err(|e| CoreError::Other(format!("ffprobe: {e}")))?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    Ok(v["format"]["duration"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0))
+}
+
+/// Combine library recordings into one file (stream copy). Inputs must
+/// share codec + dimensions — stream-copy concat of mismatched files plays
+/// broken, so we refuse instead.
+pub async fn combine_recordings(paths: &[String]) -> Result<String> {
+    if paths.len() < 2 {
+        return Err(CoreError::InvalidArg("pick at least two recordings".into()));
+    }
+    let ffprobe = super::video::ffprobe_path()
+        .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
+    let mut signature: Option<String> = None;
+    for p in paths {
+        if !std::path::Path::new(p).is_file() {
+            return Err(CoreError::NotFound(format!("file {p}")));
+        }
+        let out = Command::new(&ffprobe)
+            .args([
+                "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height",
+                "-of", "csv=p=0",
+                p,
+            ])
+            .output()
+            .await
+            .map_err(|e| CoreError::Other(format!("ffprobe: {e}")))?;
+        let sig = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        match &signature {
+            None => signature = Some(sig),
+            Some(first) if *first != sig => {
+                return Err(CoreError::InvalidArg(format!(
+                    "recordings don't match ({first} vs {sig}) — combine needs the same                      codec and resolution"
+                )));
+            }
+            _ => {}
+        }
+    }
+    let inputs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let out = recordings_dir().join(format!(
+        "combined-{}.mp4",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    concat(&inputs, &out).await?;
+    Ok(out.to_string_lossy().into_owned())
 }
 
 /// Kill any live capture (app exit hook) — better a truncated file than a
 /// zombie ffmpeg holding the camera.
 pub fn abort_on_exit() {
     if let Some(mut session) = active().lock().unwrap().take() {
-        let _ = session.child.start_kill();
+        if let Some(child) = session.child.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 

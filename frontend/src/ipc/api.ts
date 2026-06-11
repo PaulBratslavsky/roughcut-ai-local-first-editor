@@ -149,13 +149,35 @@ export async function recordStart(camera: number, microphone: number): Promise<s
 }
 
 export async function recordStatus(): Promise<RecordingStatus> {
-  if (!isTauri) return { recording: false, elapsed_s: 0, out_path: null };
+  if (!isTauri) return { recording: false, paused: false, take: 0, elapsed_s: 0, total_s: 0, out_path: null };
   return invoke<RecordingStatus>("record_status");
 }
 
-/** Graceful stop; resolves with the finished file path. */
+/** Finish the session: finalizes + stitches every take into ONE file. */
 export async function recordStop(): Promise<string> {
   return invoke<string>("record_stop");
+}
+
+export async function recordPause(): Promise<RecordingStatus> {
+  return invoke<RecordingStatus>("record_pause");
+}
+
+export async function recordResume(): Promise<RecordingStatus> {
+  return invoke<RecordingStatus>("record_resume");
+}
+
+import type { RecordingFile } from "./generated/RecordingFile";
+export type { RecordingFile };
+
+/** The recordings library (~/Movies/RoughCut), newest first. */
+export async function listRecordings(): Promise<RecordingFile[]> {
+  if (!isTauri) return [];
+  return invoke<RecordingFile[]>("list_recordings");
+}
+
+/** Stitch library recordings (same codec/resolution) into one new file. */
+export async function combineRecordings(paths: string[]): Promise<string> {
+  return invoke<string>("combine_recordings", { paths });
 }
 
 /** Reveal a file in Finder (desktop only). */
