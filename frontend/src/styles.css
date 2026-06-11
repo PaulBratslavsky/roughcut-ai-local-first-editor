@@ -1735,3 +1735,8 @@ input, select { font: inherit; }
   text-align: center;
 }
 .recorder-screen-sub { font-size: 11px; }
+
+/* audio sync slider */
+.audio-sync-row { display: flex; align-items: center; gap: 10px; }
+.audio-sync-row input[type="range"] { flex: 1; }
+.audio-sync-value { font-variant-numeric: tabular-nums; min-width: 64px; text-align: right; }

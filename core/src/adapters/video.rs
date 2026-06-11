@@ -53,6 +53,7 @@ pub trait VideoEngine: Send + Sync {
         media: &Media,
         timeline: &Timeline,
         out_path: &str,
+        audio_offset_s: f64,
         sink: &crate::events::SharedSink,
     ) -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
@@ -196,6 +197,7 @@ impl VideoEngine for FfmpegCli {
         media: &Media,
         timeline: &Timeline,
         out_path: &str,
+        audio_offset_s: f64,
         sink: &crate::events::SharedSink,
     ) -> Result<()> {
         let clips: Vec<_> = timeline.included_clips().collect();
@@ -207,16 +209,34 @@ impl VideoEngine for FfmpegCli {
         // audio gets a 20ms fade at both edges so joins never click — video
         // stays a hard cut, timing is untouched.
         let mut filter = String::new();
+        // Global A/V sync nudge, applied ONCE before the per-clip trims:
+        // positive = delay audio (silence pad), negative = audio starts
+        // |offset| early (trim). The per-clip atrims read the shifted stream.
+        let audio_src = if audio_offset_s.abs() > 0.001 {
+            if audio_offset_s > 0.0 {
+                let ms = (audio_offset_s * 1000.0).round() as i64;
+                filter.push_str(&format!("[0:a]adelay={ms}:all=1[ash];"));
+            } else {
+                filter.push_str(&format!(
+                    "[0:a]atrim=start={:.3},asetpts=PTS-STARTPTS[ash];",
+                    -audio_offset_s
+                ));
+            }
+            "[ash]"
+        } else {
+            "[0:a]"
+        };
         for (i, c) in clips.iter().enumerate() {
             let dur = c.duration();
             let fade = (0.02_f64).min(dur / 4.0);
             filter.push_str(&format!(
                 "[0:v]trim=start={in_}:end={out},setpts=PTS-STARTPTS[v{i}];\
-                 [0:a]atrim=start={in_}:end={out},asetpts=PTS-STARTPTS,\
+                 {audio_src}atrim=start={in_}:end={out},asetpts=PTS-STARTPTS,\
                  afade=t=in:st=0:d={fade:.3},afade=t=out:st={fo:.3}:d={fade:.3}[a{i}];",
                 in_ = c.source_in,
                 out = c.source_out,
                 fo = (dur - fade).max(0.0),
+                audio_src = audio_src,
             ));
         }
         for i in 0..clips.len() {
@@ -493,6 +513,7 @@ impl VideoEngine for MockVideoEngine {
         _m: &Media,
         _t: &Timeline,
         _o: &str,
+        _offset: f64,
         _sink: &crate::events::SharedSink,
     ) -> Result<()> {
         Err(CoreError::Unavailable(
@@ -535,12 +556,13 @@ impl VideoEngine for AutoVideoEngine {
         media: &Media,
         timeline: &Timeline,
         out_path: &str,
+        audio_offset_s: f64,
         sink: &crate::events::SharedSink,
     ) -> Result<()> {
         if crate::capabilities::probe().media_ready() {
-            FfmpegCli.render_mp4(media, timeline, out_path, sink).await
+            FfmpegCli.render_mp4(media, timeline, out_path, audio_offset_s, sink).await
         } else {
-            MockVideoEngine.render_mp4(media, timeline, out_path, sink).await
+            MockVideoEngine.render_mp4(media, timeline, out_path, audio_offset_s, sink).await
         }
     }
 

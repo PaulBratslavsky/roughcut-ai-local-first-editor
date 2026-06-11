@@ -186,4 +186,17 @@ impl Editor {
         self.inner.store.save_preferences(&prefs)?;
         Ok(prefs)
     }
+
+    /// A/V sync nudge — project metadata, persisted, not journaled.
+    pub fn set_audio_offset(&self, project_id: uuid::Uuid, offset_s: f64) -> crate::error::Result<()> {
+        self.ensure_loaded(project_id)?;
+        let mut state = self.inner.state.lock().unwrap();
+        let entry = state
+            .get_mut(&project_id)
+            .and_then(|e| e.project.as_mut())
+            .ok_or_else(|| crate::error::CoreError::NotFound(format!("project {project_id}")))?;
+        entry.audio_offset_s = offset_s;
+        self.inner.store.save_project(entry)?;
+        Ok(())
+    }
 }

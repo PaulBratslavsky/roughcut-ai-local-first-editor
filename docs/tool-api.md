@@ -73,6 +73,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `trim_clip { project_id, clip_id, new_source_in, new_source_out } -> { action, timeline }`
 - `split_clip { project_id, clip_id, at_time } -> { clips: [Clip, Clip], timeline, action }`
 - `reorder_clip { project_id, clip_id, new_order } -> { action, timeline }`
+- `set_audio_offset { project_id, offset_s } -> { audio_offset_s }` — A/V sync nudge (±2s; positive delays audio); non-destructive metadata, applied at preview + MP4 export; not journaled
 - `set_global_padding { project_id, start_s, end_s, linked } -> { action, timeline }`
 
 ### Semantic / LLM

@@ -396,6 +396,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       updated_at: now,
       schema_version: 2,
       deleted_at: null,
+      audio_offset_s: 0,
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -774,6 +775,12 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       method: "heuristic",
       notes: "(browser mock) longest segments first",
     };
+  },
+
+  set_audio_offset(args): unknown {
+    const p = requireProject(args.project_id);
+    p.audio_offset_s = Number(args.offset_s ?? 0);
+    return { audio_offset_s: p.audio_offset_s };
   },
 
   append_media(args): unknown {

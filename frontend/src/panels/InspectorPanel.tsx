@@ -2,9 +2,11 @@
 // target length, cut aggressiveness, and custom filler words.
 
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { callTool } from "../ipc/api";
 import {
   useApplyDurationCut,
+  useProject,
   usePreferences,
   useSetGlobalPadding,
   useSetPreferences,
@@ -45,6 +47,46 @@ function PaddingSlider({
 /** "Make it N minutes" as a deterministic control: type a target, see the
  *  plan ("cut 38 segments → 19:58"), Apply lands it as ONE undoable action —
  *  the same plan_duration_cut engine the chat and MCP clients use. */
+function AudioSyncSection({ projectId }: { projectId: string }) {
+  const project = useProject(projectId);
+  const queryClient = useQueryClient();
+  const saved = project.data?.audio_offset_s ?? 0;
+  const [ms, setMs] = useState<number | null>(null);
+  const value = ms ?? Math.round(saved * 1000);
+  const commit = async (v: number) => {
+    setMs(v);
+    await callTool("set_audio_offset", { project_id: projectId, offset_s: v / 1000 });
+    await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+  };
+  return (
+    <section className="inspector-section">
+      <h3>Audio sync</h3>
+      <p className="section-note">
+        Hearing words before lips move? Drag right to delay the audio.
+        Applies to playback and export — the file is untouched.
+      </p>
+      <div className="audio-sync-row">
+        <input
+          type="range"
+          min={-500}
+          max={500}
+          step={10}
+          value={value}
+          onChange={(e) => setMs(Number(e.target.value))}
+          onMouseUp={() => void commit(value)}
+          onTouchEnd={() => void commit(value)}
+        />
+        <span className="audio-sync-value">
+          {value > 0 ? "+" : ""}{value} ms
+        </span>
+        {value !== 0 && (
+          <button className="link-btn" onClick={() => void commit(0)}>reset</button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function TargetLengthSection({ projectId }: { projectId: string }) {
   const { data: timeline } = useTimeline(projectId);
   const applyCut = useApplyDurationCut();
@@ -228,6 +270,7 @@ export function InspectorPanel({ projectId }: { projectId: string }) {
       <div className="inspector-divider" />
 
       <TargetLengthSection projectId={projectId} />
+      <AudioSyncSection projectId={projectId} />
 
       <div className="inspector-divider" />
 

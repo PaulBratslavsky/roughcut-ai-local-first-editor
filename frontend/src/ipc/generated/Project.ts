@@ -6,4 +6,10 @@ export type Project = { id: string, name: string, media: Media | null, timeline:
 /**
  * Trash: set on delete, cleared on restore; purged after 30 days.
  */
-deleted_at: string | null, };
+deleted_at: string | null, 
+/**
+ * Audio/video sync nudge, seconds. Positive = delay audio (fixes audio
+ * arriving ahead of lips — avfoundation mics start before the camera
+ * warms up). Applied non-destructively at preview and export.
+ */
+audio_offset_s: number, };

@@ -367,6 +367,13 @@ handler!(h_read_transcript, |e, a, _s| {
     })
 });
 
+handler!(h_set_audio_offset, |e, a, _s| {
+    let pid = arg_uuid(a, "project_id")?;
+    let offset = a["offset_s"].as_f64().unwrap_or(0.0).clamp(-2.0, 2.0);
+    e.set_audio_offset(pid, offset)?;
+    Ok(serde_json::json!({ "audio_offset_s": offset }))
+});
+
 handler!(h_append_media, |e, a, _s| {
     let media = e.append_media(arg_uuid(a, "project_id")?, arg_str(a, "file_path")?).await?;
     Ok(serde_json::json!({ "media": media, "note": "re-run transcribe to caption the appended span; existing cuts kept their timestamps" }))
@@ -698,6 +705,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
+    tool!("set_audio_offset", "A/V sync nudge, seconds (clamped to ±2). POSITIVE delays audio — the fix when you hear words before lips move (mics start before cameras warm up). Applied non-destructively at preview and export; not an undoable edit.",
+        || obj(json!({"project_id": pid_schema(), "offset_s": {"type": "number"}}), &["project_id", "offset_s"]),
+        agent: false, meta: false, h_set_audio_offset),
     tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Re-run transcribe afterwards to caption the appended span.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
         agent: false, meta: false, mutating: true, h_append_media),

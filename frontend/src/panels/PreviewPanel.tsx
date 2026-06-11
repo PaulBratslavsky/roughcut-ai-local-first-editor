@@ -2,7 +2,7 @@
 // controls, and the Cut/Original readouts. Everything that moves the
 // playhead lives in playback/engine.ts — this component only renders.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { isTauri, mediaSrc } from "../ipc/api";
 import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
@@ -48,6 +48,41 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
   const [videoError, setVideoError] = useState<string | null>(null);
 
+  // A/V sync nudge: with a non-zero offset the <video> is muted and a shadow
+  // <audio> of the same source carries the sound, shifted by the offset and
+  // re-synced whenever drift exceeds 50ms. Offset 0 = no follower at all.
+  const audioOffset = project?.audio_offset_s ?? 0;
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video || !audio || audioOffset === 0) return;
+    const target = () => Math.max(0, video.currentTime - audioOffset);
+    const resync = () => {
+      if (Math.abs(audio.currentTime - target()) > 0.05) audio.currentTime = target();
+      audio.playbackRate = video.playbackRate;
+    };
+    const onPlay = () => {
+      resync();
+      void audio.play().catch(() => {});
+    };
+    const onPause = () => audio.pause();
+    video.addEventListener("play", onPlay);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("seeked", resync);
+    video.addEventListener("timeupdate", resync);
+    video.addEventListener("ratechange", resync);
+    if (!video.paused) onPlay();
+    return () => {
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("seeked", resync);
+      video.removeEventListener("timeupdate", resync);
+      video.removeEventListener("ratechange", resync);
+      audio.pause();
+    };
+  }, [audioOffset, src]);
+
   // The frame takes the media's real shape (vertical shorts get a tall,
   // centered frame instead of drowning in a 16:9 letterbox), capped so the
   // tools below stay reachable.
@@ -76,6 +111,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     <div className="preview-card card">
       {/* Collapsed: the picture hides but the <video> stays MOUNTED, so
           playback state (and audio, if playing) survives the toggle. */}
+      {audioOffset !== 0 && src && <audio ref={audioRef} src={src} preload="auto" />}
       <div className="preview-stage" style={collapsed ? { display: "none" } : undefined}>
       <div className="preview-frame" style={frameStyle} onClick={() => togglePlaying()}>
         {src ? (
@@ -94,6 +130,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
               );
             }}
             playsInline
+            muted={audioOffset !== 0}
           />
         ) : (
           <div className="preview-placeholder">

@@ -602,6 +602,11 @@ pub struct Project {
     /// Trash: set on delete, cleared on restore; purged after 30 days.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Audio/video sync nudge, seconds. Positive = delay audio (fixes audio
+    /// arriving ahead of lips — avfoundation mics start before the camera
+    /// warms up). Applied non-destructively at preview and export.
+    #[serde(default)]
+    pub audio_offset_s: f64,
 }
 
 impl Project {
@@ -618,6 +623,7 @@ impl Project {
             // read fresh at use time (one source of truth).
             schema_version: 2,
             deleted_at: None,
+            audio_offset_s: 0.0,
         }
     }
 
