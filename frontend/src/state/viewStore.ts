@@ -46,7 +46,26 @@ function patch(p: Partial<ViewState>): void {
   viewStore.setState((s) => ({ ...s, ...p }));
 }
 
-export const setProjectId = (projectId: string | null) => patch({ projectId });
+/** Switching projects resets the viewport — scroll, zoom, playhead, and
+ *  selection belong to the project you were just looking at. (A 2:50 short
+ *  opened after a 40-minute edit otherwise lands on an empty timeline,
+ *  scrolled to minute 7 of footage that doesn't exist.) */
+export function setProjectId(projectId: string | null): void {
+  viewStore.setState((s) => {
+    if (s.projectId === projectId) return s;
+    return {
+      ...s,
+      projectId,
+      playhead: 0,
+      seekNonce: s.seekNonce + 1,
+      playing: false,
+      zoom: 6,
+      scrollX: 0,
+      selectedClipId: null,
+      selectedSegmentIds: [],
+    };
+  });
+}
 export const setPlayhead = (playhead: number) => patch({ playhead: Math.max(0, playhead) });
 
 /** Seek: moves the playhead AND asks the video element to jump there. */

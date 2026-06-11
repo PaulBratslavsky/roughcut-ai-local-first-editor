@@ -708,6 +708,58 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     };
   },
 
+  /** Duration planner: longest still-included segments go first (the core
+   *  ranks by embedding centrality; the mock only mirrors the shape). */
+  async plan_duration_cut(args) {
+    const p = requireProject(args.project_id);
+    const target = Number(args.target_duration_s);
+    const includedOverlap = (start: number, end: number) =>
+      p.timeline.clips
+        .filter((c) => c.included)
+        .reduce((acc, c) => acc + Math.max(0, Math.min(end, c.source_out) - Math.max(start, c.source_in)), 0);
+    const before = p.timeline.clips
+      .filter((c) => c.included)
+      .reduce((acc, c) => acc + (c.source_out - c.source_in), 0);
+    const candidates = (state.transcript?.segments ?? [])
+      .filter((s) => !s.is_silence && s.text)
+      .slice(2, -2)
+      .map((s) => ({ id: s.id, saved: includedOverlap(s.start, s.end) }))
+      .filter((c) => c.saved > 0.2)
+      .sort((a, b) => b.saved - a.saved);
+    const segment_ids: string[] = [];
+    let projected = before;
+    for (const c of candidates) {
+      if (projected <= target) break;
+      segment_ids.push(c.id);
+      projected -= c.saved;
+    }
+    if (args.apply && segment_ids.length > 0) {
+      const cut = (await tools.cut_by_transcript({ project_id: args.project_id, segment_ids })) as {
+        action?: unknown;
+      };
+      const after = p.timeline.clips
+        .filter((c) => c.included)
+        .reduce((acc, c) => acc + (c.source_out - c.source_in), 0);
+      return {
+        applied: segment_ids.length,
+        action: cut.action,
+        before_s: before,
+        included_duration_s: after,
+        target_s: target,
+        method: "heuristic",
+        notes: "(browser mock) longest segments first",
+      };
+    }
+    return {
+      segment_ids,
+      before_s: before,
+      projected_after_s: Math.max(0, projected),
+      target_s: target,
+      method: "heuristic",
+      notes: "(browser mock) longest segments first",
+    };
+  },
+
   // ---- Semantic / LLM ----------------------------------------------------------
 
   find_segments(args) {

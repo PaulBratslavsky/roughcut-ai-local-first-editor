@@ -424,3 +424,58 @@ async fn open_project_backfills_a_missing_semantic_index() {
         call(&editor, "find_segments", json!({ "project_id": pid, "query": "hiking trip" })).await;
     assert_eq!(found["method"], "hybrid");
 }
+
+#[tokio::test]
+async fn plan_duration_cut_reaches_the_target() {
+    let editor = Editor::test_instance();
+    editor.set_embedder_for_tests(std::sync::Arc::new(roughcut_core::adapters::MockEmbedder));
+    let project =
+        call(&editor, "create_project", json!({ "name": "long", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let pid_u = uuid::Uuid::parse_str(&pid).unwrap();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    editor.index_transcript(pid_u).await.unwrap();
+
+    let before = editor.get_timeline(pid_u).unwrap().included_duration();
+    let target = before * 0.5;
+    let plan =
+        call(&editor, "plan_duration_cut", json!({ "project_id": pid, "target_duration_s": target }))
+            .await;
+    assert_eq!(plan["method"], "centrality");
+    let ids = plan["segment_ids"].as_array().unwrap();
+    assert!(!ids.is_empty(), "halving the video must propose cuts");
+    assert!(
+        plan["projected_after_s"].as_f64().unwrap() <= target + 0.5,
+        "plan should reach the target: {plan}"
+    );
+
+    // Apply the plan with one batched cut; the timeline really shrinks.
+    let cut = call(
+        &editor,
+        "cut_by_transcript",
+        json!({ "project_id": pid, "segment_ids": ids }),
+    )
+    .await;
+    let after = cut["timeline"]["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["included"] == true)
+        .map(|c| c["source_out"].as_f64().unwrap() - c["source_in"].as_f64().unwrap())
+        .sum::<f64>();
+    assert!(after < before * 0.6, "included duration should drop near the target: {after} vs {before}");
+
+    // apply=true: plan + cut in ONE call, receipt carries the new duration.
+    let smaller = after * 0.6;
+    let receipt = call(
+        &editor,
+        "plan_duration_cut",
+        json!({ "project_id": pid, "target_duration_s": smaller, "apply": true }),
+    )
+    .await;
+    assert!(receipt["applied"].as_u64().unwrap() > 0, "apply should cut: {receipt}");
+    assert!(
+        receipt["included_duration_s"].as_f64().unwrap() <= smaller + 0.5,
+        "receipt duration should be at the target: {receipt}"
+    );
+}

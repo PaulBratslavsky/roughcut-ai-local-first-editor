@@ -233,10 +233,12 @@ handler!(h_detect_takes, |e, a, _s| {
 });
 
 handler!(h_generate_rough_cut, |e, a, s| {
-    let (timeline, cut_count) = e
+    // `action` included so orchestrators (and the agent's undo accounting)
+    // see the rough cut as the edit it is.
+    let (action, timeline, cut_count) = e
         .generate_rough_cut(arg_uuid(a, "project_id")?, arg_aggressiveness(a), s)
         .await?;
-    Ok(json!({ "timeline": timeline, "cut_count": cut_count }))
+    Ok(json!({ "action": action, "timeline": timeline, "cut_count": cut_count }))
 });
 
 handler!(h_cut_range, |e, a, s| {
@@ -355,6 +357,36 @@ handler!(h_read_transcript, |e, a, _s| {
             "segments": page,
         }))
     })
+});
+
+handler!(h_plan_duration_cut, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let plan = e.plan_duration_cut(
+        project_id,
+        a["target_duration_s"]
+            .as_f64()
+            .ok_or_else(|| CoreError::InvalidArg("target_duration_s (seconds) required".into()))?,
+    )?;
+    // apply: plan AND cut in one step — one undoable action, small receipt.
+    // Crucial for small local models: a 400-id plan must never round-trip
+    // through the model (it WILL get truncated or mangled).
+    if a["apply"].as_bool().unwrap_or(false) && !plan.segment_ids.is_empty() {
+        let outcome = e.apply_edit(
+            project_id,
+            EditOp::CutSegments { segment_ids: plan.segment_ids.clone() },
+            s,
+        )?;
+        return Ok(json!({
+            "applied": plan.segment_ids.len(),
+            "action": outcome.action,
+            "before_s": plan.before_s,
+            "included_duration_s": outcome.timeline.included_duration(),
+            "target_s": plan.target_s,
+            "method": plan.method,
+            "notes": plan.notes,
+        }));
+    }
+    Ok(serde_json::to_value(plan)?)
 });
 
 handler!(h_find_segments, |e, a, _s| {
@@ -614,6 +646,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, h_set_global_padding),
+    tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: ranks still-included segments by how central they are to the video (least-central tangents cut first; intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
+        || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),
+        agent: true, meta: false, h_plan_duration_cut),
     tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
         || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}, "limit": {"type": "integer", "description": "max 50, default 8"}}), &["project_id", "query"]),
         agent: true, meta: false, h_find_segments),

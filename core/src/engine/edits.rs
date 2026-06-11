@@ -108,7 +108,7 @@ impl Editor {
         project_id: Uuid,
         aggressiveness: Option<Aggressiveness>,
         source: ActionSource,
-    ) -> Result<(Timeline, u32)> {
+    ) -> Result<(EditAction, Timeline, u32)> {
         self.ensure_loaded(project_id)?;
         if self.get_transcript(project_id)?.is_none() {
             self.transcribe(project_id, None).await?;
@@ -117,7 +117,7 @@ impl Editor {
         let aggr = aggressiveness.unwrap_or(prefs.cut_aggressiveness);
         let outcome = self.apply_edit(project_id, EditOp::RoughCut { aggressiveness: aggr }, source)?;
         let cut_count = outcome.timeline.cut_count;
-        Ok((outcome.timeline, cut_count))
+        Ok((outcome.action, outcome.timeline, cut_count))
     }
 
     pub fn undo(&self, project_id: Uuid) -> Result<(Option<EditAction>, Timeline)> {

@@ -39,6 +39,14 @@ fn system_prompt(project_id: Uuid) -> String {
          a single cut_by_transcript call with ALL the ids (its segment_ids field is \
          an array), or one apply_edits call for mixed operations. Never cut one \
          segment per call, and never search again after you have results. \
+         DURATION TARGETS: when the user names a length ('make it 20 minutes', \
+         'cut it in half'), make ONE call: plan_duration_cut with \
+         target_duration_s and apply=true — it ranks, cuts, and reports the new \
+         included_duration_s in a single undoable step. When that report is at \
+         or below the target, the job is DONE: reply with your summary. Do not \
+         ferry segment ids yourself, do not run generate_rough_cut before or \
+         after (it only removes fillers and cannot hit a duration), and do not \
+         keep cutting past the target. \
          Every change is non-destructive and undoable. When you are done, reply \
          with a one-sentence summary of what you changed instead of calling more \
          tools. \
@@ -256,8 +264,21 @@ pub async fn run_instruction_with(
                 })
             } else {
                 let r = match tools::dispatch_basic(editor, &name, &args, source).await {
-                    Ok(v) => {
+                    Ok(mut v) => {
                         harvest_actions(&v, &mut actions);
+                        // Duration feedback: every edit tells the model where
+                        // the cut stands, so duration targets are checkable.
+                        if is_mutating(&name) {
+                            if let Ok(tl) = editor.get_timeline(project_id) {
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert(
+                                        "included_duration_s".into(),
+                                        json!((tl.included_duration() * 10.0).round() / 10.0),
+                                    );
+                                    obj.insert("source_duration_s".into(), json!(tl.duration));
+                                }
+                            }
+                        }
                         v
                     }
                     Err(e) => e.to_json(),
@@ -379,6 +400,18 @@ fn truncate_json(v: &Value) -> Value {
                             "duration": val["duration"],
                             "clips": format!("{} clips (omitted)", val["clips"].as_array().map(|a| a.len()).unwrap_or(0)),
                         }),
+                    );
+                } else if k == "segment_ids" && val.as_array().map(|a| a.len() > 20).unwrap_or(false) {
+                    // NEVER hand the model a silently-shortened id list — it
+                    // will act on the fragment as if it were the whole plan.
+                    // (This exact bug shipped a 20-of-408 cut.)
+                    out.insert(
+                        "segment_ids".into(),
+                        json!(format!(
+                            "{} ids (too many to list — re-run plan_duration_cut with apply=true \
+                             to act on all of them)",
+                            val.as_array().map(|a| a.len()).unwrap_or(0)
+                        )),
                     );
                 } else {
                     out.insert(k.clone(), truncate_json(val));

@@ -42,6 +42,8 @@ function summarizeCall(tool: string, args?: Record<string, unknown>): string {
       return "scanning for silences";
     case "detect_takes":
       return "looking for repeated takes";
+    case "plan_duration_cut":
+      return `planning cuts to reach ${fmtTime(Number(a.target_duration_s ?? 0))}`;
     case "cut_by_transcript":
     case "restore_by_transcript": {
       const n = Array.isArray(a.segment_ids) ? a.segment_ids.length : 0;
@@ -80,7 +82,11 @@ function summarizeResult(result?: Record<string, unknown>): string | null {
     const dur = typeof r.included_duration_s === "number" ? ` — cut runs ${fmtTime(r.included_duration_s)}` : "";
     return `${r.actions.length} edit${r.actions.length === 1 ? "" : "s"} applied${dur}`;
   }
+  if (typeof r.applied === "number" && typeof r.target_s === "number")
+    return `cut ${r.applied} segments → ${fmtTime(Number(r.included_duration_s ?? 0))} (target ${fmtTime(r.target_s)})`;
   if (r.action?.description) return String(r.action.description);
+  if (typeof r.projected_after_s === "number" && Array.isArray(r.segment_ids))
+    return `plan: cut ${r.segment_ids.length} segments → ${fmtTime(r.projected_after_s)}`;
   if (Array.isArray(r.segments)) return `${r.segments.length} match${r.segments.length === 1 ? "" : "es"}`;
   if (typeof r.cut_count === "number" && r.timeline === undefined)
     return `${r.cut_count} cuts on the timeline`;
