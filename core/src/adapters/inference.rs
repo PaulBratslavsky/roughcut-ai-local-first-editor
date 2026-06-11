@@ -25,6 +25,9 @@ impl ChatMessage {
     pub fn user(text: &str) -> Self {
         Self { role: "user".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
     }
+    pub fn assistant(text: &str) -> Self {
+        Self { role: "assistant".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
+    }
     pub fn tool_result(id: &str, content: String) -> Self {
         Self { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(id.into()) }
     }

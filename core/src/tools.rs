@@ -425,8 +425,18 @@ handler!(h_apply_edits, |e, a, s| {
 });
 
 handler!(h_apply_instruction, |e, a, s| {
-    let outcome = agent::run_instruction(e, arg_uuid(a, "project_id")?, arg_str(a, "instruction")?, s)
-        .await?;
+    // Optional `history`: [{role: "user"|"agent", text}] — recent chat turns
+    // so follow-ups ("apply the edits", "do it") resolve against them.
+    let history: Vec<agent::HistoryTurn> =
+        serde_json::from_value(a.get("history").cloned().unwrap_or(json!([]))).unwrap_or_default();
+    let outcome = agent::run_instruction(
+        e,
+        arg_uuid(a, "project_id")?,
+        arg_str(a, "instruction")?,
+        &history,
+        s,
+    )
+    .await?;
     Ok(serde_json::to_value(outcome)?)
 });
 
@@ -614,7 +624,7 @@ static REGISTRY: &[ToolSpec] = &[
         || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"type": "object", "description": "EditOp object with a type field"}}}), &["project_id", "edits"]),
         agent: true, meta: false, h_apply_edits),
     tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
-        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}}), &["project_id", "instruction"]),
+        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "history": {"type": "array", "description": "recent chat turns, oldest first", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["user", "agent"]}, "text": {"type": "string"}}}}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
     tool!("generate_chapters", "Generate YouTube-style chapters from the transcript.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),

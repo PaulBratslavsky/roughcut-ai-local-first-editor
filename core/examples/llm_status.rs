@@ -1,4 +1,5 @@
-//! Print the managed-LLM runtime status (live check against local services).
+//! Print the provisioning status (live check against local services) — the
+//! same shape the setup screen fetches, runtime details included.
 use roughcut_core::Editor;
 use roughcut_core::events::NullSink;
 use std::sync::Arc;
@@ -10,6 +11,6 @@ async fn main() {
         Arc::new(NullSink),
     )
     .unwrap();
-    let s = roughcut_core::llm_runtime::status(&editor).await.unwrap();
+    let s = roughcut_core::setup::status(&editor).await;
     println!("{}", serde_json::to_string_pretty(&s).unwrap());
 }

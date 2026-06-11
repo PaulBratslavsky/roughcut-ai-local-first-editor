@@ -26,6 +26,25 @@ pub struct TierStatus {
     pub recommended: bool,
 }
 
+/// LLM runtime details: which runtime is around and what it has loaded.
+/// Lives INSIDE [`SetupStatus`] — the UI fetches one shape, the core probes
+/// the inference server once.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStatus {
+    /// `ollama` CLI on PATH (preferred runtime).
+    pub ollama_cli: bool,
+    /// Model ids the inference server reports.
+    pub models: Vec<String>,
+    pub chat_model_present: bool,
+    pub embedding_model_present: bool,
+    /// llama-server sidecar binary installed in <data dir>/bin.
+    pub llama_server_installed: bool,
+    /// The sidecar this app launched is currently running.
+    pub managed_running: bool,
+    /// GGUF files available in the models dir (for the sidecar path).
+    pub ggufs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupStatus {
     /// ffmpeg + ffprobe both resolved.
@@ -50,22 +69,35 @@ pub struct SetupStatus {
     pub inference_model: String,
     /// Embedding model (semantic search) endpoint reachable (same server).
     pub embedding_model: String,
+    pub runtime: RuntimeStatus,
     pub demo: bool,
     /// Why demo mode is active (None when it isn't).
     pub demo_reason: Option<String>,
 }
 
-/// Snapshot of `capabilities::probe()` + live server checks for the setup
+/// Snapshot of `capabilities::probe()` + ONE live server check for the setup
 /// screen — resolved at call time, so it's truthful even after mid-session
-/// installs/downloads.
+/// installs/downloads. This is the single provisioning status: reachability
+/// and the model list come from the same `/models` probe, so they can never
+/// contradict each other.
 pub async fn status(editor: &Editor) -> SetupStatus {
     let caps = capabilities::probe();
     let demo = editor.demo_mode();
     let ram_gb = capabilities::system_ram_gb();
     let prefs = editor.get_preferences().unwrap_or_default();
-    let inference_reachable = match editor.inference() {
-        Ok(client) => client.healthy().await,
-        Err(_) => false,
+    let (inference_reachable, models) = probe_inference(&prefs.inference_endpoint).await;
+    let has = |tag: &str| {
+        let base = tag.split(':').next().unwrap_or(tag);
+        models.iter().any(|m| m == tag || m.starts_with(base))
+    };
+    let runtime = RuntimeStatus {
+        ollama_cli: crate::llm_runtime::ollama_cli_available(),
+        chat_model_present: has(&prefs.inference_model),
+        embedding_model_present: has(&prefs.embedding_model),
+        models,
+        llama_server_installed: crate::llm_runtime::llama_server_installed(),
+        managed_running: crate::llm_runtime::managed_running(),
+        ggufs: crate::llm_runtime::list_ggufs(),
     };
     let recommended_id = recommended_tier(ram_gb);
     let tiers = MODEL_TIERS
@@ -92,12 +124,41 @@ pub async fn status(editor: &Editor) -> SetupStatus {
         inference_endpoint: prefs.inference_endpoint,
         inference_model: prefs.inference_model,
         embedding_model: prefs.embedding_model,
+        runtime,
         demo,
         demo_reason: if demo {
             caps.demo_reason().or_else(|| Some("fixture adapters forced (test instance)".into()))
         } else {
             None
         },
+    }
+}
+
+/// The one inference-server probe: GET `{endpoint}/models` with a short
+/// timeout. Reachability and the model list come from the same response —
+/// the old split (setup pinged health, llm_runtime listed models) could
+/// report contradictory state when one timed out.
+async fn probe_inference(endpoint: &str) -> (bool, Vec<String>) {
+    let resp = reqwest::Client::new()
+        .get(format!("{}/models", endpoint.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await;
+    match resp {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v["data"].as_array().map(|a| {
+                        a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect()
+                    })
+                })
+                .unwrap_or_default();
+            (true, models)
+        }
+        _ => (false, vec![]),
     }
 }
 

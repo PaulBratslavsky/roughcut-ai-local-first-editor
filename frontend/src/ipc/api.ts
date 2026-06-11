@@ -65,6 +65,15 @@ export async function getSetupStatus(): Promise<SetupStatus> {
     inference_endpoint: "http://localhost:11434/v1",
     inference_model: "(browser mock)",
     embedding_model: "nomic-embed-text",
+    runtime: {
+      ollama_cli: true,
+      models: ["(browser mock)"],
+      chat_model_present: true,
+      embedding_model_present: true,
+      llama_server_installed: false,
+      managed_running: false,
+      ggufs: [],
+    },
     demo: true,
     demo_reason: "browser mock",
   };
@@ -75,23 +84,6 @@ export async function getSetupStatus(): Promise<SetupStatus> {
 export async function downloadWhisperModel(tier: ModelTier): Promise<string> {
   if (!isTauri) throw new Error("model download is only available in the desktop app");
   return invoke<string>("download_whisper_model", { tier });
-}
-
-export interface LlmRuntimeStatus {
-  ollama_cli: boolean;
-  server_reachable: boolean;
-  models: string[];
-  chat_model_present: boolean;
-  embedding_model_present: boolean;
-  llama_server_installed: boolean;
-  managed_running: boolean;
-  ggufs: string[];
-}
-
-/** Managed LLM runtime status (desktop only; null in the browser). */
-export async function getLlmRuntimeStatus(): Promise<LlmRuntimeStatus | null> {
-  if (!isTauri) return null;
-  return invoke<LlmRuntimeStatus>("llm_runtime_status");
 }
 
 export async function ollamaPullModel(model: string): Promise<void> {

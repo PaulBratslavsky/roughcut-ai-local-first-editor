@@ -79,6 +79,17 @@ export interface TierStatus {
   recommended: boolean;
 }
 
+/** LLM runtime details — nested inside SetupStatus (one fetch, one probe). */
+export interface RuntimeStatus {
+  ollama_cli: boolean;
+  models: string[];
+  chat_model_present: boolean;
+  embedding_model_present: boolean;
+  llama_server_installed: boolean;
+  managed_running: boolean;
+  ggufs: string[];
+}
+
 export interface SetupStatus {
   ffmpeg: boolean;
   ffmpeg_path: string | null;
@@ -93,6 +104,7 @@ export interface SetupStatus {
   inference_endpoint: string;
   inference_model: string;
   embedding_model: string;
+  runtime: RuntimeStatus;
   demo: boolean;
   demo_reason: string | null;
 }

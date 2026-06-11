@@ -207,6 +207,8 @@ export function useGenerateRoughCut() {
 export interface ApplyInstructionArgs extends Record<string, unknown> {
   project_id: string;
   instruction: string;
+  /** Recent chat turns (oldest first) so follow-ups like "apply the edits" resolve. */
+  history?: { role: "user" | "agent"; text: string }[];
 }
 
 export function useApplyInstruction() {

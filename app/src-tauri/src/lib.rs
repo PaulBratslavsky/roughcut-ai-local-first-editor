@@ -77,13 +77,6 @@ async fn setup_status(
 }
 
 #[tauri::command]
-async fn llm_runtime_status(
-    state: State<'_, AppState>,
-) -> Result<roughcut_core::llm_runtime::LlmRuntimeStatus, Value> {
-    roughcut_core::llm_runtime::status(&state.editor).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
 async fn ollama_pull_model(state: State<'_, AppState>, model: String) -> Result<(), Value> {
     roughcut_core::llm_runtime::ollama_pull(&state.editor.sink(), &model)
         .await
@@ -157,7 +150,6 @@ pub fn run() {
             confirm_action,
             reveal_path,
             setup_status,
-            llm_runtime_status,
             ollama_pull_model,
             install_llama_server,
             download_gguf,

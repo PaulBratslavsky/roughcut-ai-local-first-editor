@@ -9,7 +9,6 @@
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent, SharedSink};
-use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -31,25 +30,10 @@ fn llama_server_path() -> PathBuf {
     bin_dir().join("llama-server")
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LlmRuntimeStatus {
-    /// `ollama` CLI on PATH (preferred runtime).
-    pub ollama_cli: bool,
-    /// The configured OpenAI-compatible server answers.
-    pub server_reachable: bool,
-    /// Model ids the server reports.
-    pub models: Vec<String>,
-    pub chat_model_present: bool,
-    pub embedding_model_present: bool,
-    /// llama-server sidecar binary installed in <data dir>/bin.
-    pub llama_server_installed: bool,
-    /// The sidecar this app launched is currently running.
-    pub managed_running: bool,
-    /// GGUF files available in the models dir (for the sidecar path).
-    pub ggufs: Vec<String>,
-}
+// Status questions (reported through `setup::status()` — the ONE
+// provisioning status the UI fetches).
 
-fn ollama_cli_available() -> bool {
+pub fn ollama_cli_available() -> bool {
     std::process::Command::new("which")
         .arg("ollama")
         .stdout(Stdio::null())
@@ -59,51 +43,24 @@ fn ollama_cli_available() -> bool {
         .unwrap_or(false)
 }
 
-pub async fn status(editor: &Editor) -> Result<LlmRuntimeStatus> {
-    let prefs = editor.get_preferences()?;
-    let http = reqwest::Client::new();
-    let models: Vec<String> = match http
-        .get(format!("{}/models", prefs.inference_endpoint.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => resp
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| {
-                v["data"].as_array().map(|a| {
-                    a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect()
-                })
-            })
-            .unwrap_or_default(),
-        _ => vec![],
-    };
-    let server_reachable = !models.is_empty()
-        || crate::adapters::OllamaEmbedder::new(&prefs.inference_endpoint, "x").reachable().await;
-    let has = |tag: &str| {
-        let base = tag.split(':').next().unwrap_or(tag);
-        models.iter().any(|m| m == tag || m.starts_with(base))
-    };
-    let ggufs = std::fs::read_dir(crate::adapters::transcribe::models_dir())
+pub fn llama_server_installed() -> bool {
+    llama_server_path().is_file()
+}
+
+pub fn managed_running() -> bool {
+    managed_child().lock().unwrap().is_some()
+}
+
+/// GGUF files available in the models dir (for the sidecar path).
+pub fn list_ggufs() -> Vec<String> {
+    std::fs::read_dir(crate::adapters::transcribe::models_dir())
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().map(|x| x == "gguf").unwrap_or(false))
                 .map(|e| e.path().to_string_lossy().into_owned())
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(LlmRuntimeStatus {
-        ollama_cli: ollama_cli_available(),
-        server_reachable,
-        chat_model_present: has(&prefs.inference_model),
-        embedding_model_present: has(&prefs.embedding_model),
-        models,
-        llama_server_installed: llama_server_path().is_file(),
-        managed_running: managed_child().lock().unwrap().is_some(),
-        ggufs,
-    })
+        .unwrap_or_default()
 }
 
 /// `ollama pull <model>` with progress events (task `model_pull`).

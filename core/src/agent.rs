@@ -38,6 +38,11 @@ fn system_prompt(project_id: Uuid) -> String {
          room). Make the requested change and nothing more. Every change is \
          non-destructive and undoable. When you are done, reply with a one-sentence \
          summary of what you changed instead of calling more tools. \
+         ACT, don't ask: never reply with a request for clarification when the \
+         conversation already names the work. If the user says 'apply the edits', \
+         'do it', 'yes', or similar, carry out the edits proposed earlier in this \
+         conversation by calling tools now. Only answer in plain text when the work \
+         is finished or genuinely impossible. \
          Always pass project_id=\"{project_id}\" to every tool."
     )
 }
@@ -109,10 +114,18 @@ fn harvest_actions(result: &Value, into: &mut Vec<EditAction>) {
     }
 }
 
+/// One prior conversation turn, oldest first. `role` is "user" or "agent".
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct HistoryTurn {
+    pub role: String,
+    pub text: String,
+}
+
 pub async fn run_instruction(
     editor: &Editor,
     project_id: Uuid,
     instruction: &str,
+    history: &[HistoryTurn],
     source: ActionSource,
 ) -> Result<InstructionOutcome> {
     let inference = editor.inference()?;
@@ -121,7 +134,7 @@ pub async fn run_instruction(
         return run_instruction_offline(editor, project_id, instruction, source).await;
     }
     let prefs = editor.get_preferences()?;
-    run_instruction_with(editor, project_id, instruction, source, inference.as_ref(), &prefs.inference_model)
+    run_instruction_with(editor, project_id, instruction, history, source, inference.as_ref(), &prefs.inference_model)
         .await
 }
 
@@ -131,6 +144,7 @@ pub async fn run_instruction_with(
     editor: &Editor,
     project_id: Uuid,
     instruction: &str,
+    history: &[HistoryTurn],
     source: ActionSource,
     inference: &dyn crate::adapters::InferenceClient,
     model: &str,
@@ -146,10 +160,20 @@ pub async fn run_instruction_with(
         })
         .collect();
 
-    let mut messages = vec![
-        ChatMessage::system(&system_prompt(project_id)),
-        ChatMessage::user(&format!("{context}\n\nInstruction: {instruction}")),
-    ];
+    // Project context lives in the system message so prior conversation turns
+    // can sit between it and the new instruction — follow-ups like "apply the
+    // edits" then resolve against what the agent said last turn.
+    let mut messages = vec![ChatMessage::system(&format!(
+        "{}\n\nProject context:\n{context}",
+        system_prompt(project_id)
+    ))];
+    for turn in history.iter().rev().take(12).rev() {
+        messages.push(match turn.role.as_str() {
+            "user" => ChatMessage::user(&turn.text),
+            _ => ChatMessage::assistant(&turn.text),
+        });
+    }
+    messages.push(ChatMessage::user(&format!("Instruction: {instruction}")));
     let mut actions: Vec<EditAction> = vec![];
     let mut summary = String::new();
 

@@ -6,13 +6,11 @@ import { useEffect, useState } from "react";
 import {
   downloadWhisperModel,
   downloadGguf,
-  getLlmRuntimeStatus,
   getSetupStatus,
   installLlamaServer,
   ollamaPullModel,
   onAppEvent,
   startManagedLlm,
-  type LlmRuntimeStatus,
 } from "../ipc/api";
 import type { ModelTier, ProgressEvent, SetupStatus } from "../ipc/types";
 
@@ -22,7 +20,6 @@ function StatusDot({ ok }: { ok: boolean }) {
 
 export function SetupPanel({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [runtime, setRuntime] = useState<LlmRuntimeStatus | null>(null);
   const [downloading, setDownloading] = useState<ModelTier | null>(null);
   const [llmBusy, setLlmBusy] = useState<string | null>(null);
   const [ggufUrl, setGgufUrl] = useState("");
@@ -31,7 +28,6 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
 
   const refresh = () => {
     void getSetupStatus().then(setStatus).catch(() => setStatus(null));
-    void getLlmRuntimeStatus().then(setRuntime).catch(() => setRuntime(null));
   };
 
   const llmAction = async (kind: string, fn: () => Promise<unknown>) => {
@@ -167,14 +163,14 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                 <strong>Chat editing</strong>
                 <span className="setup-sub">local LLM — “cut the part where…”</span>
               </div>
-              {status.inference_reachable && runtime?.chat_model_present !== false ? (
+              {status.inference_reachable && status.runtime.chat_model_present ? (
                 <p className="setup-detail">
                   {status.inference_model} via {status.inference_endpoint}
                 </p>
-              ) : status.inference_reachable && runtime && !runtime.chat_model_present ? (
+              ) : status.inference_reachable && !status.runtime.chat_model_present ? (
                 <div className="setup-detail warn">
                   Server up, but “{status.inference_model}” isn’t pulled.
-                  {runtime.ollama_cli && (
+                  {status.runtime.ollama_cli && (
                     <button
                       className="primary-btn tier-btn"
                       disabled={!!llmBusy}
@@ -184,7 +180,7 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                     </button>
                   )}
                 </div>
-              ) : runtime?.ollama_cli ? (
+              ) : status.runtime.ollama_cli ? (
                 <p className="setup-detail warn">
                   Ollama is installed but not running — start it (<code>ollama serve</code> or the
                   menu-bar app). Chat falls back to keyword find-and-cut meanwhile.
@@ -195,7 +191,7 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                   <a href="https://ollama.com" target="_blank" rel="noreferrer">Ollama</a> — or use
                   the managed runtime:
                   <div className="managed-runtime">
-                    {!runtime?.llama_server_installed ? (
+                    {!status.runtime.llama_server_installed ? (
                       <button
                         className="primary-btn tier-btn"
                         disabled={!!llmBusy}
@@ -218,11 +214,11 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                         >
                           {llmBusy === "gguf" ? "Downloading…" : "Download model"}
                         </button>
-                        {(runtime?.ggufs.length ?? 0) > 0 && (
+                        {status.runtime.ggufs.length > 0 && (
                           <button
                             className="primary-btn tier-btn"
                             disabled={!!llmBusy}
-                            onClick={() => void llmAction("start", () => startManagedLlm(runtime!.ggufs[0]!))}
+                            onClick={() => void llmAction("start", () => startManagedLlm(status.runtime.ggufs[0]!))}
                           >
                             {llmBusy === "start" ? "Starting…" : "Start local server"}
                           </button>
@@ -250,9 +246,9 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                 <span className="setup-sub">transcript embeddings — “find the part about…”</span>
               </div>
               <p className="setup-detail">
-                {status.inference_reachable && runtime?.embedding_model_present ? (
+                {status.inference_reachable && status.runtime.embedding_model_present ? (
                   <>{status.embedding_model} (same local server). Indexes build automatically after transcription.</>
-                ) : status.inference_reachable && runtime?.ollama_cli ? (
+                ) : status.inference_reachable && status.runtime.ollama_cli ? (
                   <>
                     “{status.embedding_model}” isn’t pulled.
                     <button

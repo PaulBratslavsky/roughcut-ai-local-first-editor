@@ -53,6 +53,7 @@ pub async fn escalate_to_frontier(
         editor,
         project_id,
         instruction,
+        &[],
         // Edits land tagged as externally driven, same undoable path.
         ActionSource::McpClient,
         &client,
