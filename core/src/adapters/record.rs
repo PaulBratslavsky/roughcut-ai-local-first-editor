@@ -212,12 +212,19 @@ fn mode_cache() -> &'static Mutex<std::collections::HashMap<u32, Vec<Mode>>> {
     C.get_or_init(Default::default)
 }
 
-/// Best mode for a talking head: landscape preferred, largest area, ~30fps
-/// when the range allows (60fps doubles file size for no spoken-video gain).
+/// Best mode for a talking head: true landscape beats square beats portrait
+/// (cameras offer square Center-Stage modes whose AREA beats 1080p), then
+/// closest to 16:9, then largest. fps clamps toward 30 — 60fps doubles file
+/// size for no spoken-video gain.
 fn pick_mode(modes: &[Mode]) -> Option<(Mode, f64)> {
-    let best = modes
-        .iter()
-        .max_by_key(|m| ((m.w >= m.h) as u64, m.w as u64 * m.h as u64))?;
+    let best = modes.iter().max_by_key(|m| {
+        let landscape = (m.w > m.h) as u64;
+        let aspect = m.w as f64 / m.h.max(1) as f64;
+        // 0 deviation = perfect 16:9; subtract from a big constant so
+        // closer-to-16:9 ranks higher inside an integer key.
+        let aspect_rank = 1_000_000u64.saturating_sub((aspect - 16.0 / 9.0).abs().mul_add(100_000.0, 0.0) as u64);
+        (landscape, aspect_rank, m.w as u64 * m.h as u64)
+    })?;
     let fps = 30.0_f64.clamp(best.fps_min, best.fps_max);
     Some((*best, fps))
 }
@@ -253,9 +260,11 @@ async fn spawn_take(sink: &SharedSink, camera: u32, microphone: u32, out: &PathB
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",
-            // graceful 'q' on stdin finalizes the file; faststart rewrites
-            // the index so the take is immediately web-playable
-            "-movflags", "+faststart",
+            // Fragmented MP4: the index is written incrementally, so a
+            // crash/kill mid-take loses nothing already on disk (the reason
+            // OBS records MKV — this is the WebKit-playable equivalent).
+            // finish() normalizes takes into a clean faststart MP4.
+            "-movflags", "+frag_keyframe+empty_moov",
             "-progress", "pipe:1",
             &out.to_string_lossy(),
         ])
@@ -463,7 +472,8 @@ pub async fn stop() -> Result<String> {
     };
     match takes.len() {
         0 => Err(CoreError::Other("capture produced no usable takes".into())),
-        1 => Ok(takes[0].to_string_lossy().into_owned()),
+        // Single take still goes through concat: it rewrites the fragmented
+        // container into a normal faststart MP4 (instant, stream copy).
         _ => {
             let out = recordings_dir().join(format!("{base}.mp4"));
             concat(&takes, &out).await?;
