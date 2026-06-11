@@ -29,7 +29,9 @@ hound = { version = "3.5", optional = true }
 ts-rs = { version = "10", features = ["uuid-impl", "chrono-impl"], optional = true }
 
 [features]
-whisper-native = ["dep:whisper-rs", "dep:hound"]
+# metal: whisper.cpp on the Apple GPU — CPU-only decode of a 26-min video
+# takes ~10x longer and reads as a hang.
+whisper-native = ["dep:whisper-rs", "dep:hound", "whisper-rs/metal"]
 ts-bindings = ["dep:ts-rs"]
 
 [dev-dependencies]
