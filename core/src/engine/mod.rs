@@ -65,6 +65,8 @@ pub struct Inner {
     embedder_override: Mutex<Option<Arc<dyn Embedder>>>,
     /// Pending user confirmations for externally-driven destructive ops.
     confirms: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<bool>>>,
+    /// Projects with a background index build in flight (dedup guard).
+    indexing: Mutex<std::collections::HashSet<Uuid>>,
     /// Off in headless/test contexts (no UI to answer the prompt).
     require_confirm: std::sync::atomic::AtomicBool,
     state: Mutex<HashMap<Uuid, ProjectState>>,
@@ -92,6 +94,7 @@ impl Editor {
                 demo,
                 embedder_override: Mutex::new(None),
                 confirms: Mutex::new(HashMap::new()),
+                indexing: Mutex::new(std::collections::HashSet::new()),
                 require_confirm: std::sync::atomic::AtomicBool::new(false),
                 state: Mutex::new(HashMap::new()),
             }),

@@ -67,6 +67,9 @@ impl Editor {
 
     pub fn open_project(&self, project_id: Uuid) -> Result<Project> {
         self.ensure_loaded(project_id)?;
+        // Old projects (transcribed before indexing existed) gain a semantic
+        // index in the background the first time they're opened.
+        self.backfill_index_if_missing(project_id);
         self.with_project(project_id, |p, _| Ok(p.clone()))
     }
 

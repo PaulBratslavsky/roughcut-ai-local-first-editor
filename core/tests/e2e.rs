@@ -392,3 +392,35 @@ async fn external_destructive_ops_require_confirmation() {
     .await;
     assert!(ok.is_ok());
 }
+
+#[tokio::test]
+async fn open_project_backfills_a_missing_semantic_index() {
+    let editor = Editor::test_instance();
+    // Transcribe with NO embedder reachable: transcript persists, index doesn't
+    // (this is exactly the state of projects from before indexing existed).
+    let project =
+        call(&editor, "create_project", json!({ "name": "old", "file_path": "/demo/a.mp4" })).await;
+    let pid = uuid::Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    // Let transcribe's own background index attempt run (it fails: no server).
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(editor.store().load_embeddings(pid).unwrap().is_none(), "precondition: no index");
+
+    // An embedder appears (server started); opening the project backfills.
+    editor.set_embedder_for_tests(std::sync::Arc::new(roughcut_core::adapters::MockEmbedder));
+    call(&editor, "open_project", json!({ "project_id": pid })).await;
+    let mut indexed = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if editor.store().load_embeddings(pid).unwrap().is_some() {
+            indexed = true;
+            break;
+        }
+    }
+    assert!(indexed, "open_project should build the missing index in the background");
+
+    // And the next open is a no-op (already indexed) — search is hybrid now.
+    let found =
+        call(&editor, "find_segments", json!({ "project_id": pid, "query": "hiking trip" })).await;
+    assert_eq!(found["method"], "hybrid");
+}

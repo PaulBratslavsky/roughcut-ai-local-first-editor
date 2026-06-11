@@ -31,19 +31,42 @@ fn system_prompt(project_id: Uuid) -> String {
     format!(
         "You are the editing orchestrator inside a local-first video editor. \
          You edit by calling tools against the project with id {project_id}. \
-         The footage is described by its transcript; segment ids are uuids. \
-         Workflow: use find_segments to locate content from the user's description, \
-         inspect the results, then apply the edit (cut_by_transcript for transcript \
-         segments, cut_range for raw time ranges, set_global_padding for breathing \
-         room). Make the requested change and nothing more. Every change is \
-         non-destructive and undoable. When you are done, reply with a one-sentence \
-         summary of what you changed instead of calling more tools. \
+         The transcript is ALREADY in your context below, with each segment's id, \
+         times, and text — for most requests you can pick segment ids straight from \
+         it without searching. Use find_segments at most ONCE, and only when the \
+         context was truncated or you cannot find the content by reading. \
+         EDIT IN ONE BATCH: collect every segment id you want to remove, then make \
+         a single cut_by_transcript call with ALL the ids (its segment_ids field is \
+         an array), or one apply_edits call for mixed operations. Never cut one \
+         segment per call, and never search again after you have results. \
+         Every change is non-destructive and undoable. When you are done, reply \
+         with a one-sentence summary of what you changed instead of calling more \
+         tools. \
          ACT, don't ask: never reply with a request for clarification when the \
          conversation already names the work. If the user says 'apply the edits', \
          'do it', 'yes', or similar, carry out the edits proposed earlier in this \
          conversation by calling tools now. Only answer in plain text when the work \
          is finished or genuinely impossible. \
          Always pass project_id=\"{project_id}\" to every tool."
+    )
+}
+
+/// Tools that change the project. Anything else is reading/searching.
+fn is_mutating(tool: &str) -> bool {
+    matches!(
+        tool,
+        "cut_range"
+            | "restore_range"
+            | "cut_by_transcript"
+            | "restore_by_transcript"
+            | "trim_clip"
+            | "split_clip"
+            | "reorder_clip"
+            | "set_global_padding"
+            | "apply_edits"
+            | "generate_rough_cut"
+            | "undo"
+            | "redo"
     )
 }
 
@@ -176,6 +199,14 @@ pub async fn run_instruction_with(
     messages.push(ChatMessage::user(&format!("Instruction: {instruction}")));
     let mut actions: Vec<EditAction> = vec![];
     let mut summary = String::new();
+    // Small local models loop on search (paraphrase, search again, repeat)
+    // and run out of steps with 0 edits. Two guards:
+    //  - identical calls are answered from cache with a nudge, not re-run
+    //  - after 2 read-only rounds with no edit, one steering message demands
+    //    a batch edit or a final answer
+    let mut seen_calls: std::collections::HashMap<String, Value> = Default::default();
+    let mut readonly_rounds = 0usize;
+    let mut steered = false;
 
     for step in 0..MAX_STEPS {
         let response = match inference
@@ -204,6 +235,7 @@ pub async fn run_instruction_with(
             break;
         }
         messages.push(msg);
+        let mut round_mutated = false;
         for call in tool_calls {
             let name = call.function.name.clone();
             let mut args: Value =
@@ -213,13 +245,27 @@ pub async fn run_instruction_with(
                 args["project_id"] = json!(project_id.to_string());
             }
             emit_step(editor, project_id, step, "tool_call", Some(name.clone()), Some(args.clone()), None, None);
-            let result = match tools::dispatch_basic(editor, &name, &args, source).await {
-                Ok(v) => {
-                    harvest_actions(&v, &mut actions);
-                    v
-                }
-                Err(e) => e.to_json(),
+            let call_key = format!("{name}:{args}");
+            let result = if let Some(cached) = seen_calls.get(&call_key) {
+                // Identical repeat: answer from cache, push toward acting.
+                json!({
+                    "note": "REPEAT CALL — same result as before. Stop searching; \
+                             apply the edit (one batched cut_by_transcript / \
+                             apply_edits) or give your final answer.",
+                    "result": cached,
+                })
+            } else {
+                let r = match tools::dispatch_basic(editor, &name, &args, source).await {
+                    Ok(v) => {
+                        harvest_actions(&v, &mut actions);
+                        v
+                    }
+                    Err(e) => e.to_json(),
+                };
+                seen_calls.insert(call_key, truncate_json(&r));
+                r
             };
+            round_mutated |= is_mutating(&name);
             emit_step(
                 editor,
                 project_id,
@@ -234,6 +280,20 @@ pub async fn run_instruction_with(
                 &call.id,
                 serde_json::to_string(&truncate_json(&result))?,
             ));
+        }
+        if round_mutated {
+            readonly_rounds = 0;
+        } else {
+            readonly_rounds += 1;
+            if readonly_rounds >= 2 && !steered {
+                steered = true;
+                messages.push(ChatMessage::user(
+                    "You have gathered enough. Do NOT search or read again. Either \
+                     make the edit NOW — one cut_by_transcript call with ALL the \
+                     segment ids (or one apply_edits batch) — or, if no edit is \
+                     needed, reply with your final answer in plain text.",
+                ));
+            }
         }
     }
     if summary.is_empty() {

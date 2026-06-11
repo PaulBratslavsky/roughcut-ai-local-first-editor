@@ -6,6 +6,30 @@ use crate::error::Result;
 use uuid::Uuid;
 
 impl Editor {
+    /// Backfill: projects transcribed before embedding indexing existed (or
+    /// while the embedding server was down) have a transcript but no index.
+    /// Called on project open; builds the index in the background when one
+    /// is missing, so old projects quietly gain hybrid search. Best-effort
+    /// and deduplicated; a no-op outside a tokio runtime (sync tests).
+    pub fn backfill_index_if_missing(&self, project_id: Uuid) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+        let has_transcript =
+            matches!(self.get_transcript(project_id), Ok(Some(t)) if !t.segments.is_empty());
+        let has_index =
+            matches!(self.inner.store.load_embeddings(project_id), Ok(Some(_)));
+        if !has_transcript || has_index {
+            return;
+        }
+        if !self.inner.indexing.lock().unwrap().insert(project_id) {
+            return; // already building
+        }
+        let editor = self.clone();
+        handle.spawn(async move {
+            let _ = editor.index_transcript(project_id).await;
+            editor.inner.indexing.lock().unwrap().remove(&project_id);
+        });
+    }
+
     /// Embed every speech segment and persist the vectors. Best-effort: no
     /// embedding server → Ok(0), keyword search keeps working.
     pub async fn index_transcript(&self, project_id: Uuid) -> Result<u32> {
