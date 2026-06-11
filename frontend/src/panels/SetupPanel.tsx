@@ -286,8 +286,10 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                 </p>
               ) : status.resolve.plugin_installed && !status.resolve.plugin_outdated ? (
                 <p className="setup-detail">
-                  Plugin installed. In Resolve: Workspace ▸ Scripts ▸ Utility ▸ RoughCut AI Draft
-                  (select a clip in the media pool first).
+                  Plugins installed. In Resolve (Workspace ▸ Scripts ▸ Utility): “RoughCut AI
+                  Draft” makes a fresh rough cut from the selected media-pool clip; “RoughCut
+                  Import Cut” pulls your current RoughCut edit into Resolve — works on the free
+                  version.
                 </p>
               ) : (
                 <div className="setup-detail warn">

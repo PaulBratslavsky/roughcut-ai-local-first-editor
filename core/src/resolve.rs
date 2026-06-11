@@ -6,9 +6,14 @@ use crate::error::Result;
 use serde::Serialize;
 use std::path::PathBuf;
 
-/// The script source, compiled in — updates ship with the app.
-const PLUGIN: &str = include_str!("../../resolve-plugin/RoughCut AI Draft.py");
-const PLUGIN_FILE: &str = "RoughCut AI Draft.py";
+/// The script sources, compiled in — updates ship with the app.
+/// AI Draft: fresh rough cut from a Resolve clip. Import Cut: pull the
+/// current RoughCut cut into Resolve (the free-version-friendly hand-off:
+/// free Resolve can't be driven externally, but its own menu scripts can).
+const PLUGINS: &[(&str, &str)] = &[
+    ("RoughCut AI Draft.py", include_str!("../../resolve-plugin/RoughCut AI Draft.py")),
+    ("RoughCut Import Cut.py", include_str!("../../resolve-plugin/RoughCut Import Cut.py")),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolveStatus {
@@ -42,13 +47,20 @@ fn app_installed() -> bool {
 }
 
 pub fn status() -> ResolveStatus {
-    let dest = scripts_dir().join(PLUGIN_FILE);
-    let installed_src = std::fs::read_to_string(&dest).ok();
+    let dir = scripts_dir();
+    let mut installed = true;
+    let mut outdated = false;
+    for (file, src) in PLUGINS {
+        match std::fs::read_to_string(dir.join(file)) {
+            Ok(on_disk) => outdated |= on_disk != *src,
+            Err(_) => installed = false,
+        }
+    }
     ResolveStatus {
         app_installed: app_installed(),
-        plugin_installed: installed_src.is_some(),
-        plugin_outdated: installed_src.map(|s| s != PLUGIN).unwrap_or(false),
-        scripts_dir: scripts_dir().to_string_lossy().into_owned(),
+        plugin_installed: installed,
+        plugin_outdated: installed && outdated,
+        scripts_dir: dir.to_string_lossy().into_owned(),
     }
 }
 
@@ -57,9 +69,10 @@ pub fn status() -> ResolveStatus {
 pub fn install_plugin() -> Result<String> {
     let dir = scripts_dir();
     std::fs::create_dir_all(&dir)?;
-    let dest = dir.join(PLUGIN_FILE);
-    std::fs::write(&dest, PLUGIN)?;
-    Ok(dest.to_string_lossy().into_owned())
+    for (file, src) in PLUGINS {
+        std::fs::write(dir.join(file), src)?;
+    }
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 const SCRIPTING_MODULES: &str =
@@ -81,7 +94,7 @@ import DaVinciResolveScript as dvr
 xml = r"{xml}"
 resolve = dvr.scriptapp("Resolve")
 if not resolve:
-    print("ERR:Resolve isn't reachable - is it running, and is Preferences > System > General > 'External scripting using' set to Local?")
+    print("ERR:Resolve can't be driven externally here. That needs Resolve STUDIO with 'External scripting using: Local' (Preferences > System > General). On the FREE Resolve, run Workspace > Scripts > Utility > RoughCut Import Cut INSIDE Resolve instead — same result.")
 else:
     pm = resolve.GetProjectManager()
     proj = pm.GetCurrentProject() if pm else None

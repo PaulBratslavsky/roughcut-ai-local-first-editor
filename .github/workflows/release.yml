@@ -22,6 +22,8 @@ permissions:
 jobs:
   macos:
     runs-on: macos-latest
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +48,7 @@ jobs:
       # unset GitHub secret expands to "" and still counts as present, which
       # fails the keychain import. Export the vars only when actually set.
       - name: Enable signing when secrets exist
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         run: |
           {
             echo "APPLE_CERTIFICATE<<RC_EOF";  echo "${{ secrets.APPLE_CERTIFICATE }}";  echo "RC_EOF"
