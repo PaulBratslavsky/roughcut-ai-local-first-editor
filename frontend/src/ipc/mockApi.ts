@@ -679,6 +679,35 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return { action, timeline: clone(p.timeline) };
   },
 
+  /** Batch power tool: each op routes through the matching single-op handler
+   *  above, mirroring the core (one EditAction per op, lean receipt). */
+  async apply_edits(args) {
+    const p = requireProject(args.project_id);
+    const edits = Array.isArray(args.edits) ? (args.edits as Record<string, unknown>[]) : [];
+    if (edits.length > 100) throw { code: "invalid_args", message: "max 100 edits per call" };
+    const actions: unknown[] = [];
+    for (const edit of edits) {
+      const { type, ...fields } = edit;
+      const name = type === "cut_segments" ? "cut_by_transcript"
+        : type === "restore_segments" ? "restore_by_transcript"
+        : String(type);
+      const handler = tools[name];
+      if (!handler) throw { code: "invalid_args", message: `unknown edit type ${String(type)}` };
+      const res = (await handler({ ...fields, project_id: args.project_id })) as { action?: unknown };
+      if (res?.action) actions.push(res.action);
+    }
+    const included = p.timeline.clips
+      .filter((c) => c.included)
+      .reduce((s, c) => s + (c.source_out - c.source_in), 0);
+    return {
+      applied: edits.length,
+      actions,
+      cut_count: p.timeline.cut_count,
+      included_duration_s: Number(included.toFixed(3)),
+      source_duration_s: p.timeline.duration,
+    };
+  },
+
   // ---- Semantic / LLM ----------------------------------------------------------
 
   find_segments(args) {

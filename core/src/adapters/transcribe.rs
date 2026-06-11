@@ -203,8 +203,7 @@ impl Transcriber for WhisperRs {
                 params.set_progress_callback_safe(move |pct: i32| {
                     crate::events::send(
                         &sink,
-                        crate::events::CoreEvent::progress(
-                            "transcribe",
+                        crate::events::CoreEvent::progress(crate::events::ProgressTask::Transcribe,
                             Some(media_id),
                             f64::from(pct.clamp(0, 100)) / 100.0,
                             "transcribing",
@@ -310,7 +309,7 @@ impl Transcriber for MockTranscriber {
         for i in 1..=4 {
             crate::events::send(
                 sink,
-                crate::events::CoreEvent::progress("transcribe", None, i as f64 * 0.25, "transcribing (demo)"),
+                crate::events::CoreEvent::progress(crate::events::ProgressTask::Transcribe, None, i as f64 * 0.25, "transcribing (demo)"),
             );
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         }

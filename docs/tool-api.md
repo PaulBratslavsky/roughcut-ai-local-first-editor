@@ -25,7 +25,7 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 
 | event | payload |
 |---|---|
-| `progress` | `{ task: "transcribe"\|"rough_cut"\|"export"\|"render", project_id?, fraction: number (0..1), message: string }` |
+| `progress` | `{ task: ProgressTask, project_id?, fraction: number (0..1), message: string }` — task names are GENERATED (`core/src/events.rs` → `generated/ProgressTask.ts`): `transcribe`, `rough_cut`, `export`, `model_download`, `model_pull`, `runtime_install` |
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |

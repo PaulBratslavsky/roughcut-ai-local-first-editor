@@ -32,7 +32,8 @@ import type { Timeline } from "./generated/Timeline";
 // Rust side: core/src/events.rs CoreEvent)
 // ---------------------------------------------------------------------------
 
-export type ProgressTask = "transcribe" | "rough_cut" | "export" | "render" | "model_download";
+export type { ProgressTask } from "./generated/ProgressTask";
+import type { ProgressTask } from "./generated/ProgressTask";
 
 export interface ProgressEvent {
   task: ProgressTask;

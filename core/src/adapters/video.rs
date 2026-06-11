@@ -246,8 +246,7 @@ impl VideoEngine for FfmpegCli {
                             last = pct;
                             crate::events::send(
                                 &sink2,
-                                crate::events::CoreEvent::progress(
-                                    "export", None, frac, format!("rendering MP4… {pct}%"),
+                                crate::events::CoreEvent::progress(crate::events::ProgressTask::Export, None, frac, format!("rendering MP4… {pct}%"),
                                 ),
                             );
                         }
@@ -268,7 +267,7 @@ impl VideoEngine for FfmpegCli {
         }
         crate::events::send(
             sink,
-            crate::events::CoreEvent::progress("export", None, 1.0, "render complete"),
+            crate::events::CoreEvent::progress(crate::events::ProgressTask::Export, None, 1.0, "render complete"),
         );
         Ok(())
     }

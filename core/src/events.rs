@@ -11,12 +11,27 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Every long-running operation that reports progress, by name. The ONE list:
+/// emitters pass a variant, the frontend imports the generated union — adding
+/// an operation here is the whole registration.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressTask {
+    Transcribe,
+    RoughCut,
+    Export,
+    ModelDownload,
+    ModelPull,
+    RuntimeInstall,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum CoreEvent {
     Progress {
-        /// "transcribe" | "rough_cut" | "export" | "render" | "model_download"
-        task: String,
+        task: ProgressTask,
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<Uuid>,
         fraction: f64,
@@ -57,17 +72,12 @@ pub enum CoreEvent {
 
 impl CoreEvent {
     pub fn progress(
-        task: &str,
+        task: ProgressTask,
         project_id: Option<Uuid>,
         fraction: f64,
         message: impl Into<String>,
     ) -> Self {
-        CoreEvent::Progress {
-            task: task.to_string(),
-            project_id,
-            fraction,
-            message: message.into(),
-        }
+        CoreEvent::Progress { task, project_id, fraction, message: message.into() }
     }
 
     /// The wire name the frontend listens on.

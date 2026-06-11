@@ -3,7 +3,7 @@
 
 use super::Editor;
 use crate::error::{CoreError, Result};
-use crate::events::{send, CoreEvent};
+use crate::events::{send, CoreEvent, ProgressTask};
 use crate::model::*;
 use chrono::Utc;
 use uuid::Uuid;
@@ -41,7 +41,7 @@ impl Editor {
         let prefs = self.inner.store.load_preferences()?;
         let lang = language.map(|s| s.to_string()).unwrap_or(prefs.language);
         let demo = self.demo_mode();
-        send(&self.inner.sink, CoreEvent::progress("transcribe", Some(project_id), 0.0, "starting"));
+        send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.0, "starting"));
 
         let transcript = if demo {
             self.inner.transcriber.transcribe(&media, "", &lang, &self.inner.sink).await?
@@ -50,12 +50,12 @@ impl Editor {
             let wav_str = wav.to_string_lossy().to_string();
             send(
                 &self.inner.sink,
-                CoreEvent::progress("transcribe", Some(project_id), 0.1, "extracting audio"),
+                CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.1, "extracting audio"),
             );
             self.inner.video.extract_audio_wav(&media, &wav_str).await?;
             send(
                 &self.inner.sink,
-                CoreEvent::progress("transcribe", Some(project_id), 0.25, "transcribing on-device"),
+                CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.25, "transcribing on-device"),
             );
             let t = self.inner.transcriber.transcribe(&media, &wav_str, &lang, &self.inner.sink).await;
             let _ = std::fs::remove_file(&wav);
@@ -69,7 +69,7 @@ impl Editor {
             entry.transcript = Some(transcript.clone());
         }
         self.inner.store.save_transcript(project_id, &transcript)?;
-        send(&self.inner.sink, CoreEvent::progress("transcribe", Some(project_id), 1.0, "done"));
+        send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 1.0, "done"));
         send(&self.inner.sink, CoreEvent::TranscriptChanged { project_id });
 
         // Gemma post-pass (real transcriptions only): clean up casing /
@@ -83,8 +83,7 @@ impl Editor {
                         if n > 0 {
                             send(
                                 &editor.inner.sink,
-                                CoreEvent::progress(
-                                    "transcribe",
+                                CoreEvent::progress(ProgressTask::Transcribe,
                                     Some(project_id),
                                     1.0,
                                     format!("polished {n} segment(s) with the local LLM"),

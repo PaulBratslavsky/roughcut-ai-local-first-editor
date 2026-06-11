@@ -224,7 +224,7 @@ pub async fn download_whisper_model(sink: &SharedSink, tier: &str) -> Result<Str
     let emit = |fraction: f64, message: &str| {
         crate::events::send(
             sink,
-            crate::events::CoreEvent::progress("model_download", None, fraction, message),
+            crate::events::CoreEvent::progress(crate::events::ProgressTask::ModelDownload, None, fraction, message),
         );
     };
     emit(0.0, "starting download");

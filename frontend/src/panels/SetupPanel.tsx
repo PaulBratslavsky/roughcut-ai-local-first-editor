@@ -12,7 +12,10 @@ import {
   onAppEvent,
   startManagedLlm,
 } from "../ipc/api";
-import type { ModelTier, ProgressEvent, SetupStatus } from "../ipc/types";
+import type { ModelTier, ProgressEvent, ProgressTask, SetupStatus } from "../ipc/types";
+
+/** Typo-proof: the compiler rejects a name the core can't emit. */
+const PROVISIONING_TASKS: ProgressTask[] = ["model_download", "model_pull", "runtime_install"];
 
 function StatusDot({ ok }: { ok: boolean }) {
   return <span className={`status-dot${ok ? " ok" : ""}`} aria-hidden />;
@@ -48,7 +51,7 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
     refresh();
     const t = setInterval(refresh, 5000); // picks up installs done outside the app
     const off = onAppEvent<ProgressEvent>("progress", (p) => {
-      if (["model_download", "model_pull", "runtime_install"].includes(p.task))
+      if (PROVISIONING_TASKS.includes(p.task))
         setProgress(p.fraction >= 1 ? null : p);
     });
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();

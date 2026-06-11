@@ -8,7 +8,7 @@
 
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
-use crate::events::{send, CoreEvent, SharedSink};
+use crate::events::{send, CoreEvent, ProgressTask, SharedSink};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -90,8 +90,7 @@ pub async fn ollama_pull(sink: &SharedSink, model: &str) -> Result<()> {
                         last = p;
                         send(
                             &sink2,
-                            CoreEvent::progress(
-                                "model_pull",
+                            CoreEvent::progress(ProgressTask::ModelPull,
                                 None,
                                 f64::from(p) / 100.0,
                                 format!("pulling {model2}: {p}%"),
@@ -110,7 +109,7 @@ pub async fn ollama_pull(sink: &SharedSink, model: &str) -> Result<()> {
     if !status.success() {
         return Err(CoreError::Other(format!("ollama pull {model} failed")));
     }
-    send(&sink, CoreEvent::progress("model_pull", None, 1.0, format!("{model} ready")));
+    send(&sink, CoreEvent::progress(ProgressTask::ModelPull, None, 1.0, format!("{model} ready")));
     Ok(())
 }
 
@@ -122,7 +121,7 @@ pub async fn install_llama_server(sink: &SharedSink) -> Result<String> {
     }
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
     let http = reqwest::Client::builder().user_agent("roughcut").build().unwrap();
-    send(&sink, CoreEvent::progress("runtime_install", None, 0.0, "resolving latest llama.cpp release"));
+    send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.0, "resolving latest llama.cpp release"));
     let release: serde_json::Value = http
         .get("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
         .send()
@@ -142,7 +141,7 @@ pub async fn install_llama_server(sink: &SharedSink) -> Result<String> {
 
     std::fs::create_dir_all(bin_dir())?;
     let archive = bin_dir().join("llama-server.tar.gz");
-    send(&sink, CoreEvent::progress("runtime_install", None, 0.1, "downloading llama-server"));
+    send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.1, "downloading llama-server"));
     let bytes = http
         .get(url)
         .send()
@@ -153,7 +152,7 @@ pub async fn install_llama_server(sink: &SharedSink) -> Result<String> {
         .map_err(|e| CoreError::Unavailable(format!("download: {e}")))?;
     std::fs::write(&archive, &bytes)?;
 
-    send(&sink, CoreEvent::progress("runtime_install", None, 0.7, "extracting"));
+    send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.7, "extracting"));
     let extract_dir = bin_dir().join("llama-extract");
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
@@ -191,7 +190,7 @@ pub async fn install_llama_server(sink: &SharedSink) -> Result<String> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(llama_server_path(), std::fs::Permissions::from_mode(0o755))?;
     }
-    send(&sink, CoreEvent::progress("runtime_install", None, 1.0, "llama-server installed"));
+    send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 1.0, "llama-server installed"));
     Ok(llama_server_path().to_string_lossy().into_owned())
 }
 
@@ -242,8 +241,7 @@ pub async fn download_gguf(sink: &SharedSink, url: &str) -> Result<String> {
         if total > 0 {
             send(
                 &sink,
-                CoreEvent::progress(
-                    "model_download",
+                CoreEvent::progress(ProgressTask::ModelDownload,
                     None,
                     (written as f64 / total as f64).min(0.99),
                     format!("{} MB / {} MB", written / 1048576, total / 1048576),
@@ -253,7 +251,7 @@ pub async fn download_gguf(sink: &SharedSink, url: &str) -> Result<String> {
     }
     drop(file);
     std::fs::rename(&part, &dest)?;
-    send(&sink, CoreEvent::progress("model_download", None, 1.0, "download complete"));
+    send(&sink, CoreEvent::progress(ProgressTask::ModelDownload, None, 1.0, "download complete"));
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -297,13 +295,13 @@ pub async fn start_managed(editor: &Editor, gguf_path: &str) -> Result<String> {
             let mut prefs = editor.get_preferences()?;
             prefs.inference_endpoint = endpoint.clone();
             editor.set_preferences(prefs)?;
-            send(&sink, CoreEvent::progress("runtime_install", None, 1.0, "local model server running"));
+            send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 1.0, "local model server running"));
             return Ok(endpoint);
         }
         if i % 10 == 0 {
             send(
                 &sink,
-                CoreEvent::progress("runtime_install", None, 0.9, "loading model into the local server…"),
+                CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.9, "loading model into the local server…"),
             );
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

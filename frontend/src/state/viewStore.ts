@@ -2,7 +2,6 @@
 // this is only ephemeral UI state: playhead, zoom, selection, toggles.
 
 import { Store } from "@tanstack/react-store";
-import type { Clip } from "../ipc/types";
 
 export type ActiveTab = "tools" | "chat";
 
@@ -112,24 +111,6 @@ export function zoomAroundPlayhead(factor: number, playheadDisplayTime: number):
   });
 }
 
-// ---------------------------------------------------------------------------
-// Excluded-range helpers (used by playback skip + timeline)
-// ---------------------------------------------------------------------------
-
-export interface Range { start: number; end: number }
-
-export function excludedRanges(clips: Clip[]): Range[] {
-  return clips
-    .filter((c) => !c.included)
-    .map((c) => ({ start: c.source_in, end: c.source_out }))
-    .sort((a, b) => a.start - b.start);
-}
-
-/** If `t` is inside an excluded range, return the time to jump to instead. */
-export function skipTarget(t: number, ranges: Range[]): number | null {
-  for (const r of ranges) {
-    if (t >= r.start && t < r.end - 1e-4) return r.end;
-    if (r.start > t) break;
-  }
-  return null;
-}
+// Cut-time math lives in playback/time.ts; re-exported here because the
+// timeline and transcript panels reach for it alongside view state.
+export { excludedRanges, skipTarget, type Range } from "../playback/time";
