@@ -495,38 +495,24 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
             .map(|(i, (_, t))| format!("{i}: {t}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let response = match inference
-            .chat(ChatRequest {
-                model: prefs.inference_model.clone(),
-                messages: vec![
-                    ChatMessage::system(
-                        "You fix automatic speech-recognition output from a talking-head video. \
-                         For each numbered line, correct casing, punctuation, and mis-heard \
-                         words. ASR often garbles filler sounds — short nonsense words like \
-                         'Wah', 'Erm', 'Hm' at the start of a sentence are usually 'Um' or \
-                         'Uh'; fix those. Also fix clearly mis-heard technical terms from \
-                         context. CRITICAL: keep exactly the same number of words in every \
-                         line — never merge, split, add, remove, or reorder words. Reply with \
-                         ONLY a JSON object mapping line numbers (as strings) to corrected \
-                         lines, including only the lines you changed. Reply {} if nothing \
-                         needs fixing.",
-                    ),
-                    ChatMessage::user(&numbered),
-                ],
-                tools: None,
-                temperature: 0.0,
-            })
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let text = response.message.content.unwrap_or_default();
-        let Some(json_str) = text.find('{').and_then(|s| text.rfind('}').map(|e| &text[s..=e]))
-        else {
-            continue;
-        };
-        let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str)
+        let Ok(map) = crate::llm::ask_json_with::<std::collections::HashMap<String, String>>(
+            inference.as_ref(),
+            &prefs.inference_model,
+            "transcript cleanup",
+            "You fix automatic speech-recognition output from a talking-head video. \
+             For each numbered line, correct casing, punctuation, and mis-heard \
+             words. ASR often garbles filler sounds — short nonsense words like \
+             'Wah', 'Erm', 'Hm' at the start of a sentence are usually 'Um' or \
+             'Uh'; fix those. Also fix clearly mis-heard technical terms from \
+             context. CRITICAL: keep exactly the same number of words in every \
+             line — never merge, split, add, remove, or reorder words. Reply with \
+             ONLY a JSON object mapping line numbers (as strings) to corrected \
+             lines, including only the lines you changed. Reply {} if nothing \
+             needs fixing.",
+            &numbered,
+            0.0,
+        )
+        .await
         else {
             continue;
         };
@@ -566,26 +552,16 @@ async fn llm_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>>
     let prefs = editor.get_preferences()?;
     let context = project_context(editor, project_id)?;
     let inference = editor.inference()?;
-    let response = inference
-        .chat(ChatRequest {
-            model: prefs.inference_model,
-            messages: vec![
-                ChatMessage::system(
-                    "Produce YouTube chapters for this video. Reply with ONLY a JSON array: \
-                     [{\"title\": string, \"start\": seconds}]. 3-8 chapters, first at 0.",
-                ),
-                ChatMessage::user(&context),
-            ],
-            tools: None,
-            temperature: 0.2,
-        })
-        .await?;
-    let text = response.message.content.unwrap_or_default();
-    let json_str = text
-        .find('[')
-        .and_then(|s| text.rfind(']').map(|e| &text[s..=e]))
-        .ok_or_else(|| CoreError::Inference("no JSON in chapter response".into()))?;
-    Ok(serde_json::from_str(json_str)?)
+    crate::llm::ask_json_with(
+        inference.as_ref(),
+        &prefs.inference_model,
+        "chapters",
+        "Produce YouTube chapters for this video. Reply with ONLY a JSON array: \
+         [{\"title\": string, \"start\": seconds}]. 3-8 chapters, first at 0.",
+        &context,
+        0.2,
+    )
+    .await
 }
 
 fn heuristic_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
@@ -616,27 +592,18 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
     let prefs = editor.get_preferences()?;
     if inference.healthy().await {
         let context = project_context(editor, project_id)?;
-        let response = inference
-            .chat(ChatRequest {
-                model: prefs.inference_model,
-                messages: vec![
-                    ChatMessage::system(
-                        "Suggest video metadata. Reply with ONLY JSON: \
-                         {\"titles\": [3 strings], \"description\": string}.",
-                    ),
-                    ChatMessage::user(&context),
-                ],
-                tools: None,
-                temperature: 0.6,
-            })
-            .await?;
-        let text = response.message.content.unwrap_or_default();
-        if let Some(json_str) =
-            text.find('{').and_then(|s| text.rfind('}').map(|e| &text[s..=e]))
+        if let Ok(v) = crate::llm::ask_json_with::<Value>(
+            inference.as_ref(),
+            &prefs.inference_model,
+            "title/description",
+            "Suggest video metadata. Reply with ONLY JSON: \
+             {\"titles\": [3 strings], \"description\": string}.",
+            &context,
+            0.6,
+        )
+        .await
         {
-            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
-                return Ok(v);
-            }
+            return Ok(v);
         }
     }
     // Fallback: first strong sentence as title, opening lines as description.

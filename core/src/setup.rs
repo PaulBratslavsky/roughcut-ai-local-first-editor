@@ -14,7 +14,6 @@ use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::events::SharedSink;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TierStatus {
@@ -224,57 +223,34 @@ pub async fn download_whisper_model(sink: &SharedSink, tier: &str) -> Result<Str
         return Ok(dest.to_string_lossy().into_owned());
     }
     let url = format!("{MODEL_BASE_URL}/{}", tier.file);
-    let emit = |fraction: f64, message: &str| {
-        crate::events::send(
-            sink,
-            crate::events::CoreEvent::progress(crate::events::ProgressTask::ModelDownload, None, fraction, message),
-        );
-    };
-    emit(0.0, "starting download");
-
-    let resp = reqwest::get(&url)
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("model download: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(CoreError::Unavailable(format!("model download: HTTP {}", resp.status())));
-    }
-    let total = resp.content_length().unwrap_or(tier.approx_mb * 1024 * 1024);
-
-    let part = dir.join(format!("{}.part", tier.file));
-    let mut file = std::fs::File::create(&part)?;
-    let mut hasher = Sha256::new();
-    let mut written: u64 = 0;
-    let mut last_percent = 0u64;
-    let mut resp = resp;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("model download: {e}")))?
-    {
-        use std::io::Write;
-        file.write_all(&chunk)?;
-        hasher.update(&chunk);
-        written += chunk.len() as u64;
-        let percent = written * 100 / total.max(1);
-        if percent > last_percent {
-            last_percent = percent;
-            emit(
-                (written as f64 / total.max(1) as f64).min(0.99),
-                &format!("{} MB / {} MB", written / (1024 * 1024), total / (1024 * 1024)),
-            );
-        }
-    }
-    drop(file);
-
-    let digest = format!("{:x}", hasher.finalize());
-    if digest != tier.sha256 {
-        let _ = std::fs::remove_file(&part);
-        return Err(CoreError::Other(format!(
-            "model download corrupted (sha256 {digest} != expected {}); removed — try again",
-            tier.sha256
-        )));
-    }
-    std::fs::rename(&part, &dest)?;
-    emit(1.0, "download complete (verified)");
+    crate::events::send(
+        sink,
+        crate::events::CoreEvent::progress(
+            crate::events::ProgressTask::ModelDownload,
+            None,
+            0.0,
+            "starting download",
+        ),
+    );
+    crate::download::download_to(
+        sink,
+        &url,
+        &dest,
+        crate::download::DownloadOpts {
+            task: crate::events::ProgressTask::ModelDownload,
+            sha256: Some(tier.sha256),
+            approx_bytes: Some(tier.approx_mb * 1024 * 1024),
+        },
+    )
+    .await?;
+    crate::events::send(
+        sink,
+        crate::events::CoreEvent::progress(
+            crate::events::ProgressTask::ModelDownload,
+            None,
+            1.0,
+            "download complete (verified)",
+        ),
+    );
     Ok(dest.to_string_lossy().into_owned())
 }

@@ -12,7 +12,6 @@ use crate::events::{send, CoreEvent, ProgressTask, SharedSink};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
-use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 
 const MANAGED_PORT: u16 = 47861;
@@ -48,7 +47,20 @@ pub fn llama_server_installed() -> bool {
 }
 
 pub fn managed_running() -> bool {
-    managed_child().lock().unwrap().is_some()
+    // try_wait notices a child that crashed or was killed externally —
+    // is_some() alone reported a corpse as "running" forever.
+    let mut guard = managed_child().lock().unwrap();
+    match guard.as_mut() {
+        None => false,
+        Some(child) => match child.try_wait() {
+            Ok(Some(_exit)) => {
+                *guard = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
+    }
 }
 
 /// GGUF files available in the models dir (for the sidecar path).
@@ -74,38 +86,28 @@ pub async fn ollama_pull(sink: &SharedSink, model: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| CoreError::Unavailable(format!("ollama pull: {e}")))?;
-    let stderr = child.stderr.take();
-    let sink2 = sink.clone();
     let model2 = model.to_string();
-    let progress_task = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let mut reader = tokio::io::BufReader::new(stderr).split(b'\r');
-            let mut last = 0u8;
-            while let Ok(Some(line)) = reader.next_segment().await {
-                let text = String::from_utf8_lossy(&line);
-                if let Some(p) = text.rfind('%').and_then(|i| {
-                    text[..i].split_whitespace().last().and_then(|n| n.parse::<u8>().ok())
-                }) {
-                    if p != last {
-                        last = p;
-                        send(
-                            &sink2,
-                            CoreEvent::progress(ProgressTask::ModelPull,
-                                None,
-                                f64::from(p) / 100.0,
-                                format!("pulling {model2}: {p}%"),
-                            ),
-                        );
-                    }
-                }
-            }
-        }
+    let progress_task = child.stderr.take().map(|stderr| {
+        crate::progress::stream_progress(
+            stderr,
+            sink.clone(),
+            ProgressTask::ModelPull,
+            None,
+            crate::progress::Delimiter::CarriageReturn,
+            move |text| {
+                let i = text.rfind('%')?;
+                let p: u8 = text[..i].split_whitespace().last()?.parse().ok()?;
+                Some((f64::from(p) / 100.0, format!("pulling {model2}: {p}%")))
+            },
+        )
     });
     let status = child
         .wait()
         .await
         .map_err(|e| CoreError::Other(format!("ollama pull: {e}")))?;
-    let _ = progress_task.await;
+    if let Some(t) = progress_task {
+        let _ = t.await;
+    }
     if !status.success() {
         return Err(CoreError::Other(format!("ollama pull {model} failed")));
     }
@@ -142,15 +144,17 @@ pub async fn install_llama_server(sink: &SharedSink) -> Result<String> {
     std::fs::create_dir_all(bin_dir())?;
     let archive = bin_dir().join("llama-server.tar.gz");
     send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.1, "downloading llama-server"));
-    let bytes = http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("download: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("download: {e}")))?;
-    std::fs::write(&archive, &bytes)?;
+    crate::download::download_to(
+        sink,
+        url,
+        &archive,
+        crate::download::DownloadOpts {
+            task: ProgressTask::RuntimeInstall,
+            sha256: None,
+            approx_bytes: None,
+        },
+    )
+    .await?;
 
     send(&sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, 0.7, "extracting"));
     let extract_dir = bin_dir().join("llama-extract");
@@ -221,36 +225,17 @@ pub async fn download_gguf(sink: &SharedSink, url: &str) -> Result<String> {
     if dest.is_file() {
         return Ok(dest.to_string_lossy().into_owned());
     }
-    let resp = reqwest::get(url)
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("gguf download: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(CoreError::Unavailable(format!("gguf download: HTTP {}", resp.status())));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let part = dir.join(format!("{name}.part"));
-    let mut file = std::fs::File::create(&part)?;
-    let mut written = 0u64;
-    let mut resp = resp;
-    while let Some(chunk) =
-        resp.chunk().await.map_err(|e| CoreError::Unavailable(format!("gguf download: {e}")))?
-    {
-        use std::io::Write;
-        file.write_all(&chunk)?;
-        written += chunk.len() as u64;
-        if total > 0 {
-            send(
-                &sink,
-                CoreEvent::progress(ProgressTask::ModelDownload,
-                    None,
-                    (written as f64 / total as f64).min(0.99),
-                    format!("{} MB / {} MB", written / 1048576, total / 1048576),
-                ),
-            );
-        }
-    }
-    drop(file);
-    std::fs::rename(&part, &dest)?;
+    crate::download::download_to(
+        sink,
+        url,
+        &dest,
+        crate::download::DownloadOpts {
+            task: ProgressTask::ModelDownload,
+            sha256: None,
+            approx_bytes: None,
+        },
+    )
+    .await?;
     send(&sink, CoreEvent::progress(ProgressTask::ModelDownload, None, 1.0, "download complete"));
     Ok(dest.to_string_lossy().into_owned())
 }

@@ -235,34 +235,27 @@ impl VideoEngine for FfmpegCli {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| CoreError::Unavailable(format!("ffmpeg render: {e}")))?;
-        let stdout = child.stdout.take();
-        let sink2 = sink.clone();
-        let progress_task = tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            if let Some(stdout) = stdout {
-                let mut lines = tokio::io::BufReader::new(stdout).lines();
-                let mut last = 0u8;
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
-                        let frac = (us / total_us).clamp(0.0, 0.99);
-                        let pct = (frac * 100.0) as u8;
-                        if pct != last {
-                            last = pct;
-                            crate::events::send(
-                                &sink2,
-                                crate::events::CoreEvent::progress(crate::events::ProgressTask::Export, None, frac, format!("rendering MP4… {pct}%"),
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
+        let progress_task = child.stdout.take().map(|stdout| {
+            crate::progress::stream_progress(
+                stdout,
+                sink.clone(),
+                crate::events::ProgressTask::Export,
+                None,
+                crate::progress::Delimiter::Newline,
+                move |line| {
+                    let us = line.strip_prefix("out_time_us=")?.parse::<f64>().ok()?;
+                    let frac = (us / total_us).clamp(0.0, 0.99);
+                    Some((frac, format!("rendering MP4… {}%", (frac * 100.0) as u8)))
+                },
+            )
         });
         let out = child
             .wait_with_output()
             .await
             .map_err(|e| CoreError::Other(format!("ffmpeg render: {e}")))?;
-        let _ = progress_task.await;
+        if let Some(t) = progress_task {
+            let _ = t.await; // drain the tail
+        }
         if !out.status.success() {
             return Err(CoreError::Other(format!(
                 "ffmpeg render failed: {}",

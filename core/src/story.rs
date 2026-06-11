@@ -8,7 +8,6 @@
 //! embedded inside each step, strict JSON contracts, index-based references
 //! (small models mangle uuids), and non-LLM fallbacks everywhere.
 
-use crate::adapters::inference::{ChatMessage, ChatRequest};
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent};
@@ -123,31 +122,6 @@ async fn llm_outline(
             .map(|i| format!("{i}| {}", speech[i].text))
             .collect::<Vec<_>>()
             .join("\n");
-        let response = inference
-            .chat(ChatRequest {
-                model: model.to_string(),
-                messages: vec![
-                    ChatMessage::system(
-                        "You analyze a talking-head video transcript and split it into STORY \
-                         BEATS (hook, setup, a point being made, an example, a tangent, a \
-                         recap, an outro). Lines are numbered. Reply with ONLY a JSON array: \
-                         [{\"title\": short string, \"summary\": one sentence, \"role\": \
-                         \"hook\"|\"setup\"|\"point\"|\"example\"|\"tangent\"|\"recap\"|\"outro\", \
-                         \"cut_priority\": 1-5 (1 = the spine of the video, 5 = cut first), \
-                         \"first\": first line number, \"last\": last line number}]. Beats \
-                         must be contiguous, non-overlapping, and cover every line.",
-                    ),
-                    ChatMessage::user(&numbered),
-                ],
-                tools: None,
-                temperature: 0.1,
-            })
-            .await?;
-        let text = response.message.content.unwrap_or_default();
-        let json = text
-            .find('[')
-            .and_then(|s| text.rfind(']').map(|e| &text[s..=e]))
-            .ok_or_else(|| CoreError::Inference("no JSON in outline response".into()))?;
         #[derive(Deserialize)]
         struct RawBeat {
             title: String,
@@ -163,7 +137,22 @@ async fn llm_outline(
         fn default_priority() -> u8 {
             3
         }
-        let mut raw: Vec<RawBeat> = serde_json::from_str(json)?;
+        let mut raw: Vec<RawBeat> = crate::llm::ask_json_with(
+            inference,
+            model,
+            "outline",
+            "You analyze a talking-head video transcript and split it into STORY \
+             BEATS (hook, setup, a point being made, an example, a tangent, a \
+             recap, an outro). Lines are numbered. Reply with ONLY a JSON array: \
+             [{\"title\": short string, \"summary\": one sentence, \"role\": \
+             \"hook\"|\"setup\"|\"point\"|\"example\"|\"tangent\"|\"recap\"|\"outro\", \
+             \"cut_priority\": 1-5 (1 = the spine of the video, 5 = cut first), \
+             \"first\": first line number, \"last\": last line number}]. Beats \
+             must be contiguous, non-overlapping, and cover every line.",
+            &numbered,
+            0.1,
+        )
+        .await?;
         // The prompt demands contiguous, non-overlapping beats; weak models
         // don't always comply. Sort and clip so a shared segment can never
         // belong to two beats (a cut "tangent" must not gut a kept "point").
@@ -359,40 +348,34 @@ pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let response = inference
-            .chat(ChatRequest {
-                model: prefs.inference_model,
-                messages: vec![
-                    ChatMessage::system(
-                        "You review CUT POINTS in an edited talking-head video. For each \
-                         numbered boundary, judge whether speech flows naturally from \
-                         'before' to 'after' with the middle removed. Reply with ONLY a \
-                         JSON array, one entry PER BOUNDARY: [{\"b\": number, \"ok\": \
-                         true|false, \"why\": short reason, \"restore\": true if putting \
-                         the cut material back is the right fix}]. Dangling references \
-                         (\"as I said\", unintroduced topics) and mid-sentence jumps are \
-                         NOT ok.",
-                    ),
-                    ChatMessage::user(&listed),
-                ],
-                tools: None,
-                temperature: 0.0,
-            })
-            .await;
-        if let Ok(resp) = response {
-            let text = resp.message.content.unwrap_or_default();
-            if let Some(json) = text.find('[').and_then(|s| text.rfind(']').map(|e| &text[s..=e]))
+        #[derive(Deserialize)]
+        struct Verdict {
+            b: usize,
+            ok: bool,
+            #[serde(default)]
+            why: String,
+            #[serde(default)]
+            restore: bool,
+        }
+        let verdicts: Result<Vec<Verdict>> = crate::llm::ask_json_with(
+            inference.as_ref(),
+            &prefs.inference_model,
+            "flow review",
+            "You review CUT POINTS in an edited talking-head video. For each \
+             numbered boundary, judge whether speech flows naturally from \
+             'before' to 'after' with the middle removed. Reply with ONLY a \
+             JSON array, one entry PER BOUNDARY: [{\"b\": number, \"ok\": \
+             true|false, \"why\": short reason, \"restore\": true if putting \
+             the cut material back is the right fix}]. Dangling references \
+             (\"as I said\", unintroduced topics) and mid-sentence jumps are \
+             NOT ok.",
+            &listed,
+            0.0,
+        )
+        .await;
+        {
             {
-                #[derive(Deserialize)]
-                struct Verdict {
-                    b: usize,
-                    ok: bool,
-                    #[serde(default)]
-                    why: String,
-                    #[serde(default)]
-                    restore: bool,
-                }
-                if let Ok(verdicts) = serde_json::from_str::<Vec<Verdict>>(json) {
+                if let Ok(verdicts) = verdicts {
                     for v in verdicts {
                         if v.ok {
                             continue;
@@ -554,29 +537,6 @@ pub async fn story_edit(
     let target_line = target_s
         .map(|t| format!("The user wants the result around {:.0} minutes.", t / 60.0))
         .unwrap_or_default();
-    let response = inference
-        .chat(ChatRequest {
-            model: prefs.inference_model.clone(),
-            messages: vec![
-                ChatMessage::system(
-                    "You are editing a talking-head video at the STORY level. Given the \
-                     user's instruction and the beat outline, choose which beats to CUT \
-                     ENTIRELY. Cut tangents, repeated takes, and beats that don't serve \
-                     the instruction; never cut the hook or the payoff unless asked. \
-                     Reply with ONLY JSON: {\"cut_beats\": [beat numbers], \"rationale\": \
-                     one sentence}.",
-                ),
-                ChatMessage::user(&format!("Instruction: {instruction}\n{target_line}\n\nBeats:\n{listed}")),
-            ],
-            tools: None,
-            temperature: 0.1,
-        })
-        .await?;
-    let text = response.message.content.unwrap_or_default();
-    let json = text
-        .find('{')
-        .and_then(|s| text.rfind('}').map(|e| &text[s..=e]))
-        .ok_or_else(|| CoreError::Inference("no JSON in story plan".into()))?;
     #[derive(Deserialize)]
     struct Plan {
         #[serde(default)]
@@ -584,7 +544,20 @@ pub async fn story_edit(
         #[serde(default)]
         rationale: String,
     }
-    let plan: Plan = serde_json::from_str(json)?;
+    let plan: Plan = crate::llm::ask_json_with(
+        inference.as_ref(),
+        &prefs.inference_model,
+        "story plan",
+        "You are editing a talking-head video at the STORY level. Given the \
+         user's instruction and the beat outline, choose which beats to CUT \
+         ENTIRELY. Cut tangents, repeated takes, and beats that don't serve \
+         the instruction; never cut the hook or the payoff unless asked. \
+         Reply with ONLY JSON: {\"cut_beats\": [beat numbers], \"rationale\": \
+         one sentence}.",
+        &format!("Instruction: {instruction}\n{target_line}\n\nBeats:\n{listed}"),
+        0.1,
+    )
+    .await?;
     // Guardrails: a "story edit" that deletes (almost) everything is a bug,
     // not a bold choice. Dedup first (weak models repeat indexes), refuse
     // cutting ALL beats at any outline size, and refuse on cut DURATION too
