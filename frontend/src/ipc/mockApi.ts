@@ -424,9 +424,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return clone(p);
   },
 
-  get_media_assets(args): { peaks_path: null; peaks_per_second: number; thumbnails: [] } {
+  get_media_assets(args): { peaks_path: null; peaks_per_second: number; thumbnails: []; playback_path: null } {
     requireProject(args.project_id);
-    return { peaks_path: null, peaks_per_second: 50, thumbnails: [] };
+    return { peaks_path: null, peaks_per_second: 50, thumbnails: [], playback_path: null };
   },
 
   get_timeline(args): Timeline {

@@ -1,8 +1,10 @@
 /* Fable — one coherent sheet, no override layers.
  *
- * Design language: cool monochrome, e-reader calm. Soft ink/paper text
- * surfaces, crisp high-contrast structure, sharp lines (3-4px radii),
- * hairline seams instead of gaps, no color except destructive red.
+ * Design language: a beautifully-themed TUI. Monospace throughout, fully
+ * square corners, hairline seams, cool monochrome ink/paper, hover states
+ * that invert like a terminal selection, a vim statusline for hints, and a
+ * blinking block caret on the word under the playhead. No color except
+ * destructive red.
  *
  * Order: tokens → base → layout shell → chrome (topbar/export) → tabs →
  * transcript → chat → preview → tools (inspector/metadata) → transport →
@@ -40,8 +42,8 @@
   --light-muted: #8e939c;
   --light-border: #26282e;
 
-  --radius: 4px;
-  --radius-sm: 3px;
+  --radius: 2px;
+  --radius-sm: 0px;
 }
 
 [data-theme="light"] {
@@ -80,9 +82,9 @@ html, body, #root {
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 14px;
-  line-height: 1.45;
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
@@ -230,8 +232,9 @@ input, select { font: inherit; }
   white-space: nowrap;
 }
 .new-video-btn:hover {
-  color: var(--text);
-  border-color: var(--text-muted);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .topbar-right {
@@ -328,7 +331,7 @@ input, select { font: inherit; }
   right: 0;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 2px;
   padding: 5px;
   display: flex;
   flex-direction: column;
@@ -343,7 +346,7 @@ input, select { font: inherit; }
   border: none;
   color: var(--text);
   padding: 7px 10px;
-  border-radius: 7px;
+  border-radius: 0;
   font-size: 13px;
 }
 .export-item:hover:not(:disabled) { background: var(--accent-soft); }
@@ -362,6 +365,8 @@ input, select { font: inherit; }
   background: transparent;
   color: var(--light-muted);
   font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
   padding: 8px 2px 7px;
   margin-right: 16px;
   border-radius: 0;
@@ -468,9 +473,9 @@ input, select { font: inherit; }
 
 .segment {
   position: relative;
-  padding: 7px 56px 7px 10px;
-  margin: 2px 0;
-  border-radius: 10px;
+  padding: 6px 56px 6px 10px;
+  margin: 1px 0;
+  border-radius: 0;
   border: 1px solid transparent;
 }
 .segment:hover { background: rgba(0, 0, 0, 0.035); }
@@ -480,12 +485,12 @@ input, select { font: inherit; }
 }
 .segment.active { box-shadow: inset 3px 0 0 var(--accent); }
 
-/* e-reader reading comfort: large, airy script text. */
+/* The script is the buffer: mono, airy, effortless to scan. */
 .segment-text {
   margin: 0;
-  font-size: 15px;
-  line-height: 1.85;
-  letter-spacing: 0.005em;
+  font-size: 13.5px;
+  line-height: 1.95;
+  letter-spacing: 0;
   color: var(--light-text);
   user-select: text;
 }
@@ -500,11 +505,25 @@ input, select { font: inherit; }
 .word:hover { background: rgba(79, 140, 255, 0.18); }
 .word.filler { background: var(--amber-bg); color: var(--amber); border-radius: 3px; }
 .word.hit { background: rgba(79, 140, 255, 0.28); }
-/* Word under the playhead */
+/* Word under the playhead: highlighted block + blinking caret on its left,
+   like a vim cursor resting on the buffer. */
 .word.current {
+  position: relative;
   background: var(--hl);
-  border-radius: 3px;
-  box-shadow: 0 0 0 2px rgba(91, 155, 255, 0.3);
+  border-radius: 0;
+}
+.word.current::before {
+  content: "";
+  position: absolute;
+  left: -2px;
+  top: 8%;
+  bottom: 8%;
+  width: 2px;
+  background: var(--accent);
+  animation: caret-blink 1.1s steps(2, start) infinite;
+}
+@keyframes caret-blink {
+  50% { opacity: 0; }
 }
 /* Word-level cut state (range cuts from the context menu) */
 .word.cutw {
@@ -543,10 +562,12 @@ input, select { font: inherit; }
 .restore-btn:hover { background: rgba(79, 140, 255, 0.22); }
 
 .transcript-hint {
-  padding: 6px 16px 10px;
+  padding: 5px 12px;
   font-size: 11px;
   color: var(--light-muted);
+  background: var(--light-card);
   border-top: 1px solid var(--light-border);
+  letter-spacing: 0.01em;
 }
 
 /* Transcription loading state (script panel) */
@@ -605,7 +626,7 @@ input, select { font: inherit; }
   color: #e8e8ec;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: 0;
   padding: 7px 10px;
   cursor: pointer;
 }
@@ -641,7 +662,7 @@ input, select { font: inherit; }
 
 .chat-msg {
   max-width: 88%;
-  border-radius: 12px;
+  border-radius: 2px;
   padding: 9px 13px;
   font-size: 13.5px;
   user-select: text;
@@ -933,7 +954,7 @@ input, select { font: inherit; }
 
 .inspector-card { padding: 16px; flex: none; }
 
-.inspector-title { margin: 0 0 2px; font-size: 14px; }
+.inspector-title { margin: 0 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
 .inspector-desc { margin: 0 0 12px; font-size: 12px; color: var(--text-muted); }
 
 .padding-grid {
@@ -1031,14 +1052,14 @@ input, select { font: inherit; }
 /* ---------------------------------------------------- tools: metadata card */
 
 .metadata-card { padding: 14px 16px; }
-.metadata-title { font-size: 13px; margin: 0 0 10px; }
+.metadata-title { font-size: 11px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
 .metadata-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .meta-btn {
   font: inherit; font-size: 12px; padding: 5px 12px;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: transparent; color: var(--text); cursor: pointer;
 }
-.meta-btn:hover { border-color: var(--text-muted); }
+.meta-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .meta-btn:disabled { opacity: 0.5; cursor: default; }
 .metadata-error { font-size: 12px; color: #ffb454; margin: 8px 0 0; }
 .metadata-section { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
@@ -1048,13 +1069,13 @@ input, select { font: inherit; }
 }
 .copy-btn {
   font: inherit; font-size: 10px; padding: 1px 8px; margin-left: auto;
-  border: 1px solid var(--border); border-radius: 6px;
+  border: 1px solid var(--border); border-radius: 0;
   background: transparent; color: var(--text-muted); cursor: pointer;
 }
 .metadata-section header .copy-btn + .copy-btn { margin-left: 6px; }
 .copy-btn:hover { color: var(--text); }
 .chapter-list, .title-list { list-style: none; margin: 0; padding: 0; font-size: 12px; }
-.chapter-list li { padding: 3px 4px; border-radius: 6px; cursor: pointer; }
+.chapter-list li { padding: 3px 4px; border-radius: 0; cursor: pointer; }
 .chapter-list li:hover { background: rgba(255,255,255,0.06); }
 .chapter-time { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 6px; }
 .title-list li { display: flex; align-items: center; gap: 6px; padding: 3px 4px; }
@@ -1080,11 +1101,11 @@ input, select { font: inherit; }
   height: 32px;
   background: var(--panel-2);
   color: var(--text);
-  border-radius: 999px;
+  border-radius: 2px;
 }
 .play-btn:hover:not(:disabled) { background: #34343c; }
 
-.rate-select { border-radius: 999px; padding: 4px 8px; }
+.rate-select { border-radius: 0; padding: 4px 8px; }
 
 .switch-row {
   display: flex;
@@ -1098,7 +1119,7 @@ input, select { font: inherit; }
   position: relative;
   width: 38px;
   height: 21px;
-  border-radius: 999px;
+  border-radius: 2px;
   border: none;
   background: #3a3a42;
   padding: 0;
@@ -1111,7 +1132,7 @@ input, select { font: inherit; }
   left: 3px;
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: 1px;
   background: #fff;
   transition: transform 0.15s ease;
 }
@@ -1124,7 +1145,7 @@ input, select { font: inherit; }
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   padding: 5px 13px;
   font-size: 12.5px;
   font-weight: 600;
@@ -1139,7 +1160,7 @@ input, select { font: inherit; }
   position: relative;
   flex: 1;
   min-height: 0;
-  border-radius: 10px;
+  border-radius: 2px;
   overflow: hidden;
   border: 1px solid var(--border-soft);
 }
@@ -1177,7 +1198,7 @@ input, select { font: inherit; }
 .drop-zone {
   width: min(520px, 80vw);
   border: 1.5px dashed var(--border);
-  border-radius: 18px;
+  border-radius: 2px;
   padding: 54px 30px;
   display: flex;
   flex-direction: column;
@@ -1212,14 +1233,14 @@ input, select { font: inherit; }
 .progress-track {
   width: 100%;
   height: 8px;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--panel-2);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
   background: var(--accent);
-  border-radius: 999px;
+  border-radius: 0;
   transition: width 0.2s ease;
 }
 .progress-fill.pulsing { animation: pulse-fill 1.6s ease-in-out infinite; }
@@ -1239,7 +1260,7 @@ input, select { font: inherit; }
   width: min(460px, 90vw);
   background: var(--bg-elev);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
+  border-radius: 2px;
   padding: 18px 20px;
   margin-bottom: 22px;
   text-align: left;
@@ -1265,12 +1286,12 @@ input, select { font: inherit; }
   background: transparent;
   color: #cfd3da;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
+  border-radius: 0;
   padding: 7px 15px;
   font-weight: 600;
   white-space: nowrap;
 }
-.ghost-btn:hover { border-color: rgba(255, 255, 255, 0.4); }
+.ghost-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 
 .link-btn {
   background: none;
@@ -1382,10 +1403,10 @@ input, select { font: inherit; }
 
 /* ----------------------------------------------- scrollbars and keyframes */
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(128, 128, 140, 0.35);
-  border-radius: 999px;
+  background: rgba(128, 128, 140, 0.4);
+  border-radius: 0;
   border: 2px solid transparent;
   background-clip: content-box;
 }

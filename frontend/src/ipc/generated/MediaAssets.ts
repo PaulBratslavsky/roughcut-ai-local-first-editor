@@ -10,4 +10,10 @@ export type MediaAssets = {
 /**
  * Binary file of u8 peaks (0-255), `peaks_per_second` per second.
  */
-peaks_path: string | null, peaks_per_second: number, thumbnails: Array<ThumbnailRef>, };
+peaks_path: string | null, peaks_per_second: number, thumbnails: Array<ThumbnailRef>, 
+/**
+ * Web-playable copy when the source itself isn't (mp4 with the moov
+ * index at the END streams as an endless black frame in WebKit; ffmpeg
+ * remuxes it losslessly with +faststart). None = play the source.
+ */
+playback_path: string | null, };

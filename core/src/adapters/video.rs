@@ -25,6 +25,10 @@ pub struct MediaAssets {
     pub peaks_path: Option<String>,
     pub peaks_per_second: u32,
     pub thumbnails: Vec<ThumbnailRef>,
+    /// Web-playable copy when the source itself isn't (mp4 with the moov
+    /// index at the END streams as an endless black frame in WebKit; ffmpeg
+    /// remuxes it losslessly with +faststart). None = play the source.
+    pub playback_path: Option<String>,
 }
 
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
@@ -330,12 +334,69 @@ impl VideoEngine for FfmpegCli {
                 path: path.to_string_lossy().into_owned(),
             });
         }
+        // ---- web-playable remux (only when the source needs it) -------------
+        let playback_path = if needs_faststart(&media.file_path) {
+            let play = cache.join("play.mp4");
+            if !play.is_file() {
+                let mut cmd = ffmpeg_cmd()?;
+                // Stream copy: lossless and fast — no re-encode, just moves
+                // the index to the front so the <video> element can start.
+                cmd.args([
+                    "-y",
+                    "-i", &media.file_path,
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    &play.to_string_lossy(),
+                ]);
+                Self::run(&mut cmd, "ffmpeg faststart remux").await?;
+            }
+            Some(play.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+
         Ok(MediaAssets {
             peaks_path: Some(peaks_file.to_string_lossy().into_owned()),
             peaks_per_second: PEAKS_PER_SECOND,
             thumbnails,
+            playback_path,
         })
     }
+}
+
+/// True when an mp4/mov's `moov` index sits AFTER the `mdat` payload —
+/// fine for ffmpeg, an endless black frame for progressive playback in
+/// WebKit. Box-header walk only; reads a few dozen bytes.
+fn needs_faststart(path: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut off: u64 = 0;
+    let mut saw_mdat = false;
+    let mut header = [0u8; 16];
+    while off + 8 <= len {
+        if f.seek(SeekFrom::Start(off)).is_err() || f.read_exact(&mut header[..8]).is_err() {
+            return false;
+        }
+        let mut size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as u64;
+        let typ: [u8; 4] = header[4..8].try_into().unwrap();
+        if size == 1 {
+            if f.read_exact(&mut header[8..16]).is_err() {
+                return false;
+            }
+            size = u64::from_be_bytes(header[8..16].try_into().unwrap());
+        }
+        if size < 8 {
+            return false; // not an MP4 box structure
+        }
+        match &typ {
+            b"moov" => return saw_mdat,
+            b"mdat" => saw_mdat = true,
+            _ => {}
+        }
+        off = off.saturating_add(size);
+    }
+    false
 }
 
 /// Stable identity for derived assets: hash of path + size + mtime, so the
@@ -426,7 +487,12 @@ impl VideoEngine for MockVideoEngine {
     async fn media_assets(&self, _media: &Media) -> Result<MediaAssets> {
         // No real audio/video to derive from — the frontend falls back to its
         // synthetic waveform.
-        Ok(MediaAssets { peaks_path: None, peaks_per_second: PEAKS_PER_SECOND, thumbnails: vec![] })
+        Ok(MediaAssets {
+            peaks_path: None,
+            peaks_per_second: PEAKS_PER_SECOND,
+            thumbnails: vec![],
+            playback_path: None,
+        })
     }
 }
 

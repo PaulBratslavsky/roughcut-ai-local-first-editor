@@ -59,7 +59,9 @@ export function useMediaAssets(projectId: string | null) {
     queryKey: ["media-assets", projectId],
     queryFn: () => callTool<MediaAssets>("get_media_assets", { project_id: projectId }),
     enabled: !!projectId,
-    staleTime: Infinity,
+    // Cheap once the cache exists (file-existence checks); a refetch on
+    // focus picks up assets that finished generating in the background.
+    staleTime: 30_000,
     retry: false,
   });
 }
@@ -99,6 +101,9 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   });
   const offTranscript = onAppEvent("transcript-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["transcript"] });
+    // Derived media (peaks/thumbnails/playable remux) lands around the same
+    // time as the transcript; refresh so the player picks up playback_path.
+    void queryClient.invalidateQueries({ queryKey: ["media-assets"] });
   });
   // Projects created/duplicated/deleted by ANY caller (incl. MCP clients)
   // refresh the library dropdown live.

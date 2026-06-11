@@ -5,7 +5,7 @@
 import { useMemo, useRef } from "react";
 import { useStore } from "@tanstack/react-store";
 import { isTauri, mediaSrc } from "../ipc/api";
-import { useProject, useTimeline } from "../ipc/queries";
+import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
 import { usePlaybackEngine } from "../playback/engine";
 import { excludedRanges, excludedTotal, toEditedTime, type Range } from "../playback/time";
 import {
@@ -34,10 +34,13 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const skipCuts = useStore(viewStore, (s) => s.skipCuts);
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
-  const src = useMemo(
-    () => (project?.media && isTauri ? mediaSrc(project.media.file_path) : null),
-    [project?.media],
-  );
+  // Some sources can't stream in a <video> tag (mp4 index at the end); the
+  // core then provides a remuxed playable copy alongside peaks/thumbnails.
+  const { data: assets } = useMediaAssets(projectId);
+  const src = useMemo(() => {
+    if (!project?.media || !isTauri) return null;
+    return mediaSrc(assets?.playback_path ?? project.media.file_path);
+  }, [project?.media, assets?.playback_path]);
   const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
 
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
