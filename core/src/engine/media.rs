@@ -136,3 +136,57 @@ impl Editor {
         Ok(applied)
     }
 }
+
+impl super::Editor {
+    /// Append another video to the END of this project's source: lossless
+    /// concat into a new file in ~/Movies/RoughCut (originals untouched),
+    /// media swapped, timeline extended with an included clip over the new
+    /// span. Existing cuts keep their timestamps. Caller re-transcribes.
+    /// Inputs must match codec/resolution (stream copy) — mismatches refuse.
+    pub async fn append_media(&self, project_id: uuid::Uuid, file_path: &str) -> crate::error::Result<crate::model::Media> {
+        use crate::error::CoreError;
+        let current = self.with_project(project_id, |p, _| {
+            p.media.clone().ok_or_else(|| CoreError::InvalidArg("project has no media".into()))
+        })?;
+        if !std::path::Path::new(file_path).is_file() {
+            return Err(CoreError::NotFound(format!("file {file_path}")));
+        }
+        // combine_recordings carries the codec/resolution guard.
+        let combined = crate::adapters::record::combine_recordings(&[
+            current.file_path.clone(),
+            file_path.to_string(),
+        ])
+        .await?;
+        let new_media = self.video().probe(&combined).await?;
+        let old_duration = current.duration;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry = state
+                .get_mut(&project_id)
+                .and_then(|e| e.project.as_mut())
+                .ok_or_else(|| CoreError::NotFound(format!("project {project_id}")))?;
+            entry.timeline.duration = new_media.duration;
+            entry.timeline.clips.push(crate::model::Clip {
+                id: uuid::Uuid::new_v4(),
+                source_in: old_duration,
+                source_out: new_media.duration,
+                included: true,
+                origin: crate::model::ClipOrigin::Manual,
+                order: entry.timeline.clips.len() as u32,
+                linked_segment_ids: vec![],
+            });
+            entry.timeline.normalize();
+            entry.media = Some(new_media.clone());
+            self.inner.store.save_project(entry)?;
+        }
+        crate::events::send(
+            &self.sink(),
+            crate::events::CoreEvent::TimelineChanged { project_id },
+        );
+        crate::events::send(
+            &self.sink(),
+            crate::events::CoreEvent::MediaAssetsChanged { project_id },
+        );
+        Ok(new_media)
+    }
+}

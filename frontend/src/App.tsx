@@ -13,6 +13,7 @@ import { RecorderPanel } from "./panels/RecorderPanel";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
 import { ChatPanel } from "./panels/ChatPanel";
+import { ClipsPanel } from "./panels/ClipsPanel";
 import { PreviewPanel } from "./panels/PreviewPanel";
 import { InspectorPanel } from "./panels/InspectorPanel";
 import { MetadataPanel } from "./panels/MetadataPanel";
@@ -97,9 +98,17 @@ function Editor({ projectId }: { projectId: string }) {
               >
                 Chat
               </button>
+              <button
+                className={`tab${activeTab === "clips" ? " active" : ""}`}
+                onClick={() => setActiveTab("clips")}
+              >
+                Clips
+              </button>
             </div>
             {activeTab === "chat" ? (
               <ChatPanel projectId={projectId} />
+            ) : activeTab === "clips" ? (
+              <ClipsPanel projectId={projectId} />
             ) : (
               <div className="tools-scroll">
                 <InspectorPanel projectId={projectId} />

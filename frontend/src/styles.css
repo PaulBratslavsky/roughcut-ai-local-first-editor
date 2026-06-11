@@ -1710,3 +1710,15 @@ input, select { font: inherit; }
 
 .rec-delete { color: var(--fg-dim); }
 .rec-delete:hover { color: #e5484d; }
+
+/* clips tab */
+.clips-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; }
+.clips-note { font-size: 12px; color: var(--fg-dim); margin: 0; }
+.clips-actions { display: flex; gap: 8px; }
+.clips-lib-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-top: 4px;
+}

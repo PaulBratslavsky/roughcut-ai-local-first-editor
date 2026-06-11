@@ -776,6 +776,25 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     };
   },
 
+  append_media(args): unknown {
+    const p = requireProject(args.project_id);
+    const extra = 30;
+    const old = p.timeline.duration;
+    p.timeline.duration += extra;
+    p.timeline.clips.push({
+      id: crypto.randomUUID(),
+      source_in: old,
+      source_out: old + extra,
+      included: true,
+      origin: "manual",
+      order: p.timeline.clips.length,
+      linked_segment_ids: [],
+    });
+    if (p.media) p.media.duration += extra;
+    emit("timeline-changed", { project_id: p.id });
+    return { media: clone(p.media), note: "(browser mock) appended 30s" };
+  },
+
   outline_transcript(args): unknown {
     requireProject(args.project_id);
     const speech = (state.transcript?.segments ?? []).filter((s) => !s.is_silence && s.text);

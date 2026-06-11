@@ -39,7 +39,7 @@ function savePrefs(s: PersistedPrefs): void {
   }
 }
 
-export type ActiveTab = "tools" | "chat";
+export type ActiveTab = "tools" | "chat" | "clips";
 export type AppScreen = "editor" | "recorder";
 
 export interface ViewState {

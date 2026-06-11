@@ -367,6 +367,11 @@ handler!(h_read_transcript, |e, a, _s| {
     })
 });
 
+handler!(h_append_media, |e, a, _s| {
+    let media = e.append_media(arg_uuid(a, "project_id")?, arg_str(a, "file_path")?).await?;
+    Ok(serde_json::json!({ "media": media, "note": "re-run transcribe to caption the appended span; existing cuts kept their timestamps" }))
+});
+
 handler!(h_outline_transcript, |e, a, _s| {
     let outline = crate::story::outline_with(
         e,
@@ -693,6 +698,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
+    tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Re-run transcribe afterwards to caption the appended span.",
+        || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
+        agent: false, meta: false, mutating: true, h_append_media),
     tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate). The narrative map to plan cohesive edits against.",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),

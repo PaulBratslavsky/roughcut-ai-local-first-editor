@@ -285,14 +285,15 @@ impl Timeline {
         // "dissolve this boundary" gesture: split halves merge back into one
         // clip — a lossless union, since the source in between is identical.
         const SNAP: f64 = 0.1;
-        let mut dissolved = false;
+        let mut dissolve_next = false;
+        let mut dissolve_prev = false;
         if idx + 1 < self.clips.len() {
             let n = &self.clips[idx + 1];
             if !n.included && n.source_out - new_out < SNAP {
                 new_out = n.source_out;
             } else if n.included && new_out_req >= n.source_out - SNAP {
                 new_out = n.source_out;
-                dissolved = true;
+                dissolve_next = true;
             }
         }
         if idx > 0 {
@@ -301,12 +302,20 @@ impl Timeline {
                 new_in = p.source_in;
             } else if p.included && new_in_req <= p.source_in + SNAP {
                 new_in = p.source_in;
-                dissolved = true;
+                dissolve_prev = true;
             }
         }
-        if dissolved {
-            // The deliberate split boundary is gone; let normalize() merge.
+        // The deliberate split boundary is gone; clear Split origin on BOTH
+        // sides or normalize() (which spares Split/Split pairs) won't merge —
+        // clearing only the dragged clip left heals half-armed and broken.
+        if dissolve_next || dissolve_prev {
             self.clips[idx].origin = ClipOrigin::Manual;
+        }
+        if dissolve_next {
+            self.clips[idx + 1].origin = ClipOrigin::Manual;
+        }
+        if dissolve_prev {
+            self.clips[idx - 1].origin = ClipOrigin::Manual;
         }
         if idx > 0 {
             self.clips[idx - 1].source_out = new_in;
@@ -728,5 +737,23 @@ mod tests {
         let mut t = tl();
         t.set_range_included(10.0, 20.0, false, ClipOrigin::AiCut);
         assert!((t.source_to_output(30.0) - 20.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod heal_tests {
+    use super::*;
+
+    #[test]
+    fn trim_to_neighbor_edge_heals_a_split() {
+        let mut tl = Timeline::new(60.0);
+        let clip_id = tl.clips[0].id;
+        let (left, _right) = tl.split_clip(clip_id, 30.0).expect("split");
+        assert_eq!(tl.clips.len(), 2, "split holds (normalize must not undo it)");
+        // Drag the left clip's right edge onto the neighbor's far edge —
+        // the dissolve gesture.
+        tl.trim_clip(left, 0.0, 60.0).expect("trim");
+        assert_eq!(tl.clips.len(), 1, "clips heal back into one");
+        assert!((tl.clips[0].source_out - 60.0).abs() < 1e-6);
     }
 }

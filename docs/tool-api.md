@@ -54,6 +54,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 (undoable) tagged with `source: "ui" | "local_ai" | "mcp_client"`.
 
 ### Ingest & transcription
+- `append_media { project_id, file_path } -> { media, note }` — lossless concat to the END of the source (new file; originals untouched; cuts keep timestamps; re-run `transcribe` after)
 - `import_media { file_path, project_id? } -> Media` (with `project_id`, attaches the media to that project)
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
 
