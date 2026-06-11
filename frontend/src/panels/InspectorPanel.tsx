@@ -1,13 +1,21 @@
 // Inspector card: global padding (matching the Gling reference panel),
-// cut aggressiveness, and custom filler words.
+// target length, cut aggressiveness, and custom filler words.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { callTool } from "../ipc/api";
 import {
+  useApplyDurationCut,
   usePreferences,
   useSetGlobalPadding,
   useSetPreferences,
   useTimeline,
 } from "../ipc/queries";
+import type { DurationCutPlan } from "../ipc/types";
+
+const fmtLen = (s: number) => {
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+};
 
 function PaddingSlider({
   label,
@@ -30,6 +38,98 @@ function PaddingSlider({
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="padding-value">{value.toFixed(2)}s</span>
+    </div>
+  );
+}
+
+/** "Make it N minutes" as a deterministic control: type a target, see the
+ *  plan ("cut 38 segments → 19:58"), Apply lands it as ONE undoable action —
+ *  the same plan_duration_cut engine the chat and MCP clients use. */
+function TargetLengthSection({ projectId }: { projectId: string }) {
+  const { data: timeline } = useTimeline(projectId);
+  const applyCut = useApplyDurationCut();
+  const [minutes, setMinutes] = useState("");
+  const [plan, setPlan] = useState<DurationCutPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const included =
+    timeline?.clips
+      .filter((c) => c.included)
+      .reduce((acc, c) => acc + (c.source_out - c.source_in), 0) ?? 0;
+
+  const targetS = Number(minutes) * 60;
+  const validTarget = Number.isFinite(targetS) && targetS > 0;
+
+  // Preview the plan (apply=false) as the target changes, debounced.
+  useEffect(() => {
+    setPlan(null);
+    setPlanError(null);
+    if (!validTarget) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      callTool<DurationCutPlan>("plan_duration_cut", {
+        project_id: projectId,
+        target_duration_s: targetS,
+      })
+        .then(setPlan)
+        .catch((err) => setPlanError(String((err as { message?: string })?.message ?? err)));
+    }, 400);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, targetS, included]);
+
+  const preview = (() => {
+    if (planError) return planError;
+    if (!validTarget) return `current cut: ${fmtLen(included)}`;
+    if (!plan) return "planning…";
+    if (plan.segment_ids.length === 0) return `already at ${fmtLen(plan.before_s)} — under the target`;
+    return `cut ${plan.segment_ids.length} segments → ${fmtLen(plan.projected_after_s)} (now ${fmtLen(plan.before_s)})`;
+  })();
+
+  const apply = () => {
+    if (!validTarget) return;
+    applyCut.mutate(
+      { project_id: projectId, target_duration_s: targetS, apply: true },
+      { onSuccess: () => setPlan(null) },
+    );
+  };
+
+  return (
+    <div className="inspector-section">
+      <h3 className="inspector-title">Target length</h3>
+      <p className="inspector-desc">
+        Cuts the least-important material (semantic ranking) until the video fits — one undoable step
+      </p>
+      <label className="field-row">
+        <span>Minutes</span>
+        <input
+          className="text-input target-minutes"
+          type="number"
+          min={1}
+          step={1}
+          placeholder={String(Math.max(1, Math.round(included / 60)))}
+          value={minutes}
+          onChange={(e) => setMinutes(e.target.value)}
+        />
+      </label>
+      <p className="target-preview">{preview}</p>
+      <div className="inspector-actions">
+        <button
+          className="primary-btn"
+          onClick={apply}
+          disabled={!validTarget || !plan || plan.segment_ids.length === 0 || applyCut.isPending}
+        >
+          {applyCut.isPending ? "Cutting…" : "Apply"}
+        </button>
+        {applyCut.isSuccess && !applyCut.isPending && (
+          <span className="apply-ok">
+            now {fmtLen(applyCut.data.included_duration_s)} — undo in the top bar
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -124,6 +224,10 @@ export function InspectorPanel({ projectId }: { projectId: string }) {
           )}
         </div>
       </div>
+
+      <div className="inspector-divider" />
+
+      <TargetLengthSection projectId={projectId} />
 
       <div className="inspector-divider" />
 

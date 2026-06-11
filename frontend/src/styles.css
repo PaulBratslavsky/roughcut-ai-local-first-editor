@@ -1045,6 +1045,14 @@ input, select { font: inherit; }
 
 .apply-ok { font-size: 12px; color: #79b06f; }
 
+.target-minutes { width: 90px; text-align: right; }
+.target-preview {
+  margin: 2px 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .inspector-divider {
   height: 1px;
   background: var(--border);

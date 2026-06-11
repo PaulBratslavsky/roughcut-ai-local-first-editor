@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-query";
 import { callTool, onAppEvent } from "./api";
 import type {
+  DurationCutReceipt,
   EditResult,
   ExportResult,
   ExportTarget,
@@ -202,6 +203,20 @@ export interface SetGlobalPaddingArgs extends Record<string, unknown> {
 
 export function useSetGlobalPadding() {
   return useEditMutation<SetGlobalPaddingArgs, EditResult>("set_global_padding", ["timeline", "project"]);
+}
+
+export interface PlanDurationCutArgs extends Record<string, unknown> {
+  project_id: string;
+  target_duration_s: number;
+  apply?: boolean;
+}
+
+/** plan_duration_cut with apply=true: one undoable batch cut to a target. */
+export function useApplyDurationCut() {
+  return useEditMutation<PlanDurationCutArgs, DurationCutReceipt>("plan_duration_cut", [
+    "timeline",
+    "project",
+  ]);
 }
 
 export interface RoughCutArgs extends Record<string, unknown> {

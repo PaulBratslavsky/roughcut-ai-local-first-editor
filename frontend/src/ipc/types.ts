@@ -112,6 +112,27 @@ export interface SetupStatus {
 
 export type ModelTier = "accurate" | "compact";
 
+// plan_duration_cut (core/src/engine/semantic.rs DurationCutPlan + the
+// apply=true receipt from tools.rs)
+export interface DurationCutPlan {
+  segment_ids: string[];
+  before_s: number;
+  projected_after_s: number;
+  target_s: number;
+  method: "centrality" | "heuristic";
+  notes: string;
+}
+
+export interface DurationCutReceipt {
+  applied: number;
+  action: EditAction;
+  before_s: number;
+  included_duration_s: number;
+  target_s: number;
+  method: string;
+  notes: string;
+}
+
 export interface EditResult { action: EditAction; timeline: Timeline }
 export interface SplitResult { clips: [Clip, Clip]; timeline: Timeline }
 export interface UndoResult { action: EditAction | null; timeline: Timeline }
