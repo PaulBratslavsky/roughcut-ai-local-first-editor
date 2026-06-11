@@ -360,7 +360,12 @@ handler!(h_read_transcript, |e, a, _s| {
 });
 
 handler!(h_outline_transcript, |e, a, _s| {
-    let outline = crate::story::outline(e, arg_uuid(a, "project_id")?).await?;
+    let outline = crate::story::outline_with(
+        e,
+        arg_uuid(a, "project_id")?,
+        a["refresh"].as_bool().unwrap_or(false),
+    )
+    .await?;
     Ok(crate::story::outline_to_value(&outline))
 });
 
@@ -676,8 +681,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, h_set_global_padding),
-    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript. The narrative map to plan cohesive edits against.",
-        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate). The narrative map to plan cohesive edits against.",
+        || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
     tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. Run after a batch of cuts; restore what reads broken.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),

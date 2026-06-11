@@ -62,6 +62,12 @@ fn transcript_hash(speech: &[TranscriptSegment]) -> String {
 /// transcript for long videos; cached against the transcript hash; falls
 /// back to pause-boundary sections when no model server is reachable.
 pub async fn outline(editor: &Editor, project_id: Uuid) -> Result<Outline> {
+    outline_with(editor, project_id, false).await
+}
+
+/// `refresh` bypasses and replaces the cache — the escape hatch when an LLM
+/// outline came out degenerate.
+pub async fn outline_with(editor: &Editor, project_id: Uuid, refresh: bool) -> Result<Outline> {
     let speech = speech_segments(editor, project_id)?;
     if speech.is_empty() {
         return Err(CoreError::InvalidArg("transcript has no speech".into()));
@@ -69,6 +75,9 @@ pub async fn outline(editor: &Editor, project_id: Uuid) -> Result<Outline> {
     let hash = transcript_hash(&speech);
     let cache_key = format!("outline:{project_id}");
     if let Ok(Some(raw)) = editor.store().get_kv(&cache_key) {
+        if refresh {
+            // fall through to recompute
+        } else
         if let Ok((cached_hash, outline)) = serde_json::from_str::<(String, Outline)>(&raw) {
             if cached_hash == hash {
                 return Ok(outline);
@@ -684,6 +693,8 @@ pub async fn story_edit(
 
     // 3. Review the result at every cut point.
     narrate(editor, project_id, 4, "re-reading the edited transcript at every cut point…");
+    let review_snapshot_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")
+        .included_duration();
     let review = or_partial!(review_flow(editor, project_id).await, "the flow review");
     let mut issues_remaining = review.issues.len();
     let mut coherent = review.coherent;
@@ -716,6 +727,22 @@ pub async fn story_edit(
         .collect();
     restore_ids.sort_unstable();
     restore_ids.dedup();
+    // If the timeline changed underneath us while the review's model call
+    // ran (user undo, another caller), the restore plan is stale — skip it
+    // rather than "repairing" a timeline that no longer exists.
+    let expected_after = or_partial!(editor.get_timeline(project_id), "reading the timeline")
+        .included_duration();
+    let timeline_moved = (expected_after - review_snapshot_s).abs() > 0.05;
+    if timeline_moved && !restore_ids.is_empty() {
+        narrate(
+            editor,
+            project_id,
+            5,
+            "the timeline changed during review — skipping auto-repair (run review_flow to re-check)",
+        );
+        restore_ids.clear();
+        coherent = false;
+    }
     if !restore_ids.is_empty() {
         narrate(
             editor,
@@ -748,8 +775,14 @@ pub async fn story_edit(
         .map(|(_, b)| b.title.as_str())
         .take(6)
         .collect();
+    let target_note = match target_s {
+        Some(t) if after_s > t * 1.08 => {
+            format!(" Note: flow repairs left it {:.0}s over the target.", after_s - t)
+        }
+        _ => String::new(),
+    };
     let summary = format!(
-        "{}{} {:.1} min → {:.1} min. Kept: {}{}. Flow check: {}.",
+        "{}{} {:.1} min → {:.1} min. Kept: {}{}. Flow check: {}.{target_note}",
         if plan.rationale.is_empty() { String::new() } else { format!("{} ", plan.rationale) },
         if valid.is_empty() { "No whole beats cut;".to_string() } else { format!("Cut {} beat(s);", valid.len()) },
         before_s / 60.0,
