@@ -1439,6 +1439,16 @@ input, select { font: inherit; }
   margin-bottom: 6px;
 }
 .setup-header h2 { font-size: 16px; margin: 0; }
+
+.shortcuts-panel { width: min(440px, 92vw); }
+.shortcuts-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.shortcuts-table td { padding: 6px 8px; border-top: 1px solid var(--border-soft); }
+.shortcut-key {
+  width: 40%;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
 .setup-header .icon-btn { margin-left: auto; }
 .setup-ram { font-size: 12px; color: var(--text-muted); }
 

@@ -29,6 +29,7 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
+| `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background; refetch `get_media_assets` |
 
 ### MCP
 Same tools exposed over a localhost HTTP JSON-RPC endpoint guarded by a per-install
@@ -65,10 +66,10 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `set_global_padding { project_id, start_s, end_s, linked } -> { action, timeline }`
 
 ### Semantic / LLM
-- `plan_duration_cut { project_id, target_duration_s } -> { segment_ids, before_s, projected_after_s, target_s, method: "centrality"|"heuristic", notes }` — ranks still-included segments by embedding centrality (tangents first, intro/outro protected) and proposes the batch of cuts that reaches the target; apply with one `cut_by_transcript`
+- `plan_duration_cut { project_id, target_duration_s, apply? } -> plan | receipt` — ranks still-included segments by embedding centrality (tangents first, intro/outro protected). `apply: true` (recommended for orchestrators) plans AND cuts in one undoable step, returning `{ applied, action, before_s, included_duration_s, target_s, method, notes }`; without it, returns the full `{ segment_ids, projected_after_s, … }` plan for review
 - `find_segments { project_id, query, limit? } -> { segments: [LeanSegment & {score}], method: "hybrid"|"bm25" }` — BM25 + local embeddings (Ollama `nomic-embed-text`) fused by reciprocal rank; BM25 alone when no index
 - `read_transcript { project_id, offset?, limit? (≤200, default 50), include_words? } -> { total_segments, offset, returned, language, segments: [LeanSegment] }` — paged, word-arrays omitted by default; the right read for MCP clients and long videos
-- `apply_instruction { project_id, instruction } -> { actions: [EditAction], summary: string }` (runs the agent loop; `agent-step` events)
+- `apply_instruction { project_id, instruction, history? } -> { actions: [EditAction], summary: string }` — runs the agent loop (`agent-step` events); `history` is recent chat turns `[{role: "user"|"agent", text}]` so follow-ups like "apply the edits" resolve
 
 ### Metadata
 - `generate_chapters { project_id } -> { chapters: [{ title, start }] }`
@@ -80,10 +81,11 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Project / state
 - `create_project { name, file_path? } -> Project`
-- `delete_project { project_id } -> { deleted: true }` (removes edit state + journal; never touches the media file)
+- `delete_project { project_id } -> { deleted: true }` — moves the project to the TRASH (restorable for 30 days, then purged at startup); never touches the media file
+- `restore_project { project_id } -> Project` — bring a trashed project back, edit state and all
 - `open_project { project_id } -> Project`
 - `save_project { project_id } -> Project`
-- `list_projects {} -> { projects: [ProjectSummary] }`
+- `list_projects {} -> { projects: [ProjectSummary], trash: [ProjectSummary] }`
 - `get_timeline { project_id } -> Timeline`
 - `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented)
 - `undo { project_id } -> { action: EditAction|null, timeline }`

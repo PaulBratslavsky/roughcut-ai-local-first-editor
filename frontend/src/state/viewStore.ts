@@ -1,7 +1,43 @@
 // View state (TanStack Store). The Rust core owns project/timeline state;
 // this is only ephemeral UI state: playhead, zoom, selection, toggles.
+// A few toggles persist across launches (localStorage) — they're workflow
+// preferences, not session state.
 
 import { Store } from "@tanstack/react-store";
+
+const PERSIST_KEY = "rc-view-prefs";
+
+interface PersistedPrefs {
+  showCuts: boolean;
+  skipCuts: boolean;
+  previewCollapsed: boolean;
+}
+
+function loadPrefs(): PersistedPrefs {
+  const defaults: PersistedPrefs = { showCuts: true, skipCuts: true, previewCollapsed: false };
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if (raw) return { ...defaults, ...(JSON.parse(raw) as Partial<PersistedPrefs>) };
+  } catch {
+    /* first run / private mode */
+  }
+  return defaults;
+}
+
+function savePrefs(s: PersistedPrefs): void {
+  try {
+    localStorage.setItem(
+      PERSIST_KEY,
+      JSON.stringify({
+        showCuts: s.showCuts,
+        skipCuts: s.skipCuts,
+        previewCollapsed: s.previewCollapsed,
+      }),
+    );
+  } catch {
+    /* best-effort */
+  }
+}
 
 export type ActiveTab = "tools" | "chat";
 
@@ -39,10 +75,8 @@ export const viewStore = new Store<ViewState>({
   scrollX: 0,
   selectedClipId: null,
   selectedSegmentIds: [],
-  showCuts: true,
-  skipCuts: true,
   activeTab: "tools",
-  previewCollapsed: false,
+  ...loadPrefs(),
 });
 
 function patch(p: Partial<ViewState>): void {
@@ -99,11 +133,19 @@ export function scrubTo(t: number, max: number, ms: number): void {
 export const setPlaying = (playing: boolean) => patch({ playing });
 export const togglePlaying = () => patch({ playing: !viewStore.state.playing });
 export const setPlaybackRate = (playbackRate: number) => patch({ playbackRate });
-export const setShowCuts = (showCuts: boolean) => patch({ showCuts });
-export const setSkipCuts = (skipCuts: boolean) => patch({ skipCuts });
+export const setShowCuts = (showCuts: boolean) => {
+  patch({ showCuts });
+  savePrefs(viewStore.state);
+};
+export const setSkipCuts = (skipCuts: boolean) => {
+  patch({ skipCuts });
+  savePrefs(viewStore.state);
+};
 export const setActiveTab = (activeTab: ActiveTab) => patch({ activeTab });
-export const togglePreviewCollapsed = () =>
+export const togglePreviewCollapsed = () => {
   patch({ previewCollapsed: !viewStore.state.previewCollapsed });
+  savePrefs(viewStore.state);
+};
 export const setSelectedClipId = (selectedClipId: string | null) => patch({ selectedClipId });
 export const setSelectedSegmentIds = (selectedSegmentIds: string[]) => patch({ selectedSegmentIds });
 export const setScrollX = (scrollX: number) => patch({ scrollX: Math.max(0, scrollX) });

@@ -18,11 +18,60 @@ import { MetadataPanel } from "./panels/MetadataPanel";
 import { Timeline } from "./timeline/Timeline";
 import { TransportBar } from "./timeline/TransportBar";
 
+/** `?` opens the keymap; Esc or `?` again closes. The app is keyboard-first
+ *  but the bindings were only discoverable from the statusline. */
+const SHORTCUTS: [string, string][] = [
+  ["Space", "play / pause"],
+  ["← / →", "step word by word (with audio cue)"],
+  ["⌥ ← / →", "step one frame"],
+  ["⇧ ← / →", "step one second"],
+  ["click word", "seek there"],
+  ["select text → right-click", "cut / restore the selection"],
+  ["⌘-click paragraphs", "multi-select for one cut"],
+  ["right-click a timeline clip", "restore / cut / split"],
+  ["scroll on timeline", "zoom around the playhead"],
+  ["?", "this overlay"],
+];
+
+function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="setup-backdrop" onClick={onClose}>
+      <div className="setup-panel card shortcuts-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="setup-header">
+          <h2>Keyboard</h2>
+          <button className="icon-btn" title="Close" onClick={onClose}>✕</button>
+        </div>
+        <table className="shortcuts-table">
+          <tbody>
+            {SHORTCUTS.map(([key, what]) => (
+              <tr key={key}>
+                <td className="shortcut-key">{key}</td>
+                <td>{what}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Editor({ projectId }: { projectId: string }) {
   const { data: project } = useProject(projectId);
   const { data: transcript } = useTranscript(projectId);
   const activeTab = useStore(viewStore, (s) => s.activeTab);
   useEditorKeyboard(project, transcript);
+  const [showKeys, setShowKeys] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if (e.key === "?") setShowKeys((v) => !v);
+      else if (e.key === "Escape") setShowKeys(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="app-shell">
@@ -59,6 +108,7 @@ function Editor({ projectId }: { projectId: string }) {
           </div>
         </aside>
       </main>
+      {showKeys && <ShortcutsOverlay onClose={() => setShowKeys(false)} />}
       <footer className="bottom-area">
         <TransportBar projectId={projectId} />
         <Timeline projectId={projectId} />

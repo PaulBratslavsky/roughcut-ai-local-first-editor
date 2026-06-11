@@ -5,6 +5,6 @@
 set -e
 DEST="$HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
 mkdir -p "$DEST"
-cp "$(dirname "$0")/RoughCut AI Draft.py" "$DEST/"
-echo "Installed: $DEST/RoughCut AI Draft.py"
-echo "In Resolve: Workspace ▸ Scripts ▸ Utility ▸ RoughCut AI Draft"
+cp "$(dirname "$0")/RoughCut AI Draft.py" "$(dirname "$0")/RoughCut Import Cut.py" "$DEST/"
+echo "Installed into: $DEST"
+echo "In Resolve: Workspace ▸ Scripts ▸ Utility ▸ RoughCut AI Draft / RoughCut Import Cut"

@@ -110,11 +110,16 @@ batch of cuts in one `apply_edits` call, plan duration targets, and export.
 Destructive operations (export, delete) ask **you** for confirmation in the
 app. The full surface is documented in [`docs/tool-api.md`](docs/tool-api.md).
 
-### DaVinci Resolve plugin
+### DaVinci Resolve (free version included)
 
-[`resolve-plugin/`](resolve-plugin/) adds a Scripts-menu entry that creates a
-project, transcribes, generates the rough cut, and imports the timeline into
-Resolve — see its README for `install.sh` instructions.
+The Setup screen installs two Scripts-menu entries into Resolve
+(Workspace ▸ Scripts ▸ Utility): **RoughCut AI Draft** turns a selected
+media-pool clip into a transcribed, rough-cut timeline; **RoughCut Import
+Cut** pulls your current RoughCut edit into Resolve, media auto-linked.
+Both work on the free Resolve. On Resolve **Studio** (with external
+scripting set to Local) the Export menu's **Send to DaVinci Resolve**
+pushes the cut over without leaving RoughCut. Details:
+[`resolve-plugin/`](resolve-plugin/).
 
 ---
 
