@@ -89,13 +89,56 @@ impl Editor {
         self.inner.store.list_projects()
     }
 
-    /// Delete a project's edit state (store + memory). Non-destructive to
-    /// media: the source video file is never touched.
+    /// Move a project to the TRASH (soft delete): edit state survives and
+    /// [`Editor::restore_project`] brings it back; the startup sweep purges
+    /// trash older than 30 days. The source video file is never touched.
     pub fn delete_project(&self, project_id: Uuid) -> Result<()> {
-        self.inner.store.delete_project(project_id)?;
+        self.ensure_loaded(project_id)?;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry =
+                state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            let project =
+                entry.project.as_mut().ok_or_else(|| CoreError::NotFound("project".into()))?;
+            project.deleted_at = Some(Utc::now());
+            project.updated_at = Utc::now();
+            self.inner.store.save_project(project)?;
+        }
         self.inner.state.lock().unwrap().remove(&project_id);
         send(&self.inner.sink, CoreEvent::ProjectsChanged {});
         Ok(())
+    }
+
+    /// Bring a trashed project back, edit state and all.
+    pub fn restore_project(&self, project_id: Uuid) -> Result<Project> {
+        self.ensure_loaded(project_id)?;
+        let project = {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry =
+                state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            let project =
+                entry.project.as_mut().ok_or_else(|| CoreError::NotFound("project".into()))?;
+            project.deleted_at = None;
+            project.updated_at = Utc::now();
+            self.inner.store.save_project(project)?;
+            project.clone()
+        };
+        send(&self.inner.sink, CoreEvent::ProjectsChanged {});
+        Ok(project)
+    }
+
+    /// Hard-delete trash older than `days` (called once at startup).
+    pub fn purge_trash(&self, days: i64) -> Result<u32> {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let mut purged = 0;
+        for p in self.inner.store.list_projects()? {
+            if matches!(p.deleted_at, Some(t) if t < cutoff) {
+                self.inner.store.delete_project(p.id)?;
+                self.inner.state.lock().unwrap().remove(&p.id);
+                purged += 1;
+            }
+        }
+        Ok(purged)
     }
 
     pub fn get_timeline(&self, project_id: Uuid) -> Result<Timeline> {

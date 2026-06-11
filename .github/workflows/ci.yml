@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-metal  # cache from pre-metal builds left stale ggml objects
       - name: Test core (fixture adapters, fully offline)
         run: cargo test -p roughcut-core
         env:
@@ -51,6 +53,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-metal  # cache from pre-metal builds left stale ggml objects
       - uses: actions/setup-node@v4
         with:
           node-version: 22

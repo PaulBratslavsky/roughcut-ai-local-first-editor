@@ -540,7 +540,15 @@ handler!(h_save_project, |e, a, _s| {
     Ok(serde_json::to_value(e.save_project(arg_uuid(a, "project_id")?)?)?)
 });
 
-handler!(h_list_projects, |e, _a, _s| Ok(json!({ "projects": e.list_projects()? })));
+handler!(h_list_projects, |e, _a, _s| {
+    let (live, trash): (Vec<_>, Vec<_>) =
+        e.list_projects()?.into_iter().partition(|p| p.deleted_at.is_none());
+    Ok(json!({ "projects": live, "trash": trash }))
+});
+
+handler!(h_restore_project, |e, a, _s| {
+    Ok(serde_json::to_value(e.restore_project(arg_uuid(a, "project_id")?)?)?)
+});
 
 handler!(h_get_media_assets, |e, a, _s| {
     Ok(serde_json::to_value(e.media_assets(arg_uuid(a, "project_id")?).await?)?)
@@ -679,16 +687,19 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("duplicate_project", "Save-as: clone a project (same media, current cut state, fresh undo history) under a new name, leaving the original untouched.",
         || obj(json!({"project_id": pid_schema(), "name": {"type": "string"}}), &["project_id", "name"]),
         agent: false, meta: false, h_duplicate_project),
-    tool!("delete_project", "Permanently delete a project's edit state (timeline, transcript, undo history). The source video file on disk is never touched.",
+    tool!("delete_project", "Move a project to the trash (restorable with restore_project for 30 days, then purged). The source video file on disk is never touched.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_delete_project),
+    tool!("restore_project", "Bring a trashed project back, edit state and all (see list_projects' trash field).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_restore_project),
     tool!("open_project", "Open an existing project.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_open_project),
     tool!("save_project", "Persist a project.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_save_project),
-    tool!("list_projects", "List saved projects.", || obj(json!({}), &[]),
+    tool!("list_projects", "List saved projects; trashed ones come back separately in `trash`.", || obj(json!({}), &[]),
         agent: false, meta: false, h_list_projects),
     tool!("get_media_assets", "Waveform peaks + thumbnail filmstrip file paths for the project's media (timeline view data; generated and cached on first call).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),

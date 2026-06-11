@@ -479,3 +479,35 @@ async fn plan_duration_cut_reaches_the_target() {
         "receipt duration should be at the target: {receipt}"
     );
 }
+
+#[tokio::test]
+async fn trash_soft_deletes_and_restores() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "keepme", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+
+    // Delete -> gone from projects, present in trash.
+    call(&editor, "delete_project", json!({ "project_id": pid })).await;
+    let listed = call(&editor, "list_projects", json!({})).await;
+    assert!(listed["projects"].as_array().unwrap().is_empty());
+    assert_eq!(listed["trash"][0]["id"].as_str().unwrap(), pid);
+
+    // Restore -> back, edit state intact.
+    let restored = call(&editor, "restore_project", json!({ "project_id": pid })).await;
+    assert!(restored["deleted_at"].is_null());
+    let listed = call(&editor, "list_projects", json!({})).await;
+    assert_eq!(listed["projects"][0]["id"].as_str().unwrap(), pid);
+    assert!(listed["trash"].as_array().unwrap().is_empty());
+
+    // Purge: trash older than the window is hard-deleted.
+    call(&editor, "delete_project", json!({ "project_id": pid })).await;
+    let pid_u = uuid::Uuid::parse_str(&pid).unwrap();
+    let mut old = editor.open_project(pid_u).unwrap();
+    old.deleted_at = Some(chrono::Utc::now() - chrono::Duration::days(31));
+    editor.store().save_project(&old).unwrap();
+    let purged = editor.purge_trash(30).unwrap();
+    assert_eq!(purged, 1);
+    let listed = call(&editor, "list_projects", json!({})).await;
+    assert!(listed["trash"].as_array().unwrap().is_empty());
+}

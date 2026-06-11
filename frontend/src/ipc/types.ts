@@ -139,5 +139,5 @@ export interface UndoResult { action: EditAction | null; timeline: Timeline }
 export interface RoughCutResult { timeline: Timeline; cut_count: number }
 export interface InstructionResult { actions: EditAction[]; summary: string }
 export interface ExportResult { path: string }
-export interface ListProjectsResult { projects: ProjectSummary[] }
+export interface ListProjectsResult { projects: ProjectSummary[]; trash: ProjectSummary[] }
 export interface ToolError { code: string; message: string }

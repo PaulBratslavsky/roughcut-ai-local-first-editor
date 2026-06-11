@@ -230,6 +230,7 @@ function buildFixture(): Fixture {
 interface Snapshot { timeline: Timeline; action: EditAction }
 
 interface MockState {
+  trashed: Project | null;
   project: Project | null;
   transcript: Transcript | null;
   undoStack: Snapshot[];
@@ -240,6 +241,7 @@ interface MockState {
 const defaultPadding: Padding = { start_s: 0.15, end_s: 0.15, linked: true };
 
 const state: MockState = {
+  trashed: null,
   project: null,
   transcript: null,
   undoStack: [],
@@ -370,11 +372,16 @@ async function emitProgress(task: ProgressEvent["task"], projectId: string, step
 const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   // ---- Project / state ----------------------------------------------------
 
-  list_projects(): { projects: ProjectSummary[] } {
+  list_projects(): { projects: ProjectSummary[]; trash: ProjectSummary[] } {
+    const summary = (p: Project): ProjectSummary => ({
+      id: p.id,
+      name: p.name,
+      updated_at: p.updated_at,
+      deleted_at: null,
+    });
     return {
-      projects: state.project
-        ? [{ id: state.project.id, name: state.project.name, updated_at: state.project.updated_at }]
-        : [],
+      projects: state.project ? [summary(state.project)] : [],
+      trash: state.trashed ? [summary(state.trashed)] : [],
     };
   },
 
@@ -388,6 +395,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       created_at: now,
       updated_at: now,
       schema_version: 2,
+      deleted_at: null,
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -405,13 +413,21 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   },
 
   delete_project(args): { deleted: boolean } {
-    requireProject(args.project_id);
+    state.trashed = requireProject(args.project_id);
     state.project = null;
-    state.transcript = null;
-    state.undoStack = [];
-    state.redoStack = [];
     emit("projects-changed", {});
     return { deleted: true };
+  },
+
+  restore_project(args): Project {
+    const trashed = state.trashed;
+    if (!trashed || trashed.id !== args.project_id) {
+      throw { code: "not_found", message: "nothing in the trash with that id" };
+    }
+    state.project = trashed;
+    state.trashed = null;
+    emit("projects-changed", {});
+    return clone(trashed);
   },
 
   open_project(args): Project {

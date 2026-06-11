@@ -48,7 +48,7 @@ impl SqliteStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL,
-                updated_at TEXT NOT NULL, doc TEXT NOT NULL);
+                updated_at TEXT NOT NULL, doc TEXT NOT NULL, deleted_at TEXT);
              CREATE TABLE IF NOT EXISTS transcripts (
                 project_id TEXT PRIMARY KEY, doc TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS preferences (
@@ -60,6 +60,9 @@ impl SqliteStore {
                 model TEXT NOT NULL, vector BLOB NOT NULL,
                 PRIMARY KEY (project_id, segment_id));",
         )?;
+        // Migration for installs that predate the trash: the ALTER fails
+        // harmlessly once the column exists.
+        let _ = conn.execute("ALTER TABLE projects ADD COLUMN deleted_at TEXT", []);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -68,7 +71,7 @@ impl SqliteStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL,
-                updated_at TEXT NOT NULL, doc TEXT NOT NULL);
+                updated_at TEXT NOT NULL, doc TEXT NOT NULL, deleted_at TEXT);
              CREATE TABLE IF NOT EXISTS transcripts (
                 project_id TEXT PRIMARY KEY, doc TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS preferences (
@@ -101,9 +104,15 @@ impl Store for SqliteStore {
         let doc = serde_json::to_string(project)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO projects (id, name, updated_at, doc) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET name=?2, updated_at=?3, doc=?4",
-            params![project.id.to_string(), project.name, project.updated_at.to_rfc3339(), doc],
+            "INSERT INTO projects (id, name, updated_at, doc, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name=?2, updated_at=?3, doc=?4, deleted_at=?5",
+            params![
+                project.id.to_string(),
+                project.name,
+                project.updated_at.to_rfc3339(),
+                doc,
+                project.deleted_at.map(|t| t.to_rfc3339())
+            ],
         )?;
         Ok(())
     }
@@ -128,20 +137,30 @@ impl Store for SqliteStore {
 
     fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT id, name, updated_at FROM projects ORDER BY updated_at DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, updated_at, deleted_at FROM projects ORDER BY updated_at DESC",
+        )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
         })?;
         let mut out = vec![];
         for row in rows {
-            let (id, name, updated_at) = row?;
+            let (id, name, updated_at, deleted_at) = row?;
+            fn parse(t: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+                chrono::DateTime::parse_from_rfc3339(t)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .map_err(|e| CoreError::Storage(e.to_string()))
+            }
             out.push(ProjectSummary {
                 id: Uuid::parse_str(&id).map_err(|e| CoreError::Storage(e.to_string()))?,
                 name,
-                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                    .map_err(|e| CoreError::Storage(e.to_string()))?
-                    .with_timezone(&chrono::Utc),
+                updated_at: parse(&updated_at)?,
+                deleted_at: deleted_at.as_deref().map(parse).transpose()?,
             });
         }
         Ok(out)

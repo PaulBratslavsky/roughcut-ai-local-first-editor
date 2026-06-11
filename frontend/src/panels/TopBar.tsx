@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
-import { useProjects, useRedo, useUndo } from "../ipc/queries";
+import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
 import { setProjectId } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
@@ -20,6 +20,7 @@ export function TopBar({
 }) {
   const undo = useUndo();
   const redo = useRedo();
+  const restoreProject = useRestoreProject();
   const projects = useProjects();
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
@@ -34,9 +35,9 @@ export function TopBar({
   };
 
   const onDeleteProject = async () => {
-    const question = `Delete project “${projectName}”? Cuts, transcript and undo history are removed. The video file itself is never touched.`;
+    const question = `Move “${projectName}” to the trash? Restore it any time in the next 30 days from the project menu. The video file itself is never touched.`;
     const confirmed = isTauri
-      ? await ask(question, { title: "Delete project", kind: "warning" })
+      ? await ask(question, { title: "Move to trash", kind: "warning" })
       : window.confirm(question);
     if (!confirmed) return;
     await callTool("delete_project", { project_id: projectId });
@@ -45,23 +46,45 @@ export function TopBar({
   };
 
   const list = projects.data?.projects ?? [];
+  const trash = projects.data?.trash ?? [];
+
+  const onSelectProject = (value: string) => {
+    if (value.startsWith("trash:")) {
+      const id = value.slice("trash:".length);
+      restoreProject.mutate(
+        { project_id: id },
+        { onSuccess: () => setProjectId(id) },
+      );
+      return;
+    }
+    setProjectId(value);
+  };
 
   return (
     <header className="topbar">
       <div className="topbar-left">
         <span className="app-mark">Fable</span>
-        {list.length > 1 ? (
+        {list.length > 1 || trash.length > 0 ? (
           <select
             className="project-select"
             value={projectId}
-            title="Switch project"
-            onChange={(e) => setProjectId(e.target.value)}
+            title="Switch project — trashed projects restore when selected"
+            onChange={(e) => onSelectProject(e.target.value)}
           >
             {list.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
             ))}
+            {trash.length > 0 && (
+              <optgroup label="trash — select to restore">
+                {trash.map((p) => (
+                  <option key={p.id} value={`trash:${p.id}`}>
+                    ↩ {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         ) : (
           <span className="project-name" title={projectName}>

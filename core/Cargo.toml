@@ -29,10 +29,13 @@ hound = { version = "3.5", optional = true }
 ts-rs = { version = "10", features = ["uuid-impl", "chrono-impl"], optional = true }
 
 [features]
-# metal: whisper.cpp on the Apple GPU — CPU-only decode of a 26-min video
-# takes ~10x longer and reads as a hang.
-whisper-native = ["dep:whisper-rs", "dep:hound", "whisper-rs/metal"]
+whisper-native = ["dep:whisper-rs", "dep:hound"]
 ts-bindings = ["dep:ts-rs"]
+
+# whisper.cpp on the Apple GPU — CPU-only decode of a 26-min video takes
+# ~10x longer and reads as a hang. Target-gated: metal exists only on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -211,6 +211,15 @@ export interface PlanDurationCutArgs extends Record<string, unknown> {
   apply?: boolean;
 }
 
+export interface RestoreProjectArgs extends Record<string, unknown> {
+  project_id: string;
+}
+
+/** Bring a trashed project back (see ListProjectsResult.trash). */
+export function useRestoreProject() {
+  return useEditMutation<RestoreProjectArgs, Project>("restore_project", ["projects", "project", "timeline", "transcript"]);
+}
+
 /** plan_duration_cut with apply=true: one undoable batch cut to a target. */
 export function useApplyDurationCut() {
   return useEditMutation<PlanDurationCutArgs, DurationCutReceipt>("plan_duration_cut", [

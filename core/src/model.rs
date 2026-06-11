@@ -590,6 +590,9 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub schema_version: u32,
+    /// Trash: set on delete, cleared on restore; purged after 30 days.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl Project {
@@ -605,6 +608,7 @@ impl Project {
             // v2: per-project `settings` removed — Preferences are global and
             // read fresh at use time (one source of truth).
             schema_version: 2,
+            deleted_at: None,
         }
     }
 
@@ -620,6 +624,9 @@ pub struct ProjectSummary {
     pub id: Uuid,
     pub name: String,
     pub updated_at: DateTime<Utc>,
+    /// Present when the project sits in the trash.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 // --------------------------------------------------- external connections

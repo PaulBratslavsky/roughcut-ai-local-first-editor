@@ -2,4 +2,8 @@
 import type { Media } from "./Media";
 import type { Timeline } from "./Timeline";
 
-export type Project = { id: string, name: string, media: Media | null, timeline: Timeline, created_at: string, updated_at: string, schema_version: number, };
+export type Project = { id: string, name: string, media: Media | null, timeline: Timeline, created_at: string, updated_at: string, schema_version: number, 
+/**
+ * Trash: set on delete, cleared on restore; purged after 30 days.
+ */
+deleted_at: string | null, };

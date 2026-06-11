@@ -6,7 +6,33 @@ import { useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { callTool, downloadWhisperModel, getSetupStatus, isTauri, onAppEvent } from "./ipc/api";
+import { useProjects, useRestoreProject } from "./ipc/queries";
 import type { ModelTier, ProgressEvent, Project, SetupStatus } from "./ipc/types";
+
+/** The empty state is also where you land after trashing your LAST project —
+ *  the trash must be reachable from here, not just the project switcher. */
+function TrashList() {
+  const projects = useProjects();
+  const restore = useRestoreProject();
+  const trash = projects.data?.trash ?? [];
+  if (trash.length === 0) return null;
+  return (
+    <div className="empty-trash">
+      <span className="empty-trash-label">trash</span>
+      {trash.map((p) => (
+        <button
+          key={p.id}
+          className="empty-trash-item"
+          disabled={restore.isPending}
+          onClick={() => restore.mutate({ project_id: p.id })}
+          title="Restore this project"
+        >
+          ↩ {p.name}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 type Phase = "idle" | "working";
 
@@ -233,6 +259,7 @@ export function EmptyState() {
             </button>
           )}
           {error && <p className="empty-error">{error}</p>}
+          <TrashList />
         </>
       ) : (
         <div className="import-progress">

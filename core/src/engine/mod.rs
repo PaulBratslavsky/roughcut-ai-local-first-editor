@@ -122,6 +122,8 @@ impl Editor {
         // ROUGHCUT_NO_CONFIRM=1 bypasses them (scripted/CI runs).
         let confirm = std::env::var("ROUGHCUT_NO_CONFIRM").map(|v| v != "1").unwrap_or(true);
         editor.inner.require_confirm.store(confirm, std::sync::atomic::Ordering::Relaxed);
+        // Trash older than 30 days is gone for good.
+        let _ = editor.purge_trash(30);
         Ok(editor)
     }
 
