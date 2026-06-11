@@ -1190,9 +1190,9 @@ input, select { font: inherit; }
    an empty-looking timeline otherwise reads as broken. */
 .timeline-generating {
   position: absolute;
-  top: 34px;
+  top: 50%;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -1209,6 +1209,8 @@ input, select { font: inherit; }
   width: 11px;
   height: 11px;
   border-width: 1.5px;
+  border-color: color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
 }
 
 /* Absolutely positioned so the DPR-sized canvas never feeds back into
