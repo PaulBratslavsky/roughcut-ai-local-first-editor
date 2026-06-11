@@ -57,6 +57,7 @@ pub trait Transcriber: Send + Sync {
         media: &Media,
         wav_path: &str,
         language: &str,
+        project_id: Option<uuid::Uuid>,
         sink: &SharedSink,
     ) -> Result<Transcript>;
 }
@@ -82,6 +83,7 @@ impl Transcriber for WhisperCli {
         media: &Media,
         wav_path: &str,
         language: &str,
+        _project_id: Option<uuid::Uuid>,
         _sink: &SharedSink,
     ) -> Result<Transcript> {
         let model = require_model()?.to_string_lossy().into_owned();
@@ -164,6 +166,7 @@ impl Transcriber for WhisperRs {
         media: &Media,
         wav_path: &str,
         language: &str,
+        project_id: Option<uuid::Uuid>,
         sink: &SharedSink,
     ) -> Result<Transcript> {
         let model = require_model()?;
@@ -201,12 +204,16 @@ impl Transcriber for WhisperRs {
             {
                 let sink = sink.clone();
                 params.set_progress_callback_safe(move |pct: i32| {
+                    // The UI filters progress by PROJECT id; map whisper's
+                    // 0-100% into the 25..98% band after the engine's
+                    // extract/start pre-events so the bar never jumps back.
+                    let frac = 0.25 + f64::from(pct.clamp(0, 100)) / 100.0 * 0.73;
                     crate::events::send(
                         &sink,
                         crate::events::CoreEvent::progress(crate::events::ProgressTask::Transcribe,
-                            Some(media_id),
-                            f64::from(pct.clamp(0, 100)) / 100.0,
-                            "transcribing",
+                            project_id,
+                            frac,
+                            format!("transcribing on-device — {}%", pct.clamp(0, 100)),
                         ),
                     );
                 });
@@ -304,12 +311,13 @@ impl Transcriber for MockTranscriber {
         media: &Media,
         _wav_path: &str,
         _language: &str,
+        project_id: Option<uuid::Uuid>,
         sink: &SharedSink,
     ) -> Result<Transcript> {
         for i in 1..=4 {
             crate::events::send(
                 sink,
-                crate::events::CoreEvent::progress(crate::events::ProgressTask::Transcribe, None, i as f64 * 0.25, "transcribing (demo)"),
+                crate::events::CoreEvent::progress(crate::events::ProgressTask::Transcribe, project_id, i as f64 * 0.25, "transcribing (demo)"),
             );
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         }
@@ -329,20 +337,21 @@ impl Transcriber for AutoTranscriber {
         media: &Media,
         wav_path: &str,
         language: &str,
+        project_id: Option<uuid::Uuid>,
         sink: &SharedSink,
     ) -> Result<Transcript> {
         let caps = crate::capabilities::probe();
         if caps.demo() {
-            return MockTranscriber.transcribe(media, wav_path, language, sink).await;
+            return MockTranscriber.transcribe(media, wav_path, language, project_id, sink).await;
         }
         #[cfg(feature = "whisper-native")]
         {
-            return WhisperRs.transcribe(media, wav_path, language, sink).await;
+            return WhisperRs.transcribe(media, wav_path, language, project_id, sink).await;
         }
         #[cfg(not(feature = "whisper-native"))]
         {
             if caps.whisper_cli {
-                WhisperCli.transcribe(media, wav_path, language, sink).await
+                WhisperCli.transcribe(media, wav_path, language, project_id, sink).await
             } else {
                 Err(CoreError::Unavailable(
                     "no transcription engine: install whisper-cpp (whisper-cli) or build with the whisper-native feature"

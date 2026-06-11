@@ -44,7 +44,7 @@ impl Editor {
         send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.0, "starting"));
 
         let transcript = if demo {
-            self.inner.transcriber.transcribe(&media, "", &lang, &self.inner.sink).await?
+            self.inner.transcriber.transcribe(&media, "", &lang, Some(project_id), &self.inner.sink).await?
         } else {
             let wav = std::env::temp_dir().join(format!("roughcut-{}.wav", media.id));
             let wav_str = wav.to_string_lossy().to_string();
@@ -57,7 +57,7 @@ impl Editor {
                 &self.inner.sink,
                 CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.25, "transcribing on-device"),
             );
-            let t = self.inner.transcriber.transcribe(&media, &wav_str, &lang, &self.inner.sink).await;
+            let t = self.inner.transcriber.transcribe(&media, &wav_str, &lang, Some(project_id), &self.inner.sink).await;
             let _ = std::fs::remove_file(&wav);
             t?
         };
