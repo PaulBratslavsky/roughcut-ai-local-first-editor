@@ -26,6 +26,7 @@ export function TopBar({
   const [showSetup, setShowSetup] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
 
+  const [newOpen, setNewOpen] = useState(false);
   const onNewVideo = async () => {
     const id = await newProjectFromDialog();
     if (id) {
@@ -91,9 +92,39 @@ export function TopBar({
             {projectName}
           </span>
         )}
-        <button className="new-video-btn" title="Import another video" onClick={() => void onNewVideo()}>
-          + New video
-        </button>
+        <div className="export-menu new-video-menu">
+          <button
+            className="new-video-btn"
+            title="Load a video file or record a new one"
+            onClick={() => setNewOpen((v) => !v)}
+          >
+            + New video
+          </button>
+          {newOpen && (
+            <div className="export-dropdown">
+              <button
+                className="export-item"
+                onClick={() => {
+                  setNewOpen(false);
+                  void onNewVideo();
+                }}
+              >
+                ▸ Open a video file…
+              </button>
+              {isTauri && (
+                <button
+                  className="export-item"
+                  onClick={() => {
+                    setNewOpen(false);
+                    setScreen("recorder");
+                  }}
+                >
+                  ● Record camera
+                </button>
+              )}
+            </div>
+          )}
+        </div>
         <button
           className="icon-btn delete-project-btn"
           title="Delete this project (keeps the video file)"
@@ -151,11 +182,6 @@ export function TopBar({
             <path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3" />
           </svg>
         </button>
-        {isTauri && (
-          <button className="tb-btn" title="Record camera (new project)" onClick={() => setScreen("recorder")}>
-            ● rec
-          </button>
-        )}
         <ExportMenu projectId={projectId} projectName={projectName} />
       </div>
     </header>

@@ -1641,3 +1641,7 @@ input, select { font: inherit; }
   color: var(--fg-dim);
   margin: 0;
 }
+
+/* + New video is a tiny menu: load a file or record a new one */
+.new-video-menu { position: relative; }
+.new-video-menu .export-dropdown { left: 0; right: auto; }
