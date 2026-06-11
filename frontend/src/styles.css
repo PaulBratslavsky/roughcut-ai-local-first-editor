@@ -1186,6 +1186,31 @@ input, select { font: inherit; }
   border: 1px solid var(--border-soft);
 }
 
+/* Status chip while peaks/thumbnails (or their first fetch) generate —
+   an empty-looking timeline otherwise reads as broken. */
+.timeline-generating {
+  position: absolute;
+  top: 34px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: 11px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.spinner-sm {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
 /* Absolutely positioned so the DPR-sized canvas never feeds back into
    the flex layout's min-content size (would create a resize loop). */
 .timeline-canvas {

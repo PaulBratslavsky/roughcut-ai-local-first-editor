@@ -110,10 +110,14 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   const offProjects = onAppEvent("projects-changed", () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.projects });
   });
+  const offAssets = onAppEvent("media-assets-changed", () => {
+    void queryClient.invalidateQueries({ queryKey: ["media-assets"] });
+  });
   return () => {
     offTimeline();
     offTranscript();
     offProjects();
+    offAssets();
   };
 }
 

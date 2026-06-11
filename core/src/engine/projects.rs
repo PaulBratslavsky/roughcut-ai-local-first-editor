@@ -104,6 +104,8 @@ impl Editor {
 
     /// Waveform peaks + thumbnails for the project's media (generated on
     /// first call, cached after). Returns file PATHS for the asset protocol.
+    /// A missing playable copy (sources WebKit can't stream) builds in the
+    /// background; `media-assets-changed` fires when it lands.
     pub async fn media_assets(
         &self,
         project_id: Uuid,
@@ -111,7 +113,20 @@ impl Editor {
         let media = self
             .with_project(project_id, |p, _| Ok(p.media.clone()))?
             .ok_or_else(|| CoreError::InvalidArg("project has no media".into()))?;
-        self.inner.video.media_assets(&media).await
+        let assets = self.inner.video.media_assets(&media).await?;
+        if assets.playback_path.is_none() && !self.demo_mode() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let editor = self.clone();
+                handle.spawn(async move {
+                    if let Ok(Some(_)) =
+                        crate::adapters::video::ensure_playable_copy(&media).await
+                    {
+                        send(&editor.inner.sink, CoreEvent::MediaAssetsChanged { project_id });
+                    }
+                });
+            }
+        }
+        Ok(assets)
     }
 
     pub fn get_transcript(&self, project_id: Uuid) -> Result<Option<Transcript>> {

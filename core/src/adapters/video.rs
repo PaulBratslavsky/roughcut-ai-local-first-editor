@@ -334,26 +334,11 @@ impl VideoEngine for FfmpegCli {
                 path: path.to_string_lossy().into_owned(),
             });
         }
-        // ---- web-playable remux (only when the source needs it) -------------
-        let playback_path = if needs_faststart(&media.file_path) {
-            let play = cache.join("play.mp4");
-            if !play.is_file() {
-                let mut cmd = ffmpeg_cmd()?;
-                // Stream copy: lossless and fast — no re-encode, just moves
-                // the index to the front so the <video> element can start.
-                cmd.args([
-                    "-y",
-                    "-i", &media.file_path,
-                    "-c", "copy",
-                    "-movflags", "+faststart",
-                    &play.to_string_lossy(),
-                ]);
-                Self::run(&mut cmd, "ffmpeg faststart remux").await?;
-            }
-            Some(play.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        // Playable copy if a PREVIOUS remux produced one. Building a missing
+        // one is slow on multi-GB sources — the engine kicks that off in the
+        // background (ensure_playable_copy) so peaks/thumbnails return now.
+        let play = cache.join("play.mp4");
+        let playback_path = play.is_file().then(|| play.to_string_lossy().into_owned());
 
         Ok(MediaAssets {
             peaks_path: Some(peaks_file.to_string_lossy().into_owned()),
@@ -361,6 +346,49 @@ impl VideoEngine for FfmpegCli {
             thumbnails,
             playback_path,
         })
+    }
+}
+
+/// Build the web-playable copy when the source needs one (moov after mdat).
+/// Lossless stream copy with +faststart, written to `.part` then renamed, so
+/// a crash never leaves a half-copy that looks playable. Idempotent and
+/// deduplicated; Ok(None) = the source plays as-is.
+pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
+    if !needs_faststart(&media.file_path) {
+        return Ok(None);
+    }
+    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
+    std::fs::create_dir_all(&cache)?;
+    let play = cache.join("play.mp4");
+    if play.is_file() {
+        return Ok(Some(play.to_string_lossy().into_owned()));
+    }
+    // One remux per cache key at a time.
+    {
+        static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let guard = IN_FLIGHT.get_or_init(Default::default);
+        if !guard.lock().unwrap().insert(asset_cache_key(media)) {
+            return Ok(None); // someone else is building it; caller retries later
+        }
+        let result = async {
+            let part = cache.join("play.mp4.part");
+            let mut cmd = ffmpeg_cmd()?;
+            cmd.args([
+                "-y",
+                "-i", &media.file_path,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                "-f", "mp4",
+                &part.to_string_lossy(),
+            ]);
+            FfmpegCli::run(&mut cmd, "ffmpeg faststart remux").await?;
+            std::fs::rename(&part, &play)?;
+            Ok::<_, crate::error::CoreError>(Some(play.to_string_lossy().into_owned()))
+        }
+        .await;
+        guard.lock().unwrap().remove(&asset_cache_key(media));
+        result
     }
 }
 

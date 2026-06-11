@@ -54,6 +54,11 @@ pub enum CoreEvent {
     TimelineChanged {
         project_id: Uuid,
     },
+    /// Derived media (peaks/thumbnails/playable copy) finished generating in
+    /// the background — refetch get_media_assets.
+    MediaAssetsChanged {
+        project_id: Uuid,
+    },
     /// Project created / duplicated / deleted — refetch the library list.
     ProjectsChanged {},
     TranscriptChanged {
@@ -86,6 +91,7 @@ impl CoreEvent {
             CoreEvent::Progress { .. } => "progress",
             CoreEvent::AgentStep { .. } => "agent-step",
             CoreEvent::TimelineChanged { .. } => "timeline-changed",
+            CoreEvent::MediaAssetsChanged { .. } => "media-assets-changed",
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",

@@ -29,7 +29,7 @@ interface DragState {
 
 export function Timeline({ projectId }: { projectId: string }) {
   const { data: timeline } = useTimeline(projectId);
-  const { data: assetMeta } = useMediaAssets(projectId);
+  const { data: assetMeta, isLoading: assetsGenerating } = useMediaAssets(projectId);
   const trimClip = useTrimClip();
   const cutRange = useCutRange();
   const restoreRange = useRestoreRange();
@@ -278,6 +278,12 @@ export function Timeline({ projectId }: { projectId: string }) {
         onPointerUp={onPointerUp}
         onContextMenu={onContextMenu}
       />
+      {(assetsGenerating || (assetMeta && !assets)) && (
+        <div className="timeline-generating" role="status">
+          <span className="spinner spinner-sm" aria-hidden />
+          generating waveform &amp; thumbnails… the timeline works meanwhile
+        </div>
+      )}
       {ctxMenu && (
         <div
           className="context-menu"

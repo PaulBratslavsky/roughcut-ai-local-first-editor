@@ -59,7 +59,7 @@ export interface TranscriptChangedEvent { project_id: string }
 
 export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
-  | "projects-changed" | "confirm-request";
+  | "projects-changed" | "media-assets-changed" | "confirm-request";
 
 export interface ConfirmRequestEvent { id: string; summary: string }
 
