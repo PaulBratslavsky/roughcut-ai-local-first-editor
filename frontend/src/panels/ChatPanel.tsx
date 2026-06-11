@@ -14,6 +14,23 @@ interface AgentMessage {
   pending: boolean;
   actionCount: number;
   undone: boolean;
+  startedAt: number;
+}
+
+/** Always-moving footer for an in-flight run: local models can sit on one
+ *  inference call for a minute — a ticking clock says "working, not hung". */
+function ElapsedRow({ startedAt }: { startedAt: number }) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  return (
+    <div className="agent-step thinking elapsed-row">
+      <span className="spinner spinner-sm" aria-hidden /> working… {s}s
+    </div>
+  );
 }
 
 let msgCounter = 0;
@@ -186,8 +203,8 @@ export function ChatPanel({ projectId }: { projectId: string }) {
       .map((m) => ({ role: m.role === "user" ? ("user" as const) : ("agent" as const), text: m.text }));
     setMessages((msgs) => [
       ...msgs,
-      { id: nextId(), role: "user", text: instruction, steps: [], pending: false, actionCount: 0, undone: false },
-      { id: agentId, role: "agent", text: "", steps: [], pending: true, actionCount: 0, undone: false },
+      { id: nextId(), role: "user", text: instruction, steps: [], pending: false, actionCount: 0, undone: false, startedAt: Date.now() },
+      { id: agentId, role: "agent", text: "", steps: [], pending: true, actionCount: 0, undone: false, startedAt: Date.now() },
     ]);
     applyInstruction.mutate(
       { project_id: projectId, instruction, history },
@@ -248,7 +265,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
               {m.steps.filter((s) => s.kind !== "final").map((s, i) => (
                 <StepView key={i} step={s} />
               ))}
-              {m.pending && m.steps.length === 0 && <div className="agent-step thinking">Thinking…</div>}
+              {m.pending && <ElapsedRow startedAt={m.startedAt} />}
               {m.text && <div className="agent-summary">{m.text}</div>}
               {!m.pending && m.actionCount > 0 && (
                 <button className="undo-link" onClick={() => onUndo(m.id)} disabled={m.undone || undo.isPending}>

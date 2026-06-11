@@ -699,6 +699,7 @@ input, select { font: inherit; }
   color: var(--light-muted);
 }
 .agent-step.thinking { font-style: italic; }
+.elapsed-row { align-items: center; font-variant-numeric: tabular-nums; }
 
 /* Tool-call action cards: what the agent is doing, in words; raw JSON one
    <details> away. */

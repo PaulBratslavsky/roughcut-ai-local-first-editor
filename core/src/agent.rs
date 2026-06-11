@@ -181,6 +181,20 @@ pub async fn run_instruction_with(
     model: &str,
 ) -> Result<InstructionOutcome> {
     let context = project_context(editor, project_id)?;
+    // Narrate the phases — a long first model call otherwise reads as a hang.
+    let (seg_count, dur_min) = editor.with_project(project_id, |p, t| {
+        Ok((t.map(|t| t.segments.len()).unwrap_or(0), p.timeline.duration / 60.0))
+    })?;
+    step_text(
+        editor,
+        project_id,
+        0,
+        "thinking",
+        format!(
+            "loaded the transcript — {seg_count} segments across {dur_min:.0} min; \
+             handing it to the local model"
+        ),
+    );
     let tool_schemas: Vec<Value> = tools::agent_defs()
         .into_iter()
         .map(|d| {
@@ -217,6 +231,18 @@ pub async fn run_instruction_with(
     let mut steered = false;
 
     for step in 0..MAX_STEPS {
+        step_text(
+            editor,
+            project_id,
+            step,
+            "thinking",
+            if step == 0 {
+                "waiting on the local model — first pass over a long transcript is the slow part"
+                    .to_string()
+            } else {
+                format!("waiting on the local model (step {}/{MAX_STEPS})", step + 1)
+            },
+        );
         let response = match inference
             .chat(ChatRequest {
                 model: model.to_string(),
@@ -308,6 +334,13 @@ pub async fn run_instruction_with(
             readonly_rounds += 1;
             if readonly_rounds >= 2 && !steered {
                 steered = true;
+                step_text(
+                    editor,
+                    project_id,
+                    step,
+                    "thinking",
+                    "model keeps reading instead of editing — telling it to act now",
+                );
                 messages.push(ChatMessage::user(
                     "You have gathered enough. Do NOT search or read again. Either \
                      make the edit NOW — one cut_by_transcript call with ALL the \
