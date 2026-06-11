@@ -7,6 +7,7 @@ import { useCutRange, useMediaAssets, useRestoreRange, useSplitClip, useTimeline
 import type { Clip } from "../ipc/types";
 import { loadTimelineAssets, type TimelineAssets } from "./assets";
 import {
+  fitTimelineToWidth,
   seekTo,
   setScrollX,
   setSelectedClipId,
@@ -64,6 +65,18 @@ export function Timeline({ projectId }: { projectId: string }) {
       clip: hit.clip,
     });
   };
+
+  // Auto-fit: when a project's duration first becomes known, zoom so the
+  // whole video spans the lane — a 1:40 short fills the width instead of
+  // huddling at default zoom. Once per project; manual zoom wins afterwards.
+  const fittedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const dur = timeline?.duration ?? 0;
+    const w = wrapRef.current?.clientWidth ?? 0;
+    if (!dur || !w || fittedRef.current === projectId) return;
+    fittedRef.current = projectId;
+    fitTimelineToWidth(dur, w);
+  }, [projectId, timeline?.duration]);
 
   // Real waveform peaks + thumbnails: fetched over the asset protocol once
   // the core reports them; the renderer falls back to synthetic bars until then.

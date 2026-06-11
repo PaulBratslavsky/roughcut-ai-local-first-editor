@@ -49,10 +49,11 @@ function patch(p: Partial<ViewState>): void {
   viewStore.setState((s) => ({ ...s, ...p }));
 }
 
-/** Switching projects resets the viewport — scroll, zoom, playhead, and
- *  selection belong to the project you were just looking at. (A 2:50 short
- *  opened after a 40-minute edit otherwise lands on an empty timeline,
- *  scrolled to minute 7 of footage that doesn't exist.) */
+/** Switching projects resets the viewport — scroll, playhead, and selection
+ *  belong to the project you were just looking at. (A 2:50 short opened
+ *  after a 40-minute edit otherwise lands on an empty timeline, scrolled to
+ *  minute 7 of footage that doesn't exist.) Zoom is owned by the timeline's
+ *  auto-fit, which runs when the new project's duration is known. */
 export function setProjectId(projectId: string | null): void {
   viewStore.setState((s) => {
     if (s.projectId === projectId) return s;
@@ -62,7 +63,6 @@ export function setProjectId(projectId: string | null): void {
       playhead: 0,
       seekNonce: s.seekNonce + 1,
       playing: false,
-      zoom: 6,
       scrollX: 0,
       selectedClipId: null,
       selectedSegmentIds: [],
@@ -121,8 +121,15 @@ export function selectSegment(id: string, additive: boolean): void {
   });
 }
 
-export const ZOOM_MIN = 1.5;
+export const ZOOM_MIN = 0.5; // low enough to fit ~45 min on a wide screen
 export const ZOOM_MAX = 240;
+
+/** Fit the whole video into the visible timeline width (project open). */
+export function fitTimelineToWidth(durationS: number, widthPx: number): void {
+  if (durationS <= 0 || widthPx <= 0) return;
+  const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, (widthPx - 12) / durationS));
+  patch({ zoom, scrollX: 0 });
+}
 
 /** Zoom keeping the playhead at the same screen x position. */
 export function zoomAroundPlayhead(factor: number, playheadDisplayTime: number): void {
