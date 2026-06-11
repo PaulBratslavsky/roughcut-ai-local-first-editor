@@ -373,15 +373,15 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   // ---- Project / state ----------------------------------------------------
 
   list_projects(): { projects: ProjectSummary[]; trash: ProjectSummary[] } {
-    const summary = (p: Project): ProjectSummary => ({
+    const summary = (p: Project, deletedAt: string | null): ProjectSummary => ({
       id: p.id,
       name: p.name,
       updated_at: p.updated_at,
-      deleted_at: null,
+      deleted_at: deletedAt,
     });
     return {
-      projects: state.project ? [summary(state.project)] : [],
-      trash: state.trashed ? [summary(state.trashed)] : [],
+      projects: state.project ? [summary(state.project, null)] : [],
+      trash: state.trashed ? [summary(state.trashed, new Date().toISOString())] : [],
     };
   },
 
@@ -562,7 +562,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       state.transcript?.segments
         .filter((s) => s.is_filler || s.words.some((w) => customSet.has(w.text.toLowerCase().replace(/[^a-z']/g, ""))))
         .map((s) => s.id) ?? [];
-    return { segment_ids: ids };
+    return { word_ranges: [] as { start: number; end: number }[], segment_ids: ids };
   },
 
   detect_takes(args) {
@@ -575,7 +575,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     const aggressiveness = args.aggressiveness === "aggressive" ? "aggressive" : "natural";
     await emitProgress("rough_cut", p.id, ["Detecting silences…", "Detecting fillers…", "Assembling cut…"], 900);
 
-    recordEdit(p, "generate_rough_cut", `Generated ${aggressiveness} rough cut`);
+    const action = recordEdit(p, "generate_rough_cut", `Generated ${aggressiveness} rough cut`);
     const cuttable = new Set(
       state.transcript?.segments.filter((s) => s.is_filler || s.is_silence).map((s) => s.id) ?? [],
     );
@@ -584,7 +584,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       if (aggressiveness === "aggressive" && clip.source_out - clip.source_in < 3.5) clip.included = false;
     }
     refreshTimeline(p);
-    return { timeline: clone(p.timeline), cut_count: p.timeline.cut_count };
+    return { action, timeline: clone(p.timeline), cut_count: p.timeline.cut_count };
   },
 
   // ---- Editing ---------------------------------------------------------------
@@ -652,7 +652,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     if (!(at > clip.source_in + 0.05 && at < clip.source_out - 0.05)) {
       throw { code: "invalid_args", message: "Split point must be inside the clip" };
     }
-    recordEdit(p, "split_clip", `Split clip ${clip.id} at ${at.toFixed(2)}s`);
+    const action = recordEdit(p, "split_clip", `Split clip ${clip.id} at ${at.toFixed(2)}s`);
     const right: Clip = {
       ...clone(clip),
       id: `clip-split-${Date.now().toString(36)}`,
@@ -668,7 +668,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     p.timeline.clips.push(right);
     p.timeline.clips.sort((a, b) => a.order - b.order);
     refreshTimeline(p);
-    return { clips: [clone(clip), clone(right)], timeline: clone(p.timeline) };
+    return { clips: [clone(clip), clone(right)], timeline: clone(p.timeline), action };
   },
 
   reorder_clip(args) {
@@ -824,8 +824,20 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   find_segments(args) {
     requireProject(args.project_id);
     const q = String(args.query ?? "").toLowerCase();
-    const segments = state.transcript?.segments.filter((s) => s.text.toLowerCase().includes(q)) ?? [];
-    return { segments: clone(segments) };
+    const segments = (state.transcript?.segments ?? [])
+      .filter((s) => s.text.toLowerCase().includes(q))
+      .map((s) => ({
+        id: s.id,
+        start: s.start,
+        end: s.end,
+        text: s.text,
+        is_filler: s.is_filler,
+        is_silence: s.is_silence,
+        take_group_id: s.take_group_id,
+        is_best_take: s.is_best_take,
+        score: 0.5,
+      }));
+    return { segments, method: "bm25" };
   },
 
   async apply_instruction(args) {

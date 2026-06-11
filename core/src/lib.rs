@@ -17,6 +17,7 @@ pub mod detect;
 pub mod engine;
 pub mod error;
 pub mod events;
+pub mod inflight;
 pub mod export;
 pub mod llm_runtime;
 pub mod mcp;

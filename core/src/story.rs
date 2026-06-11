@@ -464,17 +464,10 @@ fn narrate(editor: &Editor, project_id: Uuid, step: usize, text: impl Into<Strin
 /// every phase.
 /// One story edit per project at a time: the pipeline spans several model
 /// calls and three mutations; interleaving two of them scrambles intent.
-fn busy_guard() -> &'static std::sync::Mutex<std::collections::HashSet<Uuid>> {
+fn busy_set() -> &'static std::sync::Mutex<std::collections::HashSet<Uuid>> {
     static BUSY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
         std::sync::OnceLock::new();
     BUSY.get_or_init(Default::default)
-}
-
-struct BusyToken(Uuid);
-impl Drop for BusyToken {
-    fn drop(&mut self) {
-        busy_guard().lock().unwrap().remove(&self.0);
-    }
 }
 
 pub async fn story_edit(
@@ -489,12 +482,11 @@ pub async fn story_edit(
             return Err(CoreError::InvalidArg("target_duration_s must be positive".into()));
         }
     }
-    if !busy_guard().lock().unwrap().insert(project_id) {
+    let Some(_busy) = crate::inflight::try_claim(busy_set(), project_id) else {
         return Err(CoreError::InvalidArg(
             "a story edit is already running for this project".into(),
         ));
-    }
-    let _busy = BusyToken(project_id);
+    };
 
     let before_s = editor.get_timeline(project_id)?.included_duration();
     let inference = editor.inference()?;

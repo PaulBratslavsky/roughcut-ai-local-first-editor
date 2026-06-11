@@ -63,6 +63,12 @@ impl SqliteStore {
         // Migration for installs that predate the trash: the ALTER fails
         // harmlessly once the column exists.
         let _ = conn.execute("ALTER TABLE projects ADD COLUMN deleted_at TEXT", []);
+        // Schema version rail: future migrations switch on PRAGMA user_version
+        // instead of guessing from table shapes. v1 = trash-era schema.
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+        if v < 1 {
+            conn.execute_batch("PRAGMA user_version = 1")?;
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -131,7 +137,9 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM projects WHERE id = ?1", params![id.to_string()])?;
         conn.execute("DELETE FROM transcripts WHERE project_id = ?1", params![id.to_string()])?;
+        conn.execute("DELETE FROM embeddings WHERE project_id = ?1", params![id.to_string()])?;
         conn.execute("DELETE FROM kv WHERE key = ?1", params![format!("journal:{id}")])?;
+        conn.execute("DELETE FROM kv WHERE key = ?1", params![format!("outline:{id}")])?;
         Ok(())
     }
 

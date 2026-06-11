@@ -19,6 +19,10 @@ invoke<JsonValue>("call_tool", { name: string, args: object })
 // convenience commands (same dispatch underneath)
 invoke("list_tools")          // -> ToolDef[] { name, description, input_schema }
 invoke("mcp_endpoint_info")   // -> { url: string, token: string } for the MCP server
+// plus bespoke shell commands OUTSIDE the registry (ADR-0004): demo_mode,
+// setup_status, download_whisper_model, ollama_pull_model,
+// install_llama_server, download_gguf, start_managed_llm, reveal_path,
+// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve
 ```
 
 Events emitted by the core (listen via `@tauri-apps/api/event`):
@@ -29,6 +33,9 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
+| `projects-changed` | `{}` — library changed (create/duplicate/delete/restore); refetch `list_projects` |
+| `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers) |
+| `mcp-ready` | `{ url, token }` — MCP server is up |
 | `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background; refetch `get_media_assets` |
 
 ### MCP
@@ -45,17 +52,17 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 (undoable) tagged with `source: "ui" | "local_ai" | "mcp_client"`.
 
 ### Ingest & transcription
-- `import_media { file_path } -> Media`
+- `import_media { file_path, project_id? } -> Media` (with `project_id`, attaches the media to that project)
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
 
 ### Analysis
-- `detect_silences { project_id, min_duration_s?, threshold_db? } -> { segments: [{start,end}] }`
+- `detect_silences { project_id, min_duration_s? } -> { segments: [{start,end}] }`
 - `detect_fillers { project_id } -> { segment_ids: string[], word_ranges: [{start,end}] }` (persists `is_filler` flags; stoplist comes from preferences)
 - `detect_takes { project_id } -> { take_groups: [{ id, segment_ids, best_segment_id }] }` (persists take flags — same write path as the rough cut)
-- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { timeline: Timeline, cut_count: number }`
+- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { action: EditAction, timeline: Timeline, cut_count: number }`
 
 ### Editing
-- `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], timeline }` — batch power tool for orchestrators (≤100 ops/call, each individually undoable)
+- `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
 - `cut_range { project_id, start, end } -> { action: EditAction, timeline: Timeline }`
 - `restore_range { project_id, start, end } -> { action, timeline }`
 - `cut_by_transcript { project_id, segment_ids: string[] } -> { action, timeline }`
@@ -66,7 +73,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `set_global_padding { project_id, start_s, end_s, linked } -> { action, timeline }`
 
 ### Semantic / LLM
-- `outline_transcript { project_id } -> { beats: [{title, summary, role, cut_priority, segment_ids, start, end}], method: "llm"|"heuristic" }` — the FULL transcript split into story beats (chunked map for long videos; cached per transcript hash; pause-boundary sections without a model)
+- `outline_transcript { project_id, refresh? } -> { beats: [{title, summary, role, cut_priority, segment_ids, start, end}], method: "llm"|"heuristic" }` — the FULL transcript split into story beats (chunked map for long videos; cached per transcript hash; pause-boundary sections without a model)
 - `review_flow { project_id } -> { coherent, boundaries_checked, issues: [{kind, severity, at_segment, description, restore_segment_ids}], method }` — re-reads the edited transcript at every cut point: deterministic checks (mid-sentence cuts, orphaned connectives) + LLM judgment per boundary
 - `story_edit { project_id, instruction, target_duration_s? } -> { actions, summary, before_s, after_s, coherent, issues_remaining }` — the cohesive pipeline in one call: outline → cut whole beats against the instruction → review every cut point → restore what reads broken → summarize. Long-running; frontier orchestrators may prefer composing the granular tools
 - `plan_duration_cut { project_id, target_duration_s, apply? } -> plan | receipt` — ranks still-included segments by embedding centrality (tangents first, intro/outro protected). `apply: true` (recommended for orchestrators) plans AND cuts in one undoable step, returning `{ applied, action, before_s, included_duration_s, target_s, method, notes }`; without it, returns the full `{ segment_ids, projected_after_s, … }` plan for review
@@ -84,6 +91,8 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Project / state
 - `create_project { name, file_path? } -> Project`
+- `duplicate_project { project_id, name } -> Project` (save-as: same media + cut state, fresh undo history)
+- `get_media_assets { project_id } -> MediaAssets` (peaks/thumbnails/playable-copy file paths; generated and cached on first call)
 - `delete_project { project_id } -> { deleted: true }` — moves the project to the TRASH (restorable for 30 days, then purged at startup); never touches the media file
 - `restore_project { project_id } -> Project` — bring a trashed project back, edit state and all
 - `open_project { project_id } -> Project`
@@ -143,22 +152,24 @@ type EditOp =
   | { type: "set_clips"; clips: Clip[]; global_padding: Padding };
 
 interface EditAction { id: string; kind: string; source: "ui"|"local_ai"|"mcp_client";
-  timestamp: string; description: string;
-  op: EditOp; inverse: EditOp; redo: EditOp }
+  timestamp: string; description: string; op: EditOp }
+// exact inverse/redo snapshots live in the persisted per-project JOURNAL,
+// not on the public action (ADR-0002)
 
 interface Project { id: string; name: string; media: Media | null;
   timeline: Timeline; created_at: string; updated_at: string }
 // Note: preferences are GLOBAL (get/set_preferences) and read fresh at use
 // time — projects no longer carry a settings copy.
 
-interface ProjectSummary { id: string; name: string; updated_at: string }
+interface ProjectSummary { id: string; name: string; updated_at: string;
+  deleted_at: string | null /* set = in the trash */ }
 
 interface Preferences { default_padding: Padding;
   cut_aggressiveness: "natural" | "aggressive";
   custom_filler_words: string[]; silence_min_duration_s: number;
   export_target: string; language: string;
   model_tier: "auto" | "small" | "medium" | "large";
-  inference_endpoint: string; inference_model: string }
+  inference_endpoint: string; inference_model: string; embedding_model: string }
 ```
 
 ## Demo mode

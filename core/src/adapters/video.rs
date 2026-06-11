@@ -363,14 +363,14 @@ pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
     if play.is_file() {
         return Ok(Some(play.to_string_lossy().into_owned()));
     }
-    // One remux per cache key at a time.
+    // One remux per cache key at a time (RAII: released even on panic).
     {
         static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
             std::sync::OnceLock::new();
-        let guard = IN_FLIGHT.get_or_init(Default::default);
-        if !guard.lock().unwrap().insert(asset_cache_key(media)) {
+        let set = IN_FLIGHT.get_or_init(Default::default);
+        let Some(_claim) = crate::inflight::try_claim(set, asset_cache_key(media)) else {
             return Ok(None); // someone else is building it; caller retries later
-        }
+        };
         let result = async {
             let part = cache.join("play.mp4.part");
             let mut cmd = ffmpeg_cmd()?;
@@ -387,7 +387,6 @@ pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
             Ok::<_, crate::error::CoreError>(Some(play.to_string_lossy().into_owned()))
         }
         .await;
-        guard.lock().unwrap().remove(&asset_cache_key(media));
         result
     }
 }

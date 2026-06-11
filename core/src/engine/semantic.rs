@@ -36,13 +36,18 @@ impl Editor {
         if !has_transcript || has_index {
             return;
         }
-        if !self.inner.indexing.lock().unwrap().insert(project_id) {
-            return; // already building
+        fn indexing_set() -> &'static std::sync::Mutex<std::collections::HashSet<Uuid>> {
+            static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
+                std::sync::OnceLock::new();
+            S.get_or_init(Default::default)
         }
+        let Some(claim) = crate::inflight::try_claim(indexing_set(), project_id) else {
+            return; // already building
+        };
         let editor = self.clone();
         handle.spawn(async move {
+            let _claim = claim; // released on completion OR panic
             let _ = editor.index_transcript(project_id).await;
-            editor.inner.indexing.lock().unwrap().remove(&project_id);
         });
     }
 

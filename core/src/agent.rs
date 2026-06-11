@@ -65,24 +65,9 @@ fn system_prompt(project_id: Uuid) -> String {
     )
 }
 
-/// Tools that change the project. Anything else is reading/searching.
+/// Registry-owned: see ToolSpec.mutating.
 fn is_mutating(tool: &str) -> bool {
-    matches!(
-        tool,
-        "cut_range"
-            | "restore_range"
-            | "cut_by_transcript"
-            | "restore_by_transcript"
-            | "trim_clip"
-            | "split_clip"
-            | "reorder_clip"
-            | "set_global_padding"
-            | "apply_edits"
-            | "generate_rough_cut"
-            | "story_edit"
-            | "undo"
-            | "redo"
-    )
+    tools::is_mutating(tool)
 }
 
 /// Compact transcript + timeline context the model can ground on.

@@ -29,7 +29,15 @@ pub struct ToolSpec {
     /// Dispatches into the agent loop / external escalation — excluded from
     /// `dispatch_basic` so the loop can never recurse into itself.
     pub meta: bool,
+    /// Lands undoable EditActions (drives the agent loop's act/read
+    /// accounting — the registry owns this, not a parallel hand list).
+    pub mutating: bool,
     pub handler: Handler,
+}
+
+/// Registry lookup for the agent loop's act/read accounting.
+pub fn is_mutating(name: &str) -> bool {
+    REGISTRY.iter().any(|s| s.name == name && s.mutating)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -627,12 +635,16 @@ handler!(h_escalate_to_frontier, |e, a, _s| {
 
 macro_rules! tool {
     ($name:literal, $desc:literal, $schema:expr, agent: $agent:literal, meta: $meta:literal, $handler:ident) => {
+        tool!($name, $desc, $schema, agent: $agent, meta: $meta, mutating: false, $handler)
+    };
+    ($name:literal, $desc:literal, $schema:expr, agent: $agent:literal, meta: $meta:literal, mutating: $mutating:literal, $handler:ident) => {
         ToolSpec {
             name: $name,
             description: $desc,
             schema: $schema,
             agent: $agent,
             meta: $meta,
+            mutating: $mutating,
             handler: $handler,
         }
     };
@@ -656,31 +668,31 @@ static REGISTRY: &[ToolSpec] = &[
         agent: false, meta: false, h_detect_takes),
     tool!("generate_rough_cut", "Run the full AI first pass: remove silences, fillers, and non-best takes. Returns the new timeline and cut count.",
         || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}}), &["project_id"]),
-        agent: true, meta: false, h_generate_rough_cut),
+        agent: true, meta: false, mutating: true, h_generate_rough_cut),
     tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
-        agent: true, meta: false, h_cut_range),
+        agent: true, meta: false, mutating: true, h_cut_range),
     tool!("restore_range", "Re-include a previously cut source time range.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
-        agent: true, meta: false, h_restore_range),
+        agent: true, meta: false, mutating: true, h_restore_range),
     tool!("cut_by_transcript", "Cut the video ranges covered by the given transcript segment ids.",
         || obj(json!({"project_id": pid_schema(), "segment_ids": {"type": "array", "items": {"type": "string"}}}), &["project_id", "segment_ids"]),
-        agent: true, meta: false, h_cut_by_transcript),
+        agent: true, meta: false, mutating: true, h_cut_by_transcript),
     tool!("restore_by_transcript", "Restore the video ranges covered by the given transcript segment ids.",
         || obj(json!({"project_id": pid_schema(), "segment_ids": {"type": "array", "items": {"type": "string"}}}), &["project_id", "segment_ids"]),
-        agent: true, meta: false, h_restore_by_transcript),
+        agent: true, meta: false, mutating: true, h_restore_by_transcript),
     tool!("trim_clip", "Move a clip's boundaries (drag-handle trim), frame-exact.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "new_source_in": {"type": "number"}, "new_source_out": {"type": "number"}}), &["project_id", "clip_id", "new_source_in", "new_source_out"]),
-        agent: true, meta: false, h_trim_clip),
+        agent: true, meta: false, mutating: true, h_trim_clip),
     tool!("split_clip", "Split a clip at a source time (playhead).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "at_time": {"type": "number"}}), &["project_id", "clip_id", "at_time"]),
-        agent: true, meta: false, h_split_clip),
+        agent: true, meta: false, mutating: true, h_split_clip),
     tool!("reorder_clip", "Move a clip to a new position in the timeline.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "new_order": {"type": "integer"}}), &["project_id", "clip_id", "new_order"]),
-        agent: false, meta: false, h_reorder_clip),
+        agent: false, meta: false, mutating: true, h_reorder_clip),
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
-        agent: true, meta: false, h_set_global_padding),
+        agent: true, meta: false, mutating: true, h_set_global_padding),
     tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate). The narrative map to plan cohesive edits against.",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
@@ -689,10 +701,10 @@ static REGISTRY: &[ToolSpec] = &[
         agent: true, meta: false, h_review_flow),
     tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several local-model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
-        agent: true, meta: false, h_story_edit),
+        agent: true, meta: false, mutating: true, h_story_edit),
     tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: ranks still-included segments by how central they are to the video (least-central tangents cut first; intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
         || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),
-        agent: true, meta: false, h_plan_duration_cut),
+        agent: true, meta: false, mutating: true, h_plan_duration_cut),
     tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
         || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}, "limit": {"type": "integer", "description": "max 50, default 8"}}), &["project_id", "query"]),
         agent: true, meta: false, h_find_segments),
@@ -701,7 +713,7 @@ static REGISTRY: &[ToolSpec] = &[
         agent: true, meta: false, h_read_transcript),
     tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
         || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"type": "object", "description": "EditOp object with a type field"}}}), &["project_id", "edits"]),
-        agent: true, meta: false, h_apply_edits),
+        agent: true, meta: false, mutating: true, h_apply_edits),
     tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "history": {"type": "array", "description": "recent chat turns, oldest first", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["user", "agent"]}, "text": {"type": "string"}}}}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
@@ -747,9 +759,9 @@ static REGISTRY: &[ToolSpec] = &[
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_get_transcript),
     tool!("undo", "Undo the last edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
-        agent: false, meta: false, h_undo),
+        agent: false, meta: false, mutating: true, h_undo),
     tool!("redo", "Redo the last undone edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
-        agent: false, meta: false, h_redo),
+        agent: false, meta: false, mutating: true, h_redo),
     tool!("get_preferences", "Get user preferences.", || obj(json!({}), &[]),
         agent: false, meta: false, h_get_preferences),
     tool!("set_preferences", "Replace user preferences.",
@@ -776,6 +788,7 @@ mod tests {
             assert_eq!(schema["type"], "object", "{} schema must be an object", spec.name);
             assert!(!spec.description.is_empty(), "{} needs a description", spec.name);
             assert!(!(spec.agent && spec.meta), "{} cannot be both agent-visible and meta", spec.name);
+            assert!(!(spec.mutating && spec.meta), "{} cannot be both mutating and meta", spec.name);
         }
         // The agent subset is exactly the flagged rows.
         assert_eq!(agent_defs().len(), REGISTRY.iter().filter(|s| s.agent).count());
