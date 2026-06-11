@@ -196,6 +196,11 @@ async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
 }
 
 #[tauri::command]
+fn delete_recording(path: String) -> Result<(), Value> {
+    roughcut_core::adapters::record::delete_recording(&path).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -256,7 +261,8 @@ pub fn run() {
             record_pause,
             record_resume,
             list_recordings,
-            combine_recordings
+            combine_recordings,
+            delete_recording
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")

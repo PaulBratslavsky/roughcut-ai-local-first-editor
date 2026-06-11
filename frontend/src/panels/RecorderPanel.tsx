@@ -5,8 +5,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   combineRecordings,
+  deleteRecording,
   isTauri,
   listRecordings,
   recordDevices,
@@ -43,9 +45,27 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    void listRecordings().then(setFiles).catch(() => setFiles([]));
-  }, []);
+  const refresh = () => void listRecordings().then(setFiles).catch(() => setFiles([]));
+  useEffect(refresh, []);
+
+  const remove = async (f: RecordingFile) => {
+    const sure = await ask(`Delete "${f.name}" permanently? This is the video file itself.`, {
+      title: "Delete recording",
+      kind: "warning",
+    });
+    if (!sure) return;
+    try {
+      await deleteRecording(f.path);
+      setPicked((old) => {
+        const next = new Set(old);
+        next.delete(f.path);
+        return next;
+      });
+      refresh();
+    } catch (e) {
+      setError(String((e as { message?: string })?.message ?? e));
+    }
+  };
 
   if (!files || files.length === 0) return null;
 
@@ -73,7 +93,7 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
   };
 
   return (
-    <div className="rec-library">
+    <aside className="rec-library">
       <div className="rec-library-head">
         <span className="rec-library-title">previous recordings</span>
         {picked.size >= 2 && (
@@ -99,11 +119,19 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
             <button className="ghost-btn" disabled={busy} onClick={() => onIngest(f.name, f.path)}>
               import
             </button>
+            <button
+              className="icon-btn rec-delete"
+              title="Delete this recording file"
+              disabled={busy}
+              onClick={() => void remove(f)}
+            >
+              ✕
+            </button>
           </div>
         ))}
       </div>
       {error && <p className="empty-error">{error}</p>}
-    </div>
+    </aside>
   );
 }
 
@@ -152,7 +180,8 @@ export function RecorderPanel() {
       if (!navigator.mediaDevices?.getUserMedia) return;
       try {
         // First ask generically (also primes labels for enumerateDevices).
-        let stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const hd = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+        let stream = await navigator.mediaDevices.getUserMedia({ video: hd });
         if (cameraName) {
           const all = await navigator.mediaDevices.enumerateDevices();
           const match = all.find(
@@ -161,7 +190,7 @@ export function RecorderPanel() {
           if (match && stream.getVideoTracks()[0]?.label !== cameraName) {
             stream.getTracks().forEach((t) => t.stop());
             stream = await navigator.mediaDevices.getUserMedia({
-              video: { deviceId: { exact: match.deviceId } },
+              video: { deviceId: { exact: match.deviceId }, ...hd },
             });
           }
         }
@@ -341,6 +370,8 @@ export function RecorderPanel() {
         </button>
       </div>
 
+      <div className="recorder-body">
+      <div className="recorder-main">
       <div className="recorder-stage">
         <video ref={videoRef} muted playsInline className="recorder-preview" />
         {phase === "countdown" && <div className="recorder-countdown">{count}</div>}
@@ -401,11 +432,13 @@ export function RecorderPanel() {
         {phase === "finishing" && <span className="recorder-note">finalizing &amp; importing…</span>}
       </div>
       {error && <p className="empty-error">{error}</p>}
-      {phase === "setup" && <RecordingsLibrary onIngest={ingestRecording} />}
       <p className="recorder-hint">
         First recording asks for camera + microphone permission. Files land in
         ~/Movies/RoughCut and open as a project automatically.
       </p>
+      </div>
+      {phase === "setup" && <RecordingsLibrary onIngest={ingestRecording} />}
+      </div>
     </div>
   );
 }

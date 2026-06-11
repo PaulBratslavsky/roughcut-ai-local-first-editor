@@ -1646,13 +1646,26 @@ input, select { font: inherit; }
 .new-video-menu { position: relative; }
 .new-video-menu .export-dropdown { left: 0; right: auto; }
 
-/* recordings library on the recorder's setup screen */
+/* recorder layout mirrors the editor: stage left, panel right */
+.recorder-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 12px;
+}
+.recorder-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
 .rec-library {
-  max-width: 720px;
-  width: 100%;
-  margin: 0 auto;
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
+  width: 320px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--line);
+  padding-left: 12px;
+  overflow-y: auto;
 }
 .rec-library-head {
   display: flex;
@@ -1666,7 +1679,7 @@ input, select { font: inherit; }
   text-transform: uppercase;
   color: var(--fg-dim);
 }
-.rec-library-list { max-height: 22vh; overflow-y: auto; }
+.rec-library-list { overflow-y: auto; }
 .rec-library-row {
   display: flex;
   align-items: center;
@@ -1694,3 +1707,6 @@ input, select { font: inherit; }
   white-space: nowrap;
 }
 .recorder-stop-ghost { border-color: #e5484d; color: #e5484d; }
+
+.rec-delete { color: var(--fg-dim); }
+.rec-delete:hover { color: #e5484d; }

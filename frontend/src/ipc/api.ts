@@ -175,6 +175,11 @@ export async function listRecordings(): Promise<RecordingFile[]> {
   return invoke<RecordingFile[]>("list_recordings");
 }
 
+/** Delete a recording from the library (the file itself). */
+export async function deleteRecording(path: string): Promise<void> {
+  return invoke("delete_recording", { path });
+}
+
 /** Stitch library recordings (same codec/resolution) into one new file. */
 export async function combineRecordings(paths: string[]): Promise<string> {
   return invoke<string>("combine_recordings", { paths });

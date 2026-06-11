@@ -153,16 +153,100 @@ fn recordings_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Movies/RoughCut")
 }
 
+/// A capture mode the device actually supports.
+#[derive(Debug, Clone, Copy)]
+struct Mode {
+    w: u32,
+    h: u32,
+    fps_min: f64,
+    fps_max: f64,
+}
+
+/// avfoundation only lists a camera's modes in the ERROR for an impossible
+/// request — so ask for 9999x9999 and parse the refusal. Cached per index.
+async fn probe_modes(camera: u32) -> Vec<Mode> {
+    {
+        let cache = mode_cache().lock().unwrap();
+        if let Some(modes) = cache.get(&camera) {
+            return modes.clone();
+        }
+    }
+    let Some(ffmpeg) = super::video::ffmpeg_path() else { return vec![] };
+    let out = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-f", "avfoundation",
+            "-video_size", "9999x9999",
+            "-i", &format!("{camera}:none"),
+            "-t", "0.1",
+            "-f", "null", "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+    let mut modes = vec![];
+    if let Ok(out) = out {
+        for line in String::from_utf8_lossy(&out.stderr).lines() {
+            // "  1920x1080@[60.000000 60.000000]fps"
+            let line = line.trim();
+            let Some((dims, rest)) = line.split_once("@[") else { continue };
+            let dims = dims.rsplit(' ').next().unwrap_or(dims);
+            let Some((w, h)) = dims.split_once('x') else { continue };
+            let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse()) else { continue };
+            let Some(range) = rest.strip_suffix("]fps") else { continue };
+            let mut parts = range.split_whitespace();
+            let (Some(lo), Some(hi)) = (parts.next(), parts.next()) else { continue };
+            let (Ok(fps_min), Ok(fps_max)) = (lo.parse(), hi.parse()) else { continue };
+            modes.push(Mode { w, h, fps_min, fps_max });
+        }
+    }
+    mode_cache().lock().unwrap().insert(camera, modes.clone());
+    modes
+}
+
+fn mode_cache() -> &'static Mutex<std::collections::HashMap<u32, Vec<Mode>>> {
+    static C: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, Vec<Mode>>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Best mode for a talking head: landscape preferred, largest area, ~30fps
+/// when the range allows (60fps doubles file size for no spoken-video gain).
+fn pick_mode(modes: &[Mode]) -> Option<(Mode, f64)> {
+    let best = modes
+        .iter()
+        .max_by_key(|m| ((m.w >= m.h) as u64, m.w as u64 * m.h as u64))?;
+    let fps = 30.0_f64.clamp(best.fps_min, best.fps_max);
+    Some((*best, fps))
+}
+
 /// Spawn one ffmpeg take writing to `out`. Shared by start and resume.
 async fn spawn_take(sink: &SharedSink, camera: u32, microphone: u32, out: &PathBuf) -> Result<Child> {
     let ffmpeg = super::video::ffmpeg_path()
         .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
+    // Cameras lie about defaults (a 1920x1080-only camera fell back to
+    // 1080x1920 portrait when asked for an unsupported rate) — request a
+    // mode the device actually advertises.
+    let picked = pick_mode(&probe_modes(camera).await);
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-nostats".into(),
+        "-f".into(), "avfoundation".into(),
+    ];
+    if let Some((mode, fps)) = picked {
+        args.push("-framerate".into());
+        args.push(format!("{fps}"));
+        args.push("-video_size".into());
+        args.push(format!("{}x{}", mode.w, mode.h));
+    } else {
+        args.push("-framerate".into());
+        args.push("30".into());
+    }
     let mut child = Command::new(ffmpeg)
+        .args(args)
         .args([
-            "-hide_banner",
-            "-nostats",
-            "-f", "avfoundation",
-            "-framerate", "30",
             "-i", &format!("{camera}:{microphone}"),
             "-c:v", "h264_videotoolbox",
             "-b:v", "6M",
@@ -519,6 +603,21 @@ pub async fn combine_recordings(paths: &[String]) -> Result<String> {
     ));
     concat(&inputs, &out).await?;
     Ok(out.to_string_lossy().into_owned())
+}
+
+/// Delete a library recording. Only files inside ~/Movies/RoughCut — this
+/// is not a general file-deletion endpoint.
+pub fn delete_recording(path: &str) -> Result<()> {
+    let target = PathBuf::from(path);
+    let dir = recordings_dir().canonicalize().unwrap_or_else(|_| recordings_dir());
+    let canonical = target
+        .canonicalize()
+        .map_err(|_| CoreError::NotFound(format!("file {path}")))?;
+    if !canonical.starts_with(&dir) {
+        return Err(CoreError::InvalidArg("not a RoughCut recording".into()));
+    }
+    std::fs::remove_file(&canonical)?;
+    Ok(())
 }
 
 /// Kill any live capture (app exit hook) — better a truncated file than a
