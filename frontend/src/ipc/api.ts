@@ -97,6 +97,30 @@ export async function installResolvePlugin(): Promise<string> {
   return invoke<string>("install_resolve_plugin");
 }
 
+import type { ResolveStatus } from "./types";
+
+/** Cheap filesystem-only Resolve detection (no server probes). */
+export async function getResolveStatus(): Promise<ResolveStatus> {
+  if (!isTauri) {
+    return { app_installed: false, plugin_installed: false, plugin_outdated: false, scripts_dir: "" };
+  }
+  return invoke<ResolveStatus>("resolve_status");
+}
+
+export interface SendToResolveResult {
+  ok: boolean;
+  timeline?: string;
+  xml_path: string;
+  error?: string;
+}
+
+/** Export the current cut as Resolve XML and push it into the running
+ *  Resolve. Resolves with ok=false (never rejects) when Resolve can't take
+ *  it, so the caller can reveal the XML for a manual drag. */
+export async function sendToResolve(projectId: string): Promise<SendToResolveResult> {
+  return invoke<SendToResolveResult>("send_to_resolve", { projectId });
+}
+
 export async function ollamaPullModel(model: string): Promise<void> {
   return invoke("ollama_pull_model", { model });
 }

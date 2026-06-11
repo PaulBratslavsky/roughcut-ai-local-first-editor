@@ -110,6 +110,33 @@ fn install_resolve_plugin() -> Result<String, Value> {
 }
 
 #[tauri::command]
+fn resolve_status() -> roughcut_core::resolve::ResolveStatus {
+    roughcut_core::resolve::status()
+}
+
+/// Export the CURRENT cut as Resolve XML and push it into the running
+/// Resolve instance. Never rejects: `{ok, timeline?, xml_path, error?}` so
+/// the UI can fall back to revealing the XML for a manual drag.
+#[tauri::command]
+async fn send_to_resolve(state: State<'_, AppState>, project_id: String) -> Result<Value, Value> {
+    let pid = uuid::Uuid::parse_str(&project_id)
+        .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
+    let xml_path = std::env::temp_dir()
+        .join(format!("roughcut-{}.xml", &project_id[..8.min(project_id.len())]))
+        .to_string_lossy()
+        .into_owned();
+    let xml_path = state
+        .editor
+        .export(pid, "resolve_xml", &xml_path)
+        .await
+        .map_err(|e| e.to_json())?;
+    match roughcut_core::resolve::send_timeline(&xml_path).await {
+        Ok(timeline) => Ok(serde_json::json!({ "ok": true, "timeline": timeline, "xml_path": xml_path })),
+        Err(e) => Ok(serde_json::json!({ "ok": false, "error": e.to_string(), "xml_path": xml_path })),
+    }
+}
+
+#[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
     tier: String,
@@ -160,7 +187,9 @@ pub fn run() {
             download_gguf,
             start_managed_llm,
             download_whisper_model,
-            install_resolve_plugin
+            install_resolve_plugin,
+            resolve_status,
+            send_to_resolve
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")

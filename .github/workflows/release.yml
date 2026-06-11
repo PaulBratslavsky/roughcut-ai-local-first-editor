@@ -25,6 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # MACOSX_DEPLOYMENT_TARGET=11.0 makes ggml-metal emit @available runtime
+      # checks (___isPlatformVersionAtLeast); rustc links -nodefaultlibs, so
+      # pull in clang's runtime explicitly.
+      - name: Link clang runtime for availability checks
+        run: echo "RUSTFLAGS=-Clink-arg=$(clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-metal  # cache from pre-metal builds left stale ggml objects

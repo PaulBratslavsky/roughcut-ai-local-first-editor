@@ -2,7 +2,8 @@
 // sensible Downloads path for the chosen format.
 
 import { useEffect, useRef, useState } from "react";
-import { onAppEvent, revealPath } from "../ipc/api";
+import { useQuery } from "@tanstack/react-query";
+import { getResolveStatus, isTauri, onAppEvent, revealPath, sendToResolve } from "../ipc/api";
 import type { ProgressEvent } from "../ipc/types";
 import { useExport } from "../ipc/queries";
 import type { ExportTarget } from "../ipc/types";
@@ -33,6 +34,13 @@ export function ExportMenu({
   } | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const exportMutation = useExport();
+  // Filesystem-only check (no probes); shows the Resolve item when it can work.
+  const { data: resolve } = useQuery({
+    queryKey: ["resolve-status"],
+    queryFn: getResolveStatus,
+    enabled: isTauri,
+    staleTime: 60_000,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -86,6 +94,29 @@ export function ExportMenu({
     );
   };
 
+  // One click: export the current cut as Resolve XML and push it into the
+  // RUNNING Resolve. Failure names the precondition and keeps the XML
+  // revealable for a manual drag into the media pool.
+  const runSendToResolve = async () => {
+    setOpen(false);
+    setStatus({ text: "Sending the cut to DaVinci Resolve…", busy: true, fraction: 0 });
+    try {
+      const res = await sendToResolve(projectId);
+      if (res.ok) {
+        setStatus({ text: `In Resolve: “${res.timeline}” — check the media pool`, busy: false });
+      } else {
+        setStatus({
+          text: `Resolve: ${res.error} — XML exported for a manual drag`,
+          path: res.xml_path,
+          busy: false,
+        });
+        void revealPath(res.xml_path);
+      }
+    } catch (err) {
+      setStatus({ text: `Send failed: ${String((err as Error)?.message ?? err)}`, busy: false });
+    }
+  };
+
   return (
     <div className="export-menu" ref={rootRef}>
       {status && (
@@ -114,6 +145,16 @@ export function ExportMenu({
       </button>
       {open && (
         <div className="export-dropdown">
+          {resolve?.app_installed && (
+            <button
+              className="export-item export-item-send"
+              onClick={() => void runSendToResolve()}
+              disabled={exportMutation.isPending}
+              title="Export the current cut and import it into the running Resolve"
+            >
+              → Send to DaVinci Resolve
+            </button>
+          )}
           {TARGETS.map((t) => (
             <button
               key={t.target}

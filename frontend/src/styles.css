@@ -350,6 +350,12 @@ input, select { font: inherit; }
   font-size: 13px;
 }
 .export-item:hover:not(:disabled) { background: var(--accent-soft); }
+.export-item-send {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 4px;
+  padding-bottom: 9px;
+}
 
 /* -------------------------------------------------------------------- tabs */
 
