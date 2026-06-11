@@ -95,7 +95,7 @@ recording, or multi-select takes and stitch them (codec/resolution
 guard). The Camtasia media-bin idea, adapted to the single-source
 invariant.
 
-**M2 — screen-only recording.**
+**M2 — screen-only recording.** ✅ SHIPPED (in-app permission flow pending user verification)
 Display picker, screen-recording permission flow, same landing pipeline.
 → Value: transcribed screen-capture explainers.
 

@@ -142,10 +142,10 @@ export async function recordDevices(): Promise<CaptureDevices> {
   return invoke<CaptureDevices>("record_devices");
 }
 
-/** Starts capture; resolves with the output path. First run triggers the
- *  macOS camera + microphone permission prompts. */
-export async function recordStart(camera: number, microphone: number): Promise<string> {
-  return invoke<string>("record_start", { camera, microphone });
+/** Starts capture; resolves with the output path. First runs trigger the
+ *  macOS camera+mic (or Screen Recording) permission prompts. */
+export async function recordStart(video: number, microphone: number, screen: boolean): Promise<string> {
+  return invoke<string>("record_start", { video, microphone, screen });
 }
 
 export async function recordStatus(): Promise<RecordingStatus> {

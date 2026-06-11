@@ -1722,3 +1722,16 @@ input, select { font: inherit; }
   color: var(--fg-dim);
   margin-top: 4px;
 }
+
+.recorder-source { display: inline-flex; gap: 2px; border: 1px solid var(--line); }
+.recorder-screen-ph {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  color: var(--fg-dim);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+.recorder-screen-sub { font-size: 11px; }

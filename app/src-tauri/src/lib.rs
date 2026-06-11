@@ -155,10 +155,11 @@ async fn record_devices() -> Result<roughcut_core::adapters::record::CaptureDevi
 #[tauri::command]
 async fn record_start(
     state: State<'_, AppState>,
-    camera: u32,
+    video: u32,
     microphone: u32,
+    screen: bool,
 ) -> Result<String, Value> {
-    roughcut_core::adapters::record::start_camera(&state.editor.sink(), camera, microphone)
+    roughcut_core::adapters::record::start_capture(&state.editor.sink(), video, microphone, screen)
         .await
         .map_err(|e| e.to_json())
 }

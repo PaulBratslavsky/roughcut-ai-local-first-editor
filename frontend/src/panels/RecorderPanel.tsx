@@ -137,7 +137,9 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
 
 export function RecorderPanel() {
   const [devices, setDevices] = useState<CaptureDevices | null>(null);
+  const [source, setSource] = useState<"camera" | "screen">("camera");
   const [camera, setCamera] = useState<number | null>(null);
+  const [screen, setScreenDev] = useState<number | null>(null);
   const [mic, setMic] = useState<number | null>(null);
   const [phase, setPhase] = useState<Phase>("setup");
   const [count, setCount] = useState(3);
@@ -162,6 +164,7 @@ export function RecorderPanel() {
         const m =
           d.microphones.find((c) => /macbook/i.test(c.name)) ?? d.microphones[0];
         setCamera(cam?.index ?? null);
+        setScreenDev(d.screens[0]?.index ?? null);
         setMic(m?.index ?? null);
       })
       .catch((e) => setError(String(e)));
@@ -170,7 +173,8 @@ export function RecorderPanel() {
   // Live preview: match the selected ffmpeg device to a webview device by
   // LABEL (separate namespaces; names align in practice). The spike
   // instrumentation: if the track dies while recording, report it.
-  const cameraName = devices?.cameras.find((c) => c.index === camera)?.name;
+  const cameraName =
+    source === "camera" ? devices?.cameras.find((c) => c.index === camera)?.name : undefined;
   useEffect(() => {
     let cancelled = false;
     setPreviewNote(null);
@@ -246,7 +250,8 @@ export function RecorderPanel() {
   }, [phase]);
 
   const begin = useCallback(() => {
-    if (camera == null || mic == null) return;
+    const video = source === "screen" ? screen : camera;
+    if (video == null || mic == null) return;
     setError(null);
     setPhase("countdown");
     setCount(3);
@@ -260,7 +265,7 @@ export function RecorderPanel() {
       clearInterval(t);
       // Start before the "0" frame: ffmpeg's camera warm-up (~2s) overlaps
       // the tail of the countdown instead of eating the take's first words.
-      recordStart(camera, mic)
+      recordStart(video, mic, source === "screen")
         .then(() => {
           setElapsed(0);
           setTake(1);
@@ -272,7 +277,7 @@ export function RecorderPanel() {
           setPhase("setup");
         });
     }, 800);
-  }, [camera, mic]);
+  }, [camera, screen, mic, source]);
 
   const doPause = useCallback(async () => {
     try {
@@ -373,7 +378,17 @@ export function RecorderPanel() {
       <div className="recorder-body">
       <div className="recorder-main">
       <div className="recorder-stage">
-        <video ref={videoRef} muted playsInline className="recorder-preview" />
+        {source === "screen" && phase !== "recording" && phase !== "paused" ? (
+          <div className="recorder-screen-ph">
+            <span>display {screen ?? "?"} will be captured (cursor included)</span>
+            <span className="recorder-screen-sub">
+              no live preview for screens — the first screen take asks for the
+              Screen Recording permission (System Settings ▸ Privacy &amp; Security)
+            </span>
+          </div>
+        ) : (
+          <video ref={videoRef} muted playsInline className="recorder-preview" />
+        )}
         {phase === "countdown" && <div className="recorder-countdown">{count}</div>}
         {previewNote && <div className="recorder-preview-note">{previewNote}</div>}
       </div>
@@ -381,17 +396,46 @@ export function RecorderPanel() {
       <div className="recorder-controls">
         {phase === "setup" && devices && (
           <>
-            <label className="recorder-field">
-              camera
-              <select
-                value={camera ?? ""}
-                onChange={(e) => setCamera(Number(e.target.value))}
+            <div className="recorder-source">
+              <button
+                className={`tab${source === "camera" ? " active" : ""}`}
+                onClick={() => setSource("camera")}
               >
-                {devices.cameras.map((d) => (
-                  <option key={d.index} value={d.index}>{d.name}</option>
-                ))}
-              </select>
-            </label>
+                camera
+              </button>
+              <button
+                className={`tab${source === "screen" ? " active" : ""}`}
+                onClick={() => setSource("screen")}
+                disabled={devices.screens.length === 0}
+              >
+                screen
+              </button>
+            </div>
+            {source === "camera" ? (
+              <label className="recorder-field">
+                camera
+                <select
+                  value={camera ?? ""}
+                  onChange={(e) => setCamera(Number(e.target.value))}
+                >
+                  {devices.cameras.map((d) => (
+                    <option key={d.index} value={d.index}>{d.name}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label className="recorder-field">
+                display
+                <select
+                  value={screen ?? ""}
+                  onChange={(e) => setScreenDev(Number(e.target.value))}
+                >
+                  {devices.screens.map((d) => (
+                    <option key={d.index} value={d.index}>{d.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="recorder-field">
               mic
               <select value={mic ?? ""} onChange={(e) => setMic(Number(e.target.value))}>
@@ -402,7 +446,7 @@ export function RecorderPanel() {
             </label>
             <button
               className="primary-btn recorder-go"
-              disabled={camera == null || mic == null}
+              disabled={(source === "screen" ? screen : camera) == null || mic == null}
               onClick={begin}
             >
               ● record

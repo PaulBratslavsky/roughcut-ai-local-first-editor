@@ -138,8 +138,9 @@ struct Session {
     takes: Vec<PathBuf>,
     /// Path of the take being written (current child's output).
     current: PathBuf,
-    camera: u32,
+    video_index: u32,
     microphone: u32,
+    is_screen: bool,
     /// Base name (no extension) all takes share.
     base: String,
 }
@@ -229,20 +230,33 @@ fn pick_mode(modes: &[Mode]) -> Option<(Mode, f64)> {
     Some((*best, fps))
 }
 
-/// Spawn one ffmpeg take writing to `out`. Shared by start and resume.
-async fn spawn_take(sink: &SharedSink, camera: u32, microphone: u32, out: &PathBuf) -> Result<Child> {
+/// Spawn one ffmpeg take writing to `out`. Shared by start and resume,
+/// cameras and screens.
+async fn spawn_take(
+    sink: &SharedSink,
+    video_index: u32,
+    microphone: u32,
+    is_screen: bool,
+    out: &PathBuf,
+) -> Result<Child> {
     let ffmpeg = super::video::ffmpeg_path()
         .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
-    // Cameras lie about defaults (a 1920x1080-only camera fell back to
-    // 1080x1920 portrait when asked for an unsupported rate) — request a
-    // mode the device actually advertises.
-    let picked = pick_mode(&probe_modes(camera).await);
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-nostats".into(),
         "-f".into(), "avfoundation".into(),
     ];
-    if let Some((mode, fps)) = picked {
+    if is_screen {
+        // Displays have no mode list; 30fps capture + the cursor. Retina
+        // dims can be odd — h264 needs even, hence the crop filter below.
+        args.push("-capture_cursor".into());
+        args.push("1".into());
+        args.push("-framerate".into());
+        args.push("30".into());
+    } else if let Some((mode, fps)) = pick_mode(&probe_modes(video_index).await) {
+        // Cameras lie about defaults (a 1920x1080-only camera fell back to
+        // 1080x1920 portrait when asked for an unsupported rate) — request
+        // a mode the device actually advertises.
         args.push("-framerate".into());
         args.push(format!("{fps}"));
         args.push("-video_size".into());
@@ -253,8 +267,15 @@ async fn spawn_take(sink: &SharedSink, camera: u32, microphone: u32, out: &PathB
     }
     let mut child = Command::new(ffmpeg)
         .args(args)
+        .args(["-i", &format!("{video_index}:{microphone}")])
+        // Output options from here. Retina screens have odd dimensions and
+        // h264 needs even — crop one pixel rather than fail.
+        .args(if is_screen {
+            vec!["-vf".to_string(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".to_string()]
+        } else {
+            vec![]
+        })
         .args([
-            "-i", &format!("{camera}:{microphone}"),
             "-c:v", "h264_videotoolbox",
             "-b:v", "6M",
             "-pix_fmt", "yuv420p",
@@ -303,16 +324,24 @@ async fn finalize_take(mut child: Child) -> Result<()> {
         Err(_) => {
             let _ = child.start_kill();
             Err(CoreError::Other(
-                "capture did not finalize within 10s — killed; the take may be unusable".into(),
+                "capture did not finalize within 10s — killed. If this was a SCREEN \
+                 recording, check System Settings ▸ Privacy & Security ▸ Screen Recording \
+                 includes RoughCut (macOS silently delivers no frames otherwise)."
+                    .into(),
             ))
         }
     }
 }
 
-/// Start a recording session (take 1). The first run triggers macOS camera
-/// and microphone permission prompts attributed to the app. One session at
-/// a time.
-pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Result<String> {
+/// Start a recording session (take 1). First runs trigger the macOS
+/// camera+mic (or screen-recording) permission prompts attributed to the
+/// app. One session at a time.
+pub async fn start_capture(
+    sink: &SharedSink,
+    video_index: u32,
+    microphone: u32,
+    is_screen: bool,
+) -> Result<String> {
     {
         let mut guard = active().lock().unwrap();
         if let Some(session) = guard.as_mut() {
@@ -329,20 +358,27 @@ pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Re
     }
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
-    let base = format!("recording-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let kind = if is_screen { "screen" } else { "recording" };
+    let base = format!("{kind}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let current = dir.join(format!("{base}-take1.mp4"));
-    let child = spawn_take(sink, camera, microphone, &current).await?;
+    let child = spawn_take(sink, video_index, microphone, is_screen, &current).await?;
     *active().lock().unwrap() = Some(Session {
         child: Some(child),
         started: std::time::Instant::now(),
         finished_s: 0.0,
         takes: vec![],
         current: current.clone(),
-        camera,
+        video_index,
         microphone,
+        is_screen,
         base,
     });
     Ok(current.to_string_lossy().into_owned())
+}
+
+/// Back-compat shim for camera-only callers.
+pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Result<String> {
+    start_capture(sink, camera, microphone, false).await
 }
 
 /// Pause: finalize the current take; the session stays alive for resume().
@@ -374,7 +410,7 @@ pub async fn pause() -> Result<RecordingStatus> {
 
 /// Resume after pause: a new take file, same devices.
 pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
-    let (camera, microphone, next) = {
+    let (camera, microphone, is_screen, next) = {
         let guard = active().lock().unwrap();
         let session = guard
             .as_ref()
@@ -384,12 +420,13 @@ pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
         }
         let n = session.takes.len() + 1 + 1; // finished + the new one
         (
-            session.camera,
+            session.video_index,
             session.microphone,
+            session.is_screen,
             recordings_dir().join(format!("{}-take{}.mp4", session.base, n)),
         )
     };
-    let child = spawn_take(sink, camera, microphone, &next).await?;
+    let child = spawn_take(sink, camera, microphone, is_screen, &next).await?;
     {
         let mut guard = active().lock().unwrap();
         let session = guard

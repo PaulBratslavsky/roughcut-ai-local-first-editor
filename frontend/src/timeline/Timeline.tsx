@@ -314,7 +314,7 @@ export function Timeline({ projectId }: { projectId: string }) {
                   setCtxMenu(null);
                 }}
               >
-                Remove this clip (cut)
+                Delete this clip
               </button>
               {viewStore.state.playhead > ctxMenu.clip.source_in &&
                 viewStore.state.playhead < ctxMenu.clip.source_out && (
