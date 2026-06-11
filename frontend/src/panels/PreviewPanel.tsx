@@ -2,7 +2,7 @@
 // controls, and the Cut/Original readouts. Everything that moves the
 // playhead lives in playback/engine.ts — this component only renders.
 
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { isTauri, mediaSrc } from "../ipc/api";
 import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
@@ -44,6 +44,18 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
 
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
+  const [videoError, setVideoError] = useState<string | null>(null);
+
+  // The frame takes the media's real shape (vertical shorts get a tall,
+  // centered frame instead of drowning in a 16:9 letterbox), capped so the
+  // tools below stay reachable.
+  const w = project?.media?.width || 16;
+  const h = project?.media?.height || 9;
+  const frameStyle = {
+    aspectRatio: `${w} / ${h}`,
+    width: `min(100%, calc(46vh * ${(w / h).toFixed(4)}))`,
+    margin: "0 auto",
+  };
 
   const nudge = (delta: number) => {
     seekTo(Math.min(Math.max(0, viewStore.state.playhead + delta), duration));
@@ -60,14 +72,23 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="preview-card card">
-      <div className="preview-frame" onClick={() => togglePlaying()}>
+      <div className="preview-stage">
+      <div className="preview-frame" style={frameStyle} onClick={() => togglePlaying()}>
         {src ? (
           <video
+            key={src}
             ref={videoRef}
             src={src}
             className="preview-video"
             onTimeUpdate={onTimeUpdate}
             onEnded={() => setPlaying(false)}
+            onLoadedData={() => setVideoError(null)}
+            onError={() => {
+              const err = videoRef.current?.error;
+              setVideoError(
+                `player error ${err?.code ?? "?"}: ${err?.message || "source could not be decoded"}`,
+              );
+            }}
             playsInline
           />
         ) : (
@@ -78,6 +99,12 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
               <path d="M10.5 10.2v3.6l3.2-1.8z" fill="currentColor" stroke="none" />
             </svg>
             <span>Demo footage (mock mode)</span>
+          </div>
+        )}
+
+        {videoError && (
+          <div className="preview-error" role="alert">
+            {videoError}
           </div>
         )}
 
@@ -139,6 +166,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             </select>
           </div>
         </div>
+      </div>
       </div>
       <div className="preview-meta">
         <span className="cut-counter">{timeline?.cut_count ?? 0} Cuts</span>

@@ -784,6 +784,13 @@ input, select { font: inherit; }
   flex: none;
 }
 
+/* Black stage behind the frame; the frame itself takes the media's shape
+   (inline aspect-ratio/width from PreviewPanel) so vertical shorts get a
+   tall centered frame instead of a 16:9 letterbox. */
+.preview-stage {
+  background: #000;
+}
+
 .preview-frame {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -791,6 +798,20 @@ input, select { font: inherit; }
   display: grid;
   place-items: center;
   cursor: pointer;
+}
+
+.preview-error {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 6px 9px;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 11.5px;
+  pointer-events: none;
 }
 
 .preview-video {
