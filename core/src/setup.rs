@@ -15,10 +15,13 @@ use crate::error::{CoreError, Result};
 use crate::events::SharedSink;
 use serde::Serialize;
 
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
 pub struct TierStatus {
     pub id: &'static str,
     pub file: &'static str,
+    #[cfg_attr(feature = "ts-bindings", ts(type = "number"))]
     pub approx_mb: u64,
     pub downloaded: bool,
     /// Best fit for this machine's RAM.
@@ -28,6 +31,8 @@ pub struct TierStatus {
 /// LLM runtime details: which runtime is around and what it has loaded.
 /// Lives INSIDE [`SetupStatus`] — the UI fetches one shape, the core probes
 /// the inference server once.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatus {
     /// `ollama` CLI on PATH (preferred runtime).
@@ -44,6 +49,8 @@ pub struct RuntimeStatus {
     pub ggufs: Vec<String>,
 }
 
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupStatus {
     /// ffmpeg + ffprobe both resolved.

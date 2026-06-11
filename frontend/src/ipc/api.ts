@@ -5,7 +5,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockCallTool, mockOn } from "./mockApi";
-import type { AppEventName, ModelTier, SetupStatus } from "./types";
+import type { AppEventName, WhisperTier, SetupStatus } from "./types";
 
 export const isTauri: boolean =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -87,7 +87,7 @@ export async function getSetupStatus(): Promise<SetupStatus> {
 
 /** Download a whisper model; progress arrives via `progress` events with
  *  task "model_download". Resolves to the installed model path. */
-export async function downloadWhisperModel(tier: ModelTier): Promise<string> {
+export async function downloadWhisperModel(tier: WhisperTier): Promise<string> {
   if (!isTauri) throw new Error("model download is only available in the desktop app");
   return invoke<string>("download_whisper_model", { tier });
 }
@@ -107,18 +107,13 @@ export async function getResolveStatus(): Promise<ResolveStatus> {
   return invoke<ResolveStatus>("resolve_status");
 }
 
-export interface SendToResolveResult {
-  ok: boolean;
-  timeline?: string;
-  xml_path: string;
-  error?: string;
-}
+import type { SendToResolveOutcome } from "./types";
 
 /** Export the current cut as Resolve XML and push it into the running
  *  Resolve. Resolves with ok=false (never rejects) when Resolve can't take
  *  it, so the caller can reveal the XML for a manual drag. */
-export async function sendToResolve(projectId: string): Promise<SendToResolveResult> {
-  return invoke<SendToResolveResult>("send_to_resolve", { projectId });
+export async function sendToResolve(projectId: string): Promise<SendToResolveOutcome> {
+  return invoke<SendToResolveOutcome>("send_to_resolve", { projectId });
 }
 
 export async function ollamaPullModel(model: string): Promise<void> {

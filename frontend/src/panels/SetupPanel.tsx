@@ -13,7 +13,7 @@ import {
   onAppEvent,
   startManagedLlm,
 } from "../ipc/api";
-import type { ModelTier, ProgressEvent, ProgressTask, SetupStatus } from "../ipc/types";
+import type { WhisperTier, ProgressEvent, ProgressTask, SetupStatus } from "../ipc/types";
 
 /** Typo-proof: the compiler rejects a name the core can't emit. */
 const PROVISIONING_TASKS: ProgressTask[] = ["model_download", "model_pull", "runtime_install"];
@@ -24,7 +24,7 @@ function StatusDot({ ok }: { ok: boolean }) {
 
 export function SetupPanel({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [downloading, setDownloading] = useState<ModelTier | null>(null);
+  const [downloading, setDownloading] = useState<WhisperTier | null>(null);
   const [llmBusy, setLlmBusy] = useState<string | null>(null);
   const [ggufUrl, setGgufUrl] = useState("");
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
@@ -65,7 +65,7 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const download = async (tier: ModelTier) => {
+  const download = async (tier: WhisperTier) => {
     setDownloading(tier);
     setError(null);
     try {
@@ -139,7 +139,7 @@ export function SetupPanel({ onClose }: { onClose: () => void }) {
                     <button
                       className="primary-btn tier-btn"
                       disabled={downloading !== null}
-                      onClick={() => void download(tier.id)}
+                      onClick={() => void download(tier.id as WhisperTier)}
                     >
                       {downloading === tier.id ? "Downloading…" : "Download"}
                     </button>

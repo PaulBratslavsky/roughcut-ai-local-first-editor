@@ -130,10 +130,21 @@ async fn send_to_resolve(state: State<'_, AppState>, project_id: String) -> Resu
         .export(pid, "resolve_xml", &xml_path)
         .await
         .map_err(|e| e.to_json())?;
-    match roughcut_core::resolve::send_timeline(&xml_path).await {
-        Ok(timeline) => Ok(serde_json::json!({ "ok": true, "timeline": timeline, "xml_path": xml_path })),
-        Err(e) => Ok(serde_json::json!({ "ok": false, "error": e.to_string(), "xml_path": xml_path })),
-    }
+    let outcome = match roughcut_core::resolve::send_timeline(&xml_path).await {
+        Ok(timeline) => roughcut_core::resolve::SendToResolveOutcome {
+            ok: true,
+            timeline: Some(timeline),
+            xml_path,
+            error: None,
+        },
+        Err(e) => roughcut_core::resolve::SendToResolveOutcome {
+            ok: false,
+            timeline: None,
+            xml_path,
+            error: Some(e.to_string()),
+        },
+    };
+    Ok(serde_json::to_value(outcome).unwrap_or_default())
 }
 
 #[tauri::command]

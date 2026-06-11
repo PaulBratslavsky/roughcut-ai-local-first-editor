@@ -5,9 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { callTool, downloadWhisperModel, getSetupStatus, isTauri, onAppEvent } from "./ipc/api";
+import { downloadWhisperModel, getSetupStatus, isTauri, onAppEvent } from "./ipc/api";
+import { ingestFile } from "./ingest";
 import { useProjects, useRestoreProject } from "./ipc/queries";
-import type { ModelTier, ProgressEvent, Project, SetupStatus } from "./ipc/types";
+import type { WhisperTier, ProgressEvent, SetupStatus } from "./ipc/types";
 
 /** The empty state is also where you land after trashing your LAST project —
  *  the trash must be reachable from here, not just the project switcher. */
@@ -39,7 +40,7 @@ type Phase = "idle" | "working";
 /** First-run checklist: shown until ffmpeg is found and (when the native
  *  whisper engine is compiled in) a speech model is downloaded. */
 function SetupCard({ status, onChanged }: { status: SetupStatus; onChanged: () => void }) {
-  const [downloading, setDownloading] = useState<ModelTier | null>(null);
+  const [downloading, setDownloading] = useState<WhisperTier | null>(null);
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +54,7 @@ function SetupCard({ status, onChanged }: { status: SetupStatus; onChanged: () =
     });
   }, []);
 
-  const download = async (tier: ModelTier) => {
+  const download = async (tier: WhisperTier) => {
     setError(null);
     setDownloading(tier);
     setProgress(0);
@@ -159,11 +160,7 @@ export function EmptyState() {
     setProgress(0);
     setMessage("Creating project…");
     try {
-      const project = await callTool<Project>("create_project", { name, file_path: filePath });
-      setMessage("Importing media…");
-      await callTool("import_media", { file_path: filePath, project_id: project.id });
-      setMessage("Starting transcription…");
-      await callTool("transcribe", { project_id: project.id });
+      await ingestFile(name, filePath, { onPhase: setMessage });
       await queryClient.invalidateQueries();
     } catch (err) {
       setError(String((err as { message?: string })?.message ?? err));

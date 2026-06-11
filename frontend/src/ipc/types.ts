@@ -70,56 +70,16 @@ export interface ConfirmRequestEvent { id: string; summary: string }
 export type ExportTarget =
   | "premiere_xml" | "fcp_xml" | "resolve_xml" | "edl" | "otio" | "mp4" | "srt";
 
-// First-run setup (Tauri `setup_status` / `download_whisper_model` commands;
-// Rust side: core/src/setup.rs SetupStatus)
-export interface TierStatus {
-  id: ModelTier;
-  file: string;
-  approx_mb: number;
-  downloaded: boolean;
-  recommended: boolean;
-}
+// Shell-command status shapes are GENERATED (same regime as the model
+// types — ADR-0003 extended to the provisioning surface).
+export type { ResolveStatus } from "./generated/ResolveStatus";
+export type { RuntimeStatus } from "./generated/RuntimeStatus";
+export type { SetupStatus } from "./generated/SetupStatus";
+export type { TierStatus } from "./generated/TierStatus";
+export type { SendToResolveOutcome } from "./generated/SendToResolveOutcome";
 
-/** LLM runtime details — nested inside SetupStatus (one fetch, one probe). */
-export interface RuntimeStatus {
-  ollama_cli: boolean;
-  models: string[];
-  chat_model_present: boolean;
-  embedding_model_present: boolean;
-  llama_server_installed: boolean;
-  managed_running: boolean;
-  ggufs: string[];
-}
-
-/** DaVinci Resolve hand-off (core/src/resolve.rs ResolveStatus). */
-export interface ResolveStatus {
-  app_installed: boolean;
-  plugin_installed: boolean;
-  plugin_outdated: boolean;
-  scripts_dir: string;
-}
-
-export interface SetupStatus {
-  ffmpeg: boolean;
-  ffmpeg_path: string | null;
-  whisper_model: string | null;
-  whisper_native: boolean;
-  whisper_cli: boolean;
-  transcription_ready: boolean;
-  models_dir: string;
-  tiers: TierStatus[];
-  ram_gb: number | null;
-  inference_reachable: boolean;
-  inference_endpoint: string;
-  inference_model: string;
-  embedding_model: string;
-  runtime: RuntimeStatus;
-  resolve: ResolveStatus;
-  demo: boolean;
-  demo_reason: string | null;
-}
-
-export type ModelTier = "accurate" | "compact";
+/** Whisper model tiers (NOT the generated ModelTier preference enum). */
+export type WhisperTier = "accurate" | "compact";
 
 // plan_duration_cut (core/src/engine/semantic.rs DurationCutPlan + the
 // apply=true receipt from tools.rs)

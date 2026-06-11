@@ -2,13 +2,8 @@
 // or a fresh demo project (browser/mock), then kick off transcription.
 
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { callTool, isTauri } from "./ipc/api";
-import type { Project } from "./ipc/types";
-
-function baseName(path: string): string {
-  const last = path.split(/[\\/]/).pop() ?? path;
-  return last.replace(/\.[^.]+$/, "") || "Untitled project";
-}
+import { isTauri } from "./ipc/api";
+import { baseName, ingestFile } from "./ingest";
 
 /** Returns the new project id, or null if the user cancelled the dialog. */
 export async function newProjectFromDialog(): Promise<string | null> {
@@ -27,8 +22,9 @@ export async function newProjectFromDialog(): Promise<string | null> {
     name = `demo-${Date.now().toString(36)}`;
     path = "/demo/talking-head.mp4";
   }
-  const project = await callTool<Project>("create_project", { name, file_path: path });
-  // Fire-and-forget: the transcript panel fills in via transcript-changed.
-  void callTool("transcribe", { project_id: project.id }).catch(() => {});
-  return project.id;
+  // Resolve as soon as the project exists; transcription continues in the
+  // background and the UI fills in via transcript-changed events.
+  return await new Promise<string>((resolve, reject) => {
+    ingestFile(name, path, { onCreated: resolve }).catch(reject);
+  });
 }

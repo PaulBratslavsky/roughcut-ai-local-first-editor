@@ -15,6 +15,8 @@ const PLUGINS: &[(&str, &str)] = &[
     ("RoughCut Import Cut.py", include_str!("../../resolve-plugin/RoughCut Import Cut.py")),
 ];
 
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolveStatus {
     /// DaVinci Resolve.app found on this machine.
@@ -73,6 +75,18 @@ pub fn install_plugin() -> Result<String> {
         std::fs::write(dir.join(file), src)?;
     }
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// What `send_to_resolve` reports back to the UI. ok=false carries the
+/// named precondition and the XML path for a manual drag.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct SendToResolveOutcome {
+    pub ok: bool,
+    pub timeline: Option<String>,
+    pub xml_path: String,
+    pub error: Option<String>,
 }
 
 const SCRIPTING_MODULES: &str =
