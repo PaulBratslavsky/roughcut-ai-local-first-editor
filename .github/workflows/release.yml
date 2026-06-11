@@ -42,18 +42,26 @@ jobs:
       - name: Frontend
         run: npm ci && npm run build
         working-directory: frontend
+      # Tauri signs whenever APPLE_CERTIFICATE is PRESENT in the env — an
+      # unset GitHub secret expands to "" and still counts as present, which
+      # fails the keychain import. Export the vars only when actually set.
+      - name: Enable signing when secrets exist
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          {
+            echo "APPLE_CERTIFICATE<<RC_EOF";  echo "${{ secrets.APPLE_CERTIFICATE }}";  echo "RC_EOF"
+            echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
       - name: Build app bundle (.app + .dmg)
         run: npx --yes @tauri-apps/cli@^2 build
         working-directory: app/src-tauri
         env:
           # whisper.cpp needs std::filesystem (10.15+); we target Apple silicon.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Build MCP shim (release)
         run: cargo build --release -p roughcut-mcp-shim
       - name: Attach artifacts to the release
