@@ -9,6 +9,9 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   attachScreenMedia,
   combineRecordings,
+  openPrivacySettings,
+  requestScreenPermission,
+  screenPermissionStatus,
   deleteRecording,
   isTauri,
   listRecordings,
@@ -25,6 +28,13 @@ import { ingestFile } from "../ingest";
 import { setProjectId, setScreen } from "../state/viewStore";
 
 type Phase = "setup" | "countdown" | "recording" | "paused" | "finishing";
+
+/** Tauri rejections are {error:{code,message}} — unwrap before display
+ *  (String(obj) renders the dreaded "[object Object]"). */
+function errText(e: unknown): string {
+  const o = e as { error?: { message?: string }; message?: string };
+  return o?.error?.message ?? o?.message ?? String(e);
+}
 
 function fmtClock(s: number): string {
   const m = Math.floor(s / 60);
@@ -123,7 +133,7 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
       });
       refresh();
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
     }
   };
 
@@ -147,7 +157,7 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
       const path = await combineRecordings(ordered);
       onIngest("combined recording", path);
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
       setBusy(false);
     }
   };
@@ -208,6 +218,8 @@ export function RecorderPanel() {
   const [take, setTake] = useState(1);
   const [doneTakesS, setDoneTakesS] = useState(0);
   const [previewNote, setPreviewNote] = useState<string | null>(null);
+  const [screenPerm, setScreenPerm] = useState<boolean | null>(null);
+  const [permHint, setPermHint] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const phaseRef = useRef<Phase>("setup");
@@ -227,7 +239,7 @@ export function RecorderPanel() {
         setScreenDev(d.screens[0]?.index ?? null);
         setMic(m?.index ?? null);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errText(e)));
   }, []);
 
   // Live preview: match the selected ffmpeg device to a webview device by
@@ -290,6 +302,24 @@ export function RecorderPanel() {
     };
   }, [cameraName]);
 
+  // Screen Recording TCC: checked whenever a screen source is selected, so
+  // the grant flow happens BEFORE a take fails into a timeout.
+  useEffect(() => {
+    if (source === "camera") return;
+    void screenPermissionStatus().then(setScreenPerm).catch(() => setScreenPerm(null));
+  }, [source]);
+
+  const grantScreen = async () => {
+    // macOS shows the system prompt exactly once, ever. After that the only
+    // path is System Settings — and the grant applies on app relaunch.
+    const granted = await requestScreenPermission().catch(() => false);
+    setScreenPerm(granted);
+    if (!granted) {
+      setPermHint(true);
+      void openPrivacySettings("screen").catch(() => {});
+    }
+  };
+
   // Recording clock: local tick, honesty-checked against the backend.
   useEffect(() => {
     if (phase !== "recording") return;
@@ -334,7 +364,7 @@ export function RecorderPanel() {
           setPhase("recording");
         })
         .catch((e) => {
-          setError(String((e as { message?: string })?.message ?? e));
+          setError(errText(e));
           setPhase("setup");
         });
     }, 800);
@@ -347,7 +377,7 @@ export function RecorderPanel() {
       setTake(st.take);
       setPhase("paused");
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
     }
   }, []);
 
@@ -358,7 +388,7 @@ export function RecorderPanel() {
       setElapsed(0);
       setPhase("recording");
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
     }
   }, []);
 
@@ -386,7 +416,7 @@ export function RecorderPanel() {
       }, 100);
       done
         .catch((e) => {
-          setError(String((e as { message?: string })?.message ?? e));
+          setError(errText(e));
           setPhase("setup");
         })
         .finally(() => {
@@ -406,7 +436,7 @@ export function RecorderPanel() {
       const name = `${kind} ${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}.${String(stamp.getMinutes()).padStart(2, "0")}`;
       ingestRecording(name, out.path, out.screen_path ?? undefined);
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
       setPhase("setup");
     }
   }, [ingestRecording]);
@@ -461,6 +491,24 @@ export function RecorderPanel() {
         {phase === "countdown" && <div className="recorder-countdown">{count}</div>}
         {previewNote && <div className="recorder-preview-note">{previewNote}</div>}
       </div>
+
+      {source !== "camera" && screenPerm === false && (
+        <div className="perm-banner">
+          <span>
+            macOS hasn't granted RoughCut <strong>Screen Recording</strong> —
+            screen takes would capture nothing.
+          </span>
+          <button className="primary-btn" onClick={() => void grantScreen()}>
+            grant permission…
+          </button>
+          {permHint && (
+            <span className="perm-hint">
+              In the Settings window that just opened: enable <strong>RoughCut</strong>
+              {" "}under Screen &amp; System Audio Recording, then <strong>relaunch the app</strong>.
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="recorder-controls">
         {phase === "setup" && devices && (

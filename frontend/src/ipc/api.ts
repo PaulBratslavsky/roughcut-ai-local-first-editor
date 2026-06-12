@@ -189,6 +189,22 @@ export async function listRecordings(): Promise<RecordingFile[]> {
   return invoke<RecordingFile[]>("list_recordings");
 }
 
+/** Screen Recording TCC status (true off-macOS). */
+export async function screenPermissionStatus(): Promise<boolean> {
+  if (!isTauri) return true;
+  return invoke<boolean>("screen_permission_status");
+}
+
+/** Trigger the ONE-TIME macOS prompt; returns the (possibly new) status. */
+export async function requestScreenPermission(): Promise<boolean> {
+  return invoke<boolean>("request_screen_permission");
+}
+
+/** Open System Settings at a privacy pane: "screen" | "camera" | "microphone". */
+export async function openPrivacySettings(pane: string): Promise<void> {
+  return invoke("open_privacy_settings", { pane });
+}
+
 /** Delete a recording from the library (the file itself). */
 export async function deleteRecording(path: string): Promise<void> {
   return invoke("delete_recording", { path });

@@ -215,6 +215,35 @@ async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
 }
 
 #[tauri::command]
+fn screen_permission_status() -> bool {
+    roughcut_core::adapters::record::screen_permission()
+}
+
+#[tauri::command]
+fn request_screen_permission() -> bool {
+    roughcut_core::adapters::record::request_screen_permission()
+}
+
+/// Open System Settings at a privacy pane (whitelisted).
+#[tauri::command]
+fn open_privacy_settings(pane: String) -> Result<(), Value> {
+    let anchor = match pane.as_str() {
+        "screen" => "Privacy_ScreenCapture",
+        "camera" => "Privacy_Camera",
+        "microphone" => "Privacy_Microphone",
+        _ => return Err(serde_json::json!({ "error": { "code": "invalid_argument", "message": "unknown pane" } })),
+    };
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
+        .spawn()
+        .map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = anchor;
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_recording(path: String) -> Result<(), Value> {
     roughcut_core::adapters::record::delete_recording(&path).map_err(|e| e.to_json())
 }
@@ -282,7 +311,10 @@ pub fn run() {
             list_recordings,
             combine_recordings,
             delete_recording,
-            attach_screen_media
+            attach_screen_media,
+            screen_permission_status,
+            request_screen_permission,
+            open_privacy_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")

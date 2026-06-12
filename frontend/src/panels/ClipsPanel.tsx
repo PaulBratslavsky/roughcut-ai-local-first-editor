@@ -33,7 +33,10 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
       await callTool("transcribe", { project_id: projectId });
       await queryClient.invalidateQueries();
     } catch (e) {
-      setError(`${label}: ${String((e as { message?: string })?.message ?? e)}`);
+      setError(`${label}: ${((x: unknown) => {
+        const o = x as { error?: { message?: string }; message?: string };
+        return o?.error?.message ?? o?.message ?? String(x);
+      })(e)}`);
     } finally {
       setBusy(null);
     }

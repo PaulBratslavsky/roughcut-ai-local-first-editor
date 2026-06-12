@@ -1762,3 +1762,16 @@ input, select { font: inherit; }
 }
 
 .playback-meter { width: 52px; }
+
+/* screen-recording permission banner */
+.perm-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid #e5484d;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.perm-hint { color: var(--fg-dim); }

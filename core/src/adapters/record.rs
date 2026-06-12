@@ -60,6 +60,39 @@ pub struct RecordingFile {
     pub duration_s: f64,
 }
 
+/// Screen Recording TCC, asked directly (ffmpeg can't tell us — denied
+/// capture just delivers zero frames forever).
+#[cfg(target_os = "macos")]
+mod tcc {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        pub fn CGPreflightScreenCaptureAccess() -> bool;
+        pub fn CGRequestScreenCaptureAccess() -> bool;
+    }
+}
+
+/// Is Screen Recording granted to this app? (Always true off-macOS.)
+pub fn screen_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        tcc::CGPreflightScreenCaptureAccess()
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Trigger the one-time macOS prompt. Returns the (possibly new) status —
+/// macOS only ever shows this prompt ONCE; afterwards it's System Settings,
+/// and a grant takes effect on app relaunch.
+pub fn request_screen_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        tcc::CGRequestScreenCaptureAccess()
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
 /// Parse `ffmpeg -f avfoundation -list_devices true -i ""` stderr.
 /// (ffmpeg exits non-zero for this invocation by design — the listing IS
 /// the output.)
