@@ -300,6 +300,7 @@ pub async fn run_instruction_with(
         messages.push(msg);
         let mut round_mutated = false;
         let mut last_error: Option<String> = None;
+        let mut finalize_with: Option<String> = None;
         let _ = &last_turn_error;
         for call in tool_calls {
             let name = call.function.name.clone();
@@ -382,6 +383,14 @@ pub async fn run_instruction_with(
                         // enter the repeat cache as plain results.
                         round_mutated |= is_mutating(&name);
                         seen_calls.insert(call_key, truncate_json(&v));
+                        // story_edit is a COMPLETE pipeline: its summary is
+                        // the turn's answer. Handing control back invites a
+                        // small model to ramble (one echoed the transcript).
+                        if name == "story_edit" && v["failed_at"].is_null() {
+                            if let Some(sum) = v["summary"].as_str() {
+                                finalize_with = Some(sum.to_string());
+                            }
+                        }
                         v
                     }
                     Err(e) => {
@@ -420,6 +429,15 @@ pub async fn run_instruction_with(
             last_turn_error = Some(e);
         } else if round_mutated {
             last_turn_error = None;
+        }
+        if let Some(s) = finalize_with {
+            summary = if actions.is_empty() {
+                s
+            } else {
+                format!("{s}\n\n[Applied {} change(s) — undoable.]", actions.len())
+            };
+            step_text(editor, project_id, step, "final", summary.clone());
+            break;
         }
         if round_mutated {
             readonly_rounds = 0;

@@ -122,6 +122,9 @@ async fn llm_outline(
             .map(|i| format!("{i}| {}", speech[i].text))
             .collect::<Vec<_>>()
             .join("\n");
+        let chunk_minutes =
+            (speech[chunk_end - 1].end - speech[chunk_start].start).max(60.0) / 60.0;
+        let target_beats = (chunk_minutes / 2.5).ceil().max(2.0) as usize;
         #[derive(Deserialize)]
         struct RawBeat {
             title: String,
@@ -156,14 +159,20 @@ async fn llm_outline(
             inference,
             model,
             "outline",
-            "You analyze a talking-head video transcript and split it into STORY \
-             BEATS (hook, setup, a point being made, an example, a tangent, a \
-             recap, an outro). Lines are numbered. Reply with ONLY a JSON array: \
-             [{\"title\": short string, \"summary\": one sentence, \"role\": \
-             \"hook\"|\"setup\"|\"point\"|\"example\"|\"tangent\"|\"recap\"|\"outro\", \
-             \"cut_priority\": 1-5 (1 = the spine of the video, 5 = cut first), \
-             \"first\": first line number, \"last\": last line number}]. Beats \
-             must be contiguous, non-overlapping, and cover every line.",
+            &format!(
+                "You analyze a talking-head video transcript and split it into STORY \
+                 BEATS (hook, setup, a point being made, an example, a tangent, a \
+                 recap, an outro). A beat is a COMPLETE topic — typically 2-4 \
+                 minutes of speech; never under a minute unless it is clearly a \
+                 self-contained tangent. This chunk covers ~{chunk_minutes:.0} \
+                 minutes: produce AT MOST {target_beats} beats. Lines are numbered. \
+                 Reply with ONLY a JSON array: \
+                 [{{\"title\": short string, \"summary\": one sentence, \"role\": \
+                 \"hook\"|\"setup\"|\"point\"|\"example\"|\"tangent\"|\"recap\"|\"outro\", \
+                 \"cut_priority\": 1-5 (1 = the spine of the video, 5 = cut first), \
+                 \"first\": first line number, \"last\": last line number}}]. Beats \
+                 must be contiguous, non-overlapping, and cover every line."
+            ),
             &numbered,
             0.1,
             Some(&beat_schema),
@@ -193,7 +202,28 @@ async fn llm_outline(
             });
         }
     }
-    Ok(beats)
+    // Chunk-local outlining over-fragments (a 47-min video once came back
+    // as 47 beats). Merge sub-minute beats into their calmer neighbor —
+    // beat-level editing needs MINUTES-scale units or every cut severs
+    // connected tissue.
+    let mut merged: Vec<Beat> = vec![];
+    for beat in beats {
+        match merged.last_mut() {
+            Some(prev) if (beat.end - beat.start) < 60.0 || (prev.end - prev.start) < 60.0 => {
+                // Merge into prev: keep the longer side's identity.
+                if (beat.end - beat.start) > (prev.end - prev.start) {
+                    prev.title = beat.title;
+                    prev.summary = beat.summary;
+                    prev.role = beat.role;
+                }
+                prev.cut_priority = prev.cut_priority.min(beat.cut_priority);
+                prev.segment_ids.extend(beat.segment_ids);
+                prev.end = beat.end;
+            }
+            _ => merged.push(beat),
+        }
+    }
+    Ok(merged)
 }
 
 /// No model server: sections at speech pauses — still useful for navigation
@@ -502,6 +532,7 @@ pub async fn story_edit(
     };
 
     let before_s = editor.get_timeline(project_id)?.included_duration();
+    let mut actions: Vec<EditAction> = vec![];
     let inference = editor.inference()?;
     if !inference.healthy().await {
         // Honest degradation: without a model there is no narrative judgment.
@@ -533,6 +564,48 @@ pub async fn story_edit(
         return Err(CoreError::Unavailable(
             "story editing needs the local model server (Ollama or llama-server)".into(),
         ));
+    }
+
+    // 0. Dead air first: hybrid-CONFIRMED silences are uncontroversial and
+    // cutting them up front means beats are judged on their content, not
+    // their pauses. (transcript_only ranges are skipped — no audio proof.)
+    {
+        let (transcript, duration, media) = editor.with_project(project_id, |p, t| {
+            Ok((t.cloned(), p.timeline.duration, p.media.clone()))
+        })?;
+        if let (Some(t), Some(media)) = (transcript, media) {
+            if let Some(peaks) = crate::adapters::video::load_raw_peaks(&media).await {
+                let prefs = editor.get_preferences()?;
+                let min = prefs.silence_min_duration_s.max(0.6);
+                let cands = crate::detect::silence_candidates(&t, duration, (min * 0.6).max(0.3));
+                let confirmed: Vec<_> = crate::detect::refine_silences(
+                    &cands,
+                    Some(&peaks),
+                    crate::adapters::video::PEAKS_PER_SECOND,
+                    min,
+                )
+                .into_iter()
+                .filter(|r| r.source == "confirmed")
+                .collect();
+                if !confirmed.is_empty() {
+                    narrate(
+                        editor,
+                        project_id,
+                        0,
+                        format!("cutting {} audio-confirmed dead-air range(s) first", confirmed.len()),
+                    );
+                    for r in confirmed {
+                        if let Ok(outcome) = editor.apply_edit(
+                            project_id,
+                            EditOp::CutRange { start: r.start, end: r.end },
+                            source,
+                        ) {
+                            actions.push(outcome.action);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 1. Outline.
@@ -590,6 +663,9 @@ pub async fn story_edit(
          user's instruction and the beat outline, choose which beats to CUT \
          ENTIRELY. Cut tangents, repeated takes, and beats that don't serve \
          the instruction; never cut the hook or the payoff unless asked. \
+         PREFER CUTTING RUNS of adjacent beats — every isolated cut between \
+         two kept beats creates a visible seam, so only cut a lone \
+         mid-video beat when it is clearly a tangent (cut_priority 4-5). \
          Reply with ONLY JSON: {\"cut_beats\": [beat numbers], \"rationale\": \
          one sentence}.",
         &format!("Instruction: {instruction}\n{target_line}\n\nBeats:\n{listed}"),
@@ -611,6 +687,29 @@ pub async fn story_edit(
             "the plan cut nearly every beat — refusing; try a more specific instruction".into(),
         ));
     }
+    // Contiguity guard: an isolated low-priority cut sandwiched between two
+    // kept beats severs connected speech for marginal savings — drop those
+    // from the plan (the model was told; this enforces it).
+    let cut_set: std::collections::HashSet<usize> = valid.iter().copied().collect();
+    let before_guard = valid.len();
+    valid.retain(|&n| {
+        let prev_kept = n == 0 || !cut_set.contains(&(n - 1));
+        let next_kept = n + 1 >= outline.beats.len() || !cut_set.contains(&(n + 1));
+        let isolated_mid = prev_kept && next_kept && n > 0 && n + 1 < outline.beats.len();
+        !(isolated_mid && outline.beats[n].cut_priority <= 3)
+    });
+    if valid.len() < before_guard {
+        narrate(
+            editor,
+            project_id,
+            1,
+            format!(
+                "kept {} isolated beat(s) the plan wanted to cut — lone mid-video cuts \
+                 leave seams",
+                before_guard - valid.len()
+            ),
+        );
+    }
     let cut_duration: f64 =
         valid.iter().map(|&n| outline.beats[n].end - outline.beats[n].start).sum();
     let justified = target_s.map(|t| before_s - cut_duration >= t * 0.5).unwrap_or(false);
@@ -621,7 +720,6 @@ pub async fn story_edit(
         ));
     }
 
-    let mut actions: Vec<EditAction> = vec![];
     let cut_ids: Vec<Uuid> =
         valid.iter().flat_map(|&n| outline.beats[n].segment_ids.clone()).collect();
     if !cut_ids.is_empty() {
@@ -708,6 +806,7 @@ pub async fn story_edit(
     // boundaries, including the rough cut's — those are not ours to undo),
     // and at most the first 2 segments of a run per issue (enough to finish
     // a sliced sentence without silently re-adding a whole beat).
+    let speech = speech_segments(editor, project_id)?;
     let own_cuts: std::collections::HashSet<Uuid> = actions
         .iter()
         .filter_map(|a| match &a.op {
@@ -721,12 +820,24 @@ pub async fn story_edit(
         .iter()
         .filter(|i| i.severity == "high")
         .flat_map(|i| {
-            i.restore_segment_ids
-                .iter()
-                .filter(|id| own_cuts.contains(id))
-                .take(2)
-                .cloned()
-                .collect::<Vec<_>>()
+            // Restore enough to FINISH the sliced sentence: up to 4 own-cut
+            // segments, stopping once one ends with terminal punctuation.
+            let mut taken = vec![];
+            for id in i.restore_segment_ids.iter().filter(|id| own_cuts.contains(id)) {
+                taken.push(*id);
+                if taken.len() >= 4 {
+                    break;
+                }
+                let done = speech
+                    .iter()
+                    .find(|s| s.id == *id)
+                    .map(|s| s.text.trim_end().ends_with(['.', '!', '?', '…']))
+                    .unwrap_or(false);
+                if done {
+                    break;
+                }
+            }
+            taken
         })
         .collect();
     restore_ids.sort_unstable();
