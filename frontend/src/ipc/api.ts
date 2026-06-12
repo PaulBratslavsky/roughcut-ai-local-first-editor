@@ -144,8 +144,21 @@ export async function recordDevices(): Promise<CaptureDevices> {
 
 /** Starts capture; resolves with the output path. First runs trigger the
  *  macOS camera+mic (or Screen Recording) permission prompts. */
-export async function recordStart(video: number, microphone: number, screen: boolean): Promise<string> {
-  return invoke<string>("record_start", { video, microphone, screen });
+export async function recordStart(
+  video: number,
+  microphone: number,
+  screen: boolean,
+  dualScreen?: number,
+): Promise<string> {
+  return invoke<string>("record_start", { video, microphone, screen, dualScreen: dualScreen ?? null });
+}
+
+import type { RecordingOutcome } from "./generated/RecordingOutcome";
+export type { RecordingOutcome };
+
+/** Attach a dual-capture screen file to a project (probed; persisted). */
+export async function attachScreenMedia(projectId: string, filePath: string): Promise<void> {
+  return invoke("attach_screen_media", { projectId, filePath });
 }
 
 export async function recordStatus(): Promise<RecordingStatus> {
@@ -153,9 +166,10 @@ export async function recordStatus(): Promise<RecordingStatus> {
   return invoke<RecordingStatus>("record_status");
 }
 
-/** Finish the session: finalizes + stitches every take into ONE file. */
-export async function recordStop(): Promise<string> {
-  return invoke<string>("record_stop");
+/** Finish the session: finalizes + stitches every take into one file per
+ *  stream (camera always; screen too for dual sessions). */
+export async function recordStop(): Promise<RecordingOutcome> {
+  return invoke<RecordingOutcome>("record_stop");
 }
 
 export async function recordPause(): Promise<RecordingStatus> {

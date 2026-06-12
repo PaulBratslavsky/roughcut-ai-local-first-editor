@@ -158,10 +158,28 @@ async fn record_start(
     video: u32,
     microphone: u32,
     screen: bool,
+    dual_screen: Option<u32>,
 ) -> Result<String, Value> {
-    roughcut_core::adapters::record::start_capture(&state.editor.sink(), video, microphone, screen)
-        .await
-        .map_err(|e| e.to_json())
+    roughcut_core::adapters::record::start_capture_full(
+        &state.editor.sink(),
+        video,
+        microphone,
+        screen,
+        dual_screen,
+    )
+    .await
+    .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn attach_screen_media(
+    state: State<'_, AppState>,
+    project_id: String,
+    file_path: String,
+) -> Result<(), Value> {
+    let pid = uuid::Uuid::parse_str(&project_id)
+        .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
+    state.editor.attach_screen_media(pid, &file_path).await.map_err(|e| e.to_json())
 }
 
 #[tauri::command]
@@ -170,7 +188,7 @@ fn record_status() -> roughcut_core::adapters::record::RecordingStatus {
 }
 
 #[tauri::command]
-async fn record_stop() -> Result<String, Value> {
+async fn record_stop() -> Result<roughcut_core::adapters::record::RecordingOutcome, Value> {
     roughcut_core::adapters::record::stop().await.map_err(|e| e.to_json())
 }
 
@@ -263,7 +281,8 @@ pub fn run() {
             record_resume,
             list_recordings,
             combine_recordings,
-            delete_recording
+            delete_recording,
+            attach_screen_media
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")

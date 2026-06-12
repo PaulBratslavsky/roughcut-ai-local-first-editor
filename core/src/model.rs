@@ -607,6 +607,11 @@ pub struct Project {
     /// warms up). Applied non-destructively at preview and export.
     #[serde(default)]
     pub audio_offset_s: f64,
+    /// Dual-capture companion: the screen recording that runs alongside the
+    /// primary (camera) media on the same clock. Layout (M4) composites the
+    /// two at preview/export; the timeline + transcript stay single-source.
+    #[serde(default)]
+    pub screen_media: Option<Media>,
 }
 
 impl Project {
@@ -624,6 +629,7 @@ impl Project {
             schema_version: 2,
             deleted_at: None,
             audio_offset_s: 0.0,
+            screen_media: None,
         }
     }
 

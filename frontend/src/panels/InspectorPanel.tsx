@@ -70,15 +70,26 @@ function AudioSyncSection({ projectId }: { projectId: string }) {
           type="range"
           min={-500}
           max={500}
-          step={10}
+          step={1}
           value={value}
           onChange={(e) => setMs(Number(e.target.value))}
           onMouseUp={() => void commit(value)}
           onTouchEnd={() => void commit(value)}
         />
-        <span className="audio-sync-value">
-          {value > 0 ? "+" : ""}{value} ms
-        </span>
+        <input
+          className="audio-sync-input"
+          type="number"
+          min={-2000}
+          max={2000}
+          step={1}
+          value={value}
+          onChange={(e) => setMs(Number(e.target.value))}
+          onBlur={() => void commit(value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void commit(value);
+          }}
+        />
+        <span className="audio-sync-unit">ms</span>
         {value !== 0 && (
           <button className="link-btn" onClick={() => void commit(0)}>reset</button>
         )}

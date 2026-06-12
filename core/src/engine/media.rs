@@ -190,3 +190,19 @@ impl super::Editor {
         Ok(new_media)
     }
 }
+
+impl super::Editor {
+    /// Attach the dual-capture screen file (probed) to a project.
+    pub async fn attach_screen_media(&self, project_id: uuid::Uuid, file_path: &str) -> crate::error::Result<()> {
+        let media = self.video().probe(file_path).await?;
+        self.ensure_loaded(project_id)?;
+        let mut state = self.inner.state.lock().unwrap();
+        let entry = state
+            .get_mut(&project_id)
+            .and_then(|e| e.project.as_mut())
+            .ok_or_else(|| crate::error::CoreError::NotFound(format!("project {project_id}")))?;
+        entry.screen_media = Some(media);
+        self.inner.store.save_project(entry)?;
+        Ok(())
+    }
+}

@@ -128,21 +128,40 @@ fn device_cache() -> &'static Mutex<Option<(std::time::Instant, CaptureDevices)>
     C.get_or_init(Default::default)
 }
 
+/// One take's output file(s): camera/primary always, screen when dual.
+#[derive(Clone)]
+struct Take {
+    primary: PathBuf,
+    screen: Option<PathBuf>,
+}
+
 struct Session {
     /// None while paused between takes.
     child: Option<Child>,
     started: std::time::Instant,
     /// Wall seconds accumulated in finished takes.
     finished_s: f64,
-    /// Finished take files, in order.
-    takes: Vec<PathBuf>,
-    /// Path of the take being written (current child's output).
-    current: PathBuf,
+    /// Finished takes, in order.
+    takes: Vec<Take>,
+    /// The take being written by the current child.
+    current: Take,
     video_index: u32,
     microphone: u32,
     is_screen: bool,
+    /// Dual capture: ALSO record this display alongside the camera.
+    screen_index: Option<u32>,
     /// Base name (no extension) all takes share.
     base: String,
+}
+
+/// What a finished session hands back.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingOutcome {
+    pub path: String,
+    /// Present for dual (camera+screen) sessions.
+    pub screen_path: Option<String>,
 }
 
 fn active() -> &'static Mutex<Option<Session>> {
@@ -230,14 +249,17 @@ fn pick_mode(modes: &[Mode]) -> Option<(Mode, f64)> {
     Some((*best, fps))
 }
 
-/// Spawn one ffmpeg take writing to `out`. Shared by start and resume,
-/// cameras and screens.
+/// Spawn one ffmpeg take. One process even for dual capture — both inputs
+/// share the process clock, so camera and screen files stay in sync without
+/// any alignment pass. Output 1 = primary (camera or screen) with mic;
+/// output 2 (dual only) = screen, video-only.
 async fn spawn_take(
     sink: &SharedSink,
     video_index: u32,
     microphone: u32,
     is_screen: bool,
-    out: &PathBuf,
+    screen_index: Option<u32>,
+    take: &Take,
 ) -> Result<Child> {
     let ffmpeg = super::video::ffmpeg_path()
         .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
@@ -265,30 +287,57 @@ async fn spawn_take(
         args.push("-framerate".into());
         args.push("30".into());
     }
+    args.push("-i".into());
+    args.push(format!("{video_index}:{microphone}"));
+
+    // Dual: the display as a SECOND input of the same process.
+    if let Some(screen) = screen_index {
+        args.extend([
+            "-f".into(), "avfoundation".into(),
+            "-capture_cursor".into(), "1".into(),
+            "-framerate".into(), "30".into(),
+            "-i".into(), format!("{screen}:none"),
+        ]);
+    }
+
+    // Output 1: primary. Even-dims crop when the primary IS a screen.
+    if is_screen {
+        args.extend(["-vf".into(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".into()]);
+    }
+    args.extend([
+        "-map".into(), "0:v".into(),
+        "-map".into(), "0:a".into(),
+        "-c:v".into(), "h264_videotoolbox".into(),
+        "-b:v".into(), "6M".into(),
+        "-pix_fmt".into(), "yuv420p".into(),
+        "-c:a".into(), "aac".into(),
+        "-b:a".into(), "192k".into(),
+        // Fragmented MP4: the index is written incrementally, so a
+        // crash/kill mid-take loses nothing already on disk. finish()
+        // normalizes takes into a clean faststart MP4.
+        "-movflags".into(), "+frag_keyframe+empty_moov".into(),
+        "-progress".into(), "pipe:1".into(),
+        take.primary.to_string_lossy().into_owned(),
+    ]);
+    // Output 2: the screen, video-only.
+    if screen_index.is_some() {
+        let screen_out = take
+            .screen
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("dual take missing screen path".into()))?;
+        args.extend([
+            "-map".into(), "1:v".into(),
+            "-vf".into(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".into(),
+            "-c:v".into(), "h264_videotoolbox".into(),
+            "-b:v".into(), "8M".into(),
+            "-pix_fmt".into(), "yuv420p".into(),
+            "-movflags".into(), "+frag_keyframe+empty_moov".into(),
+            screen_out.to_string_lossy().into_owned(),
+        ]);
+    }
+
     let mut child = Command::new(ffmpeg)
-        .args(args)
-        .args(["-i", &format!("{video_index}:{microphone}")])
-        // Output options from here. Retina screens have odd dimensions and
-        // h264 needs even — crop one pixel rather than fail.
-        .args(if is_screen {
-            vec!["-vf".to_string(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".to_string()]
-        } else {
-            vec![]
-        })
-        .args([
-            "-c:v", "h264_videotoolbox",
-            "-b:v", "6M",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            // Fragmented MP4: the index is written incrementally, so a
-            // crash/kill mid-take loses nothing already on disk (the reason
-            // OBS records MKV — this is the WebKit-playable equivalent).
-            // finish() normalizes takes into a clean faststart MP4.
-            "-movflags", "+frag_keyframe+empty_moov",
-            "-progress", "pipe:1",
-            &out.to_string_lossy(),
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -335,12 +384,14 @@ async fn finalize_take(mut child: Child) -> Result<()> {
 
 /// Start a recording session (take 1). First runs trigger the macOS
 /// camera+mic (or screen-recording) permission prompts attributed to the
-/// app. One session at a time.
-pub async fn start_capture(
+/// app. One session at a time. `screen_index` = dual capture: that display
+/// records alongside the camera, two synced files per take.
+pub async fn start_capture_full(
     sink: &SharedSink,
     video_index: u32,
     microphone: u32,
     is_screen: bool,
+    screen_index: Option<u32>,
 ) -> Result<String> {
     {
         let mut guard = active().lock().unwrap();
@@ -358,27 +409,48 @@ pub async fn start_capture(
     }
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
-    let kind = if is_screen { "screen" } else { "recording" };
+    let kind = if screen_index.is_some() {
+        "presentation"
+    } else if is_screen {
+        "screen"
+    } else {
+        "recording"
+    };
     let base = format!("{kind}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
-    let current = dir.join(format!("{base}-take1.mp4"));
-    let child = spawn_take(sink, video_index, microphone, is_screen, &current).await?;
+    let current = Take {
+        primary: dir.join(format!("{base}-take1.mp4")),
+        screen: screen_index.map(|_| dir.join(format!("{base}-screen-take1.mp4"))),
+    };
+    let child =
+        spawn_take(sink, video_index, microphone, is_screen, screen_index, &current).await?;
+    let primary = current.primary.to_string_lossy().into_owned();
     *active().lock().unwrap() = Some(Session {
         child: Some(child),
         started: std::time::Instant::now(),
         finished_s: 0.0,
         takes: vec![],
-        current: current.clone(),
+        current,
         video_index,
         microphone,
         is_screen,
+        screen_index,
         base,
     });
-    Ok(current.to_string_lossy().into_owned())
+    Ok(primary)
+}
+
+pub async fn start_capture(
+    sink: &SharedSink,
+    video_index: u32,
+    microphone: u32,
+    is_screen: bool,
+) -> Result<String> {
+    start_capture_full(sink, video_index, microphone, is_screen, None).await
 }
 
 /// Back-compat shim for camera-only callers.
 pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Result<String> {
-    start_capture(sink, camera, microphone, false).await
+    start_capture_full(sink, camera, microphone, false, None).await
 }
 
 /// Pause: finalize the current take; the session stays alive for resume().
@@ -399,7 +471,7 @@ pub async fn pause() -> Result<RecordingStatus> {
     if let Some(session) = guard.as_mut() {
         session.finished_s += elapsed;
         let take = session.current.clone();
-        if result.is_ok() && take.is_file() {
+        if result.is_ok() && take.primary.is_file() {
             session.takes.push(take);
         }
     }
@@ -410,7 +482,7 @@ pub async fn pause() -> Result<RecordingStatus> {
 
 /// Resume after pause: a new take file, same devices.
 pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
-    let (camera, microphone, is_screen, next) = {
+    let (camera, microphone, is_screen, screen_index, next) = {
         let guard = active().lock().unwrap();
         let session = guard
             .as_ref()
@@ -423,10 +495,16 @@ pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
             session.video_index,
             session.microphone,
             session.is_screen,
-            recordings_dir().join(format!("{}-take{}.mp4", session.base, n)),
+            session.screen_index,
+            Take {
+                primary: recordings_dir().join(format!("{}-take{}.mp4", session.base, n)),
+                screen: session
+                    .screen_index
+                    .map(|_| recordings_dir().join(format!("{}-screen-take{}.mp4", session.base, n))),
+            },
         )
     };
-    let child = spawn_take(sink, camera, microphone, is_screen, &next).await?;
+    let child = spawn_take(sink, camera, microphone, is_screen, screen_index, &next).await?;
     {
         let mut guard = active().lock().unwrap();
         let session = guard
@@ -459,7 +537,7 @@ pub fn status() -> RecordingStatus {
             take: session.takes.len() as u32,
             elapsed_s: 0.0,
             total_s: session.finished_s,
-            out_path: Some(session.current.to_string_lossy().into_owned()),
+            out_path: Some(session.current.primary.to_string_lossy().into_owned()),
         },
         Some(child) => match child.try_wait() {
             Ok(None) => {
@@ -470,11 +548,11 @@ pub fn status() -> RecordingStatus {
                     take,
                     elapsed_s: elapsed,
                     total_s: session.finished_s + elapsed,
-                    out_path: Some(session.current.to_string_lossy().into_owned()),
+                    out_path: Some(session.current.primary.to_string_lossy().into_owned()),
                 }
             }
             _ => {
-                let path = session.current.to_string_lossy().into_owned();
+                let path = session.current.primary.to_string_lossy().into_owned();
                 *guard = None;
                 RecordingStatus {
                     recording: false,
@@ -490,9 +568,9 @@ pub fn status() -> RecordingStatus {
 }
 
 /// Finish the session: finalize the current take (if recording), then
-/// stream-copy concat every take into ONE file. Single-take sessions just
-/// return the take. Take files are kept in the library either way.
-pub async fn stop() -> Result<String> {
+/// stream-copy concat every take into ONE file per stream. Take files stay
+/// in the library either way.
+pub async fn stop() -> Result<RecordingOutcome> {
     let session_exists = active().lock().unwrap().is_some();
     if !session_exists {
         return Err(CoreError::InvalidArg("no recording is running".into()));
@@ -507,16 +585,23 @@ pub async fn stop() -> Result<String> {
         let session = guard.take().ok_or_else(|| CoreError::InvalidArg("session vanished".into()))?;
         (session.takes, session.base)
     };
-    match takes.len() {
-        0 => Err(CoreError::Other("capture produced no usable takes".into())),
-        // Single take still goes through concat: it rewrites the fragmented
-        // container into a normal faststart MP4 (instant, stream copy).
-        _ => {
-            let out = recordings_dir().join(format!("{base}.mp4"));
-            concat(&takes, &out).await?;
-            Ok(out.to_string_lossy().into_owned())
-        }
+    if takes.is_empty() {
+        return Err(CoreError::Other("capture produced no usable takes".into()));
     }
+    // Primary stream (always): concat normalizes fragmented takes too.
+    let primaries: Vec<PathBuf> = takes.iter().map(|t| t.primary.clone()).collect();
+    let out = recordings_dir().join(format!("{base}.mp4"));
+    concat(&primaries, &out).await?;
+    // Screen stream (dual sessions).
+    let screens: Vec<PathBuf> = takes.iter().filter_map(|t| t.screen.clone()).collect();
+    let screen_path = if screens.len() == takes.len() && !screens.is_empty() {
+        let sout = recordings_dir().join(format!("{base}-screen.mp4"));
+        concat(&screens, &sout).await?;
+        Some(sout.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    Ok(RecordingOutcome { path: out.to_string_lossy().into_owned(), screen_path })
 }
 
 /// Lossless concat (`-f concat -c copy`) — instant, and safe because every

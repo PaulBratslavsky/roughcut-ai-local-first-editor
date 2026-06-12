@@ -11,8 +11,8 @@ async fn main() {
     println!("recording display {screen} + mic {mic} for 4s…");
     record::start_capture(&sink, screen, mic, true).await.expect("start");
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-    let path = record::stop().await.expect("stop");
-    let media = FfmpegCli.probe(&path).await.expect("probe");
+    let out = record::stop().await.expect("stop");
+    let media = FfmpegCli.probe(&out.path).await.expect("probe");
     println!("probed: {:.2}s {}x{} {}", media.duration, media.width, media.height, media.codec);
     assert!(media.duration > 1.0 && media.width > 800);
     println!("SCREEN-SMOKE-OK");

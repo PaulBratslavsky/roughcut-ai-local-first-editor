@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
+  attachScreenMedia,
   combineRecordings,
   deleteRecording,
   isTauri,
@@ -28,6 +29,65 @@ type Phase = "setup" | "countdown" | "recording" | "paused" | "finishing";
 function fmtClock(s: number): string {
   const m = Math.floor(s / 60);
   return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+/** Live mic level: proof the right microphone hears you BEFORE you commit
+ *  to a take. WebAudio analyser on the selected device (matched by label). */
+function MicMeter({ micName }: { micName?: string }) {
+  const [level, setLevel] = useState(0);
+  useEffect(() => {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+    let raf = 0;
+    let cancelled = false;
+    void (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (micName) {
+          const all = await navigator.mediaDevices.enumerateDevices();
+          const match = all.find((d) => d.kind === "audioinput" && d.label === micName);
+          if (match && stream.getAudioTracks()[0]?.label !== micName) {
+            stream.getTracks().forEach((t) => t.stop());
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: { deviceId: { exact: match.deviceId } },
+            });
+          }
+        }
+        if (cancelled) return;
+        ctx = new AudioContext();
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        src.connect(analyser);
+        const buf = new Uint8Array(analyser.fftSize);
+        const tick = () => {
+          analyser.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (const v of buf) {
+            const d = (v - 128) / 128;
+            sum += d * d;
+          }
+          setLevel(Math.min(1, Math.sqrt(sum / buf.length) * 4));
+          raf = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch {
+        /* no meter without permission — recording still works */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      stream?.getTracks().forEach((t) => t.stop());
+      void ctx?.close().catch(() => {});
+    };
+  }, [micName]);
+  return (
+    <span className="mic-meter" title="mic level">
+      <span className="mic-meter-fill" style={{ width: `${Math.round(level * 100)}%` }} />
+    </span>
+  );
 }
 
 function fmtDur(s: number): string {
@@ -137,7 +197,7 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
 
 export function RecorderPanel() {
   const [devices, setDevices] = useState<CaptureDevices | null>(null);
-  const [source, setSource] = useState<"camera" | "screen">("camera");
+  const [source, setSource] = useState<"camera" | "screen" | "both">("camera");
   const [camera, setCamera] = useState<number | null>(null);
   const [screen, setScreenDev] = useState<number | null>(null);
   const [mic, setMic] = useState<number | null>(null);
@@ -174,7 +234,7 @@ export function RecorderPanel() {
   // LABEL (separate namespaces; names align in practice). The spike
   // instrumentation: if the track dies while recording, report it.
   const cameraName =
-    source === "camera" ? devices?.cameras.find((c) => c.index === camera)?.name : undefined;
+    source !== "screen" ? devices?.cameras.find((c) => c.index === camera)?.name : undefined;
   useEffect(() => {
     let cancelled = false;
     setPreviewNote(null);
@@ -252,6 +312,7 @@ export function RecorderPanel() {
   const begin = useCallback(() => {
     const video = source === "screen" ? screen : camera;
     if (video == null || mic == null) return;
+    if (source === "both" && screen == null) return;
     setError(null);
     setPhase("countdown");
     setCount(3);
@@ -265,7 +326,7 @@ export function RecorderPanel() {
       clearInterval(t);
       // Start before the "0" frame: ffmpeg's camera warm-up (~2s) overlaps
       // the tail of the countdown instead of eating the take's first words.
-      recordStart(video, mic, source === "screen")
+      recordStart(video, mic, source === "screen", source === "both" ? (screen ?? undefined) : undefined)
         .then(() => {
           setElapsed(0);
           setTake(1);
@@ -302,10 +363,17 @@ export function RecorderPanel() {
   }, []);
 
   const ingestRecording = useCallback(
-    (name: string, path: string) => {
+    (name: string, path: string, screenPath?: string) => {
       setPhase("finishing");
       let createdId: string | null = null;
-      const done = ingestFile(name, path, { onCreated: (id) => (createdId = id) });
+      const done = ingestFile(name, path, {
+        onCreated: (id) => {
+          createdId = id;
+          if (screenPath) {
+            void attachScreenMedia(id, screenPath).catch(() => {});
+          }
+        },
+      });
       // Switch to the editor as soon as the project exists; transcription
       // streams in via events like any other import.
       const poll = setInterval(() => {
@@ -332,10 +400,11 @@ export function RecorderPanel() {
   const finish = useCallback(async () => {
     setPhase("finishing");
     try {
-      const path = await recordStop();
+      const out = await recordStop();
       const stamp = new Date();
-      const name = `recording ${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}.${String(stamp.getMinutes()).padStart(2, "0")}`;
-      ingestRecording(name, path);
+      const kind = out.screen_path ? "presentation" : "recording";
+      const name = `${kind} ${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, "0")}-${String(stamp.getDate()).padStart(2, "0")} ${String(stamp.getHours()).padStart(2, "0")}.${String(stamp.getMinutes()).padStart(2, "0")}`;
+      ingestRecording(name, out.path, out.screen_path ?? undefined);
     } catch (e) {
       setError(String((e as { message?: string })?.message ?? e));
       setPhase("setup");
@@ -410,8 +479,16 @@ export function RecorderPanel() {
               >
                 screen
               </button>
+              <button
+                className={`tab${source === "both" ? " active" : ""}`}
+                onClick={() => setSource("both")}
+                disabled={devices.screens.length === 0 || devices.cameras.length === 0}
+                title="presentation mode: camera AND screen, two synced files"
+              >
+                screen + camera
+              </button>
             </div>
-            {source === "camera" ? (
+            {source !== "screen" && (
               <label className="recorder-field">
                 camera
                 <select
@@ -423,7 +500,8 @@ export function RecorderPanel() {
                   ))}
                 </select>
               </label>
-            ) : (
+            )}
+            {source !== "camera" && (
               <label className="recorder-field">
                 display
                 <select
@@ -443,10 +521,11 @@ export function RecorderPanel() {
                   <option key={d.index} value={d.index}>{d.name}</option>
                 ))}
               </select>
+              <MicMeter micName={devices.microphones.find((d) => d.index === mic)?.name} />
             </label>
             <button
               className="primary-btn recorder-go"
-              disabled={(source === "screen" ? screen : camera) == null || mic == null}
+              disabled={(source === "screen" ? screen : camera) == null || mic == null || (source === "both" && screen == null)}
               onClick={begin}
             >
               ● record

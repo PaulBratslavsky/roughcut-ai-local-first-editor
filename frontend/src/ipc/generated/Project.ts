@@ -12,4 +12,10 @@ deleted_at: string | null,
  * arriving ahead of lips — avfoundation mics start before the camera
  * warms up). Applied non-destructively at preview and export.
  */
-audio_offset_s: number, };
+audio_offset_s: number, 
+/**
+ * Dual-capture companion: the screen recording that runs alongside the
+ * primary (camera) media on the same clock. Layout (M4) composites the
+ * two at preview/export; the timeline + transcript stay single-source.
+ */
+screen_media: Media | null, };

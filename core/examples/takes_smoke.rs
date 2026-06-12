@@ -21,8 +21,10 @@ async fn main() {
     let st = record::resume(&sink).await.expect("resume");
     assert!(st.recording && st.take == 2, "resume status: {st:?}");
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-    let path = record::stop().await.expect("stop");
+    let out = record::stop().await.expect("stop");
+    let path = out.path;
     println!("combined: {path}");
+    assert!(out.screen_path.is_none(), "camera-only session must not produce a screen file");
     assert!(!path.contains("-take"), "expected the concat file, got a take: {path}");
     let media = FfmpegCli.probe(&path).await.expect("probe");
     println!("probed: {:.2}s {}x{} {}", media.duration, media.width, media.height, media.codec);

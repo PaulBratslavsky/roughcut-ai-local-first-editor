@@ -397,6 +397,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       schema_version: 2,
       deleted_at: null,
       audio_offset_s: 0,
+      screen_media: null,
     };
     state.undoStack = [];
     state.redoStack = [];

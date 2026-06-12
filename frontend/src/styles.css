@@ -1740,3 +1740,21 @@ input, select { font: inherit; }
 .audio-sync-row { display: flex; align-items: center; gap: 10px; }
 .audio-sync-row input[type="range"] { flex: 1; }
 .audio-sync-value { font-variant-numeric: tabular-nums; min-width: 64px; text-align: right; }
+.audio-sync-input { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.audio-sync-unit { color: var(--fg-dim); font-size: 12px; }
+
+/* mic level meter */
+.mic-meter {
+  width: 64px;
+  height: 8px;
+  border: 1px solid var(--line);
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: middle;
+}
+.mic-meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--fg);
+  transition: width 60ms linear;
+}
