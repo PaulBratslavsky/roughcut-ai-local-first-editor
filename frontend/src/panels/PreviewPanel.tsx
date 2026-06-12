@@ -113,6 +113,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
     return {
       position: "absolute" as const,
       width: `${Math.round(layout.size * 100)}%`,
+      height: "auto", // .preview-video sets 100%; the bubble must not
       ...(layout.shape === "round"
         ? { aspectRatio: "1 / 1", borderRadius: "50%", objectFit: "cover" as const }
         : { borderRadius: "6px" }),
@@ -196,6 +197,11 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             className="screen-layer"
             muted
             playsInline
+            onError={() =>
+              setVideoError(
+                "screen track missing or unplayable (was the file deleted from the library?) — Tools ▸ Layout ▸ camera only",
+              )
+            }
           />
         )}
         {src ? (

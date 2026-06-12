@@ -288,6 +288,23 @@ export function RecorderPanel() {
   phaseRef.current = phase;
   const queryClient = useQueryClient();
 
+  // Adopt an already-running session on mount (recorder reopened during a
+  // recording, or an orphan from an interrupted session) — never leave a
+  // live capture without a stop button.
+  useEffect(() => {
+    void recordStatus().then((st) => {
+      if (st.recording) {
+        setTake(st.take || 1);
+        setDoneTakesS(st.total_s - st.elapsed_s);
+        setPhase("recording");
+      } else if (st.paused) {
+        setTake(st.take || 1);
+        setDoneTakesS(st.total_s);
+        setPhase("paused");
+      }
+    }).catch(() => {});
+  }, []);
+
   // Device list (ffmpeg's avfoundation indexes — the source of truth).
   useEffect(() => {
     void recordDevices()
@@ -362,7 +379,10 @@ export function RecorderPanel() {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     };
-  }, [cameraName]);
+    // previewFile: the live <video> remounts when a file preview closes —
+    // the stream must reattach or the camera goes black.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraName, previewFile === null]);
 
   // Screen Recording TCC: checked whenever a screen source is selected, so
   // the grant flow happens BEFORE a take fails into a timeout.
@@ -389,7 +409,15 @@ export function RecorderPanel() {
     const tick = setInterval(() => setElapsed((Date.now() - started) / 1000), 500);
     const verify = setInterval(() => {
       void recordStatus().then((s) => {
-        if (!s.recording && phaseRef.current === "recording") {
+        if (phaseRef.current !== "recording") return;
+        if (s.paused) {
+          // Backend salvaged a dead child as a paused session — offer
+          // resume/finish instead of pretending nothing was recorded.
+          setError("the capture process stopped — takes so far are kept; resume or finish");
+          setDoneTakesS(s.total_s);
+          setTake(s.take || 1);
+          setPhase("paused");
+        } else if (!s.recording) {
           setError("the capture process exited unexpectedly");
           setPhase("setup");
         }
@@ -400,6 +428,18 @@ export function RecorderPanel() {
       clearInterval(verify);
     };
   }, [phase]);
+
+  // The countdown must die with the component — a surviving interval fires
+  // recordStart AFTER unmount: a headless capture nothing can stop.
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, []);
 
   const begin = useCallback(() => {
     const video = source === "screen" ? screen : camera;
@@ -416,6 +456,8 @@ export function RecorderPanel() {
         return;
       }
       clearInterval(t);
+      countdownRef.current = null;
+      if (!aliveRef.current) return;
       // Start before the "0" frame: ffmpeg's camera warm-up (~2s) overlaps
       // the tail of the countdown instead of eating the take's first words.
       recordStart(video, mic, source === "screen", source === "both" ? (screen ?? undefined) : undefined)
@@ -430,6 +472,7 @@ export function RecorderPanel() {
           setPhase("setup");
         });
     }, 800);
+    countdownRef.current = t;
   }, [camera, screen, mic, source]);
 
   const doPause = useCallback(async () => {
@@ -472,7 +515,12 @@ export function RecorderPanel() {
                   size: pipSize / 100,
                 }),
               )
-              .catch(() => {});
+              .catch((e) =>
+                setError(
+                  `recorded fine, but attaching the screen track failed: ${errText(e)} — ` +
+                    `the file is in the library`,
+                ),
+              );
           }
         },
       });

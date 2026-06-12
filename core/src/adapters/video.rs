@@ -239,7 +239,14 @@ impl VideoEngine for FfmpegCli {
                  pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[scr];"
             ));
             if layout.mode == "screen" {
-                filter.push_str("[scr]null[comp];");
+                // The screen file is routinely a hair shorter than the
+                // camera (start latency); trims past its EOF would emit
+                // EMPTY video that concat happily desyncs. Clone-pad the
+                // last frame out to the camera's duration.
+                let pad = (media.duration - screen.duration).max(0.0) + 1.0;
+                filter.push_str(&format!(
+                    "[scr]tpad=stop_mode=clone:stop_duration={pad:.3}[comp];"
+                ));
             } else {
                 // The face bubble: scaled camera with a round / rounded-rect
                 // alpha mask (geq on the small pip only — cheap), overlaid at

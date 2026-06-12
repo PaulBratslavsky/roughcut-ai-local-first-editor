@@ -123,6 +123,13 @@ update.
 
 ## Parked for v2 (explicitly out)
 
+Library deletes vs project references: deleting a recording the library
+that a project still uses (as media or screen_media) breaks that project
+with only a playback error to show for it. Proper fix is reference
+tracking (warn "used by project X") — needs a media<->project index.
+
+
+
 Per-segment layout switching from the transcript ("camera for the intro,
 screen for the demo") — the differentiator this architecture is built to
 enable; system audio; window-level capture; ScreenCaptureKit backend; click

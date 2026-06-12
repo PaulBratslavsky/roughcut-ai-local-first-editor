@@ -95,16 +95,22 @@ pub fn write(project: &Project, media: &Media) -> String {
             } else {
                 "<file id=\"file-2\"/>".to_string()
             };
-            screen_items.push_str(&format!(
-                "<clipitem id=\"clipitem-s{n}\"><name>{fname}</name>\
-                 <rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>\
-                 <start>{start}</start><end>{end}</end><in>{in_f}</in><out>{out_f}</out>\
-                 {s_file}</clipitem>",
-                n = i + 1,
-                fname = xml_escape(&s_name),
-                start = record,
-                end = record + dur,
-            ));
+            // Clamp to the screen file's own length: importers reject
+            // source ranges past a clip's media EOF.
+            let s_total = to_frame(scr.duration, fps);
+            let s_out = out_f.min(s_total);
+            if in_f < s_total {
+                screen_items.push_str(&format!(
+                    "<clipitem id=\"clipitem-s{n}\"><name>{fname}</name>\
+                     <rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>\
+                     <start>{start}</start><end>{end}</end><in>{in_f}</in><out>{s_out}</out>\
+                     {s_file}</clipitem>",
+                    n = i + 1,
+                    fname = xml_escape(&s_name),
+                    start = record,
+                    end = record + (s_out - in_f),
+                ));
+            }
         }
         record += dur;
     }

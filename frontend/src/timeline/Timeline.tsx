@@ -107,6 +107,23 @@ export function Timeline({ projectId }: { projectId: string }) {
   const durationRef = useRef(duration);
   durationRef.current = duration;
 
+  // --- follow-scroll: while playing, keep the playhead in view (zoomed-in
+  // timelines otherwise play the line straight out of the viewport) --------
+  useEffect(() => {
+    const unsub = viewStore.subscribe(() => {
+      const v = viewStore.state;
+      if (!v.playing) return;
+      const w = sizeRef.current.w;
+      if (w <= 0 || v.zoom <= 0) return;
+      const map = buildTimeMap(clipsRef.current, v.showCuts, durationRef.current);
+      const px = (map.toDisplay(v.playhead) - v.scrollX) * v.zoom;
+      if (px > w * 0.92 || px < -1) {
+        setScrollX(Math.max(0, map.toDisplay(v.playhead) - (w * 0.1) / v.zoom));
+      }
+    });
+    return unsub;
+  }, []);
+
   // --- draw loop: redraw via rAF whenever view state or data changes -------
   useEffect(() => {
     const canvas = canvasRef.current;

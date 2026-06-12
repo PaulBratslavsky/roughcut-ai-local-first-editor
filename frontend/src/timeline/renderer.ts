@@ -178,6 +178,7 @@ const DARK_COLORS = {
   wave: "#d2d5da",
   waveDim: "#4a4d55",
   playhead: "#ffffff",
+  playheadText: "#15171a",
   selected: "#ffffff",
   handle: "#ffffff",
 };
@@ -196,6 +197,7 @@ const LIGHT_COLORS: typeof DARK_COLORS = {
   wave: "#3a3e46",
   waveDim: "#b4b8c0",
   playhead: "#15171a",
+  playheadText: "#ffffff",
   selected: "#15171a",
   handle: "#15171a",
 };
@@ -407,5 +409,19 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
     ctx.lineTo(px, 11);
     ctx.closePath();
     ctx.fill();
+    // Timecode chip: at fit-zoom on long footage the line crawls less than
+    // a pixel per second — the running digits are what makes playback
+    // motion legible.
+    const t = Math.max(0, s.playhead);
+    const tc = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+    ctx.font = "10px ui-monospace, monospace";
+    const tw = ctx.measureText(tc).width + 8;
+    const chipX = Math.min(Math.max(px - tw / 2, 2), width - tw - 2);
+    ctx.fillStyle = theme().playhead;
+    ctx.fillRect(chipX, 12, tw, 14);
+    ctx.fillStyle = theme().playheadText;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(tc, chipX + 4, 19);
   }
 }

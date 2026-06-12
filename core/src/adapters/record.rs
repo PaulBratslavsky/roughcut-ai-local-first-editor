@@ -171,6 +171,9 @@ struct Take {
 struct Session {
     /// None while paused between takes.
     child: Option<Child>,
+    /// A pause/stop is finalizing the current take (child taken, await in
+    /// flight) — resume/stop must wait instead of interleaving.
+    transitioning: bool,
     started: std::time::Instant,
     /// Wall seconds accumulated in finished takes.
     finished_s: f64,
@@ -492,6 +495,7 @@ pub async fn start_capture_full(
     let primary = current.primary.to_string_lossy().into_owned();
     *active().lock().unwrap() = Some(Session {
         child: Some(child),
+        transitioning: false,
         started: std::time::Instant::now(),
         finished_s: 0.0,
         takes: vec![],
@@ -526,20 +530,33 @@ pub async fn pause() -> Result<RecordingStatus> {
         let session = guard
             .as_mut()
             .ok_or_else(|| CoreError::InvalidArg("no recording is running".into()))?;
+        if session.transitioning {
+            return Err(CoreError::InvalidArg("a pause/stop is already in flight".into()));
+        }
         let child = session
             .child
             .take()
             .ok_or_else(|| CoreError::InvalidArg("already paused".into()))?;
+        session.transitioning = true;
         (child, session.started.elapsed().as_secs_f64())
     };
     let result = finalize_take(child).await;
     let mut guard = active().lock().unwrap();
     if let Some(session) = guard.as_mut() {
         session.finished_s += elapsed;
-        let take = session.current.clone();
+        let mut take = session.current.clone();
+        // A take whose screen output never materialized (TCC denied, device
+        // gone) degrades to camera-only instead of poisoning the final
+        // screen concat.
+        if let Some(scr) = &take.screen {
+            if !scr.is_file() {
+                take.screen = None;
+            }
+        }
         if result.is_ok() && take.primary.is_file() {
             session.takes.push(take);
         }
+        session.transitioning = false;
     }
     result?;
     drop(guard);
@@ -553,6 +570,9 @@ pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
         let session = guard
             .as_ref()
             .ok_or_else(|| CoreError::InvalidArg("no recording session".into()))?;
+        if session.transitioning {
+            return Err(CoreError::InvalidArg("a pause/stop is still finalizing".into()));
+        }
         if session.child.is_some() {
             return Err(CoreError::InvalidArg("not paused".into()));
         }
@@ -618,15 +638,26 @@ pub fn status() -> RecordingStatus {
                 }
             }
             _ => {
-                let path = session.current.primary.to_string_lossy().into_owned();
-                *guard = None;
+                // Child died (disk full, device yanked, crash). Do NOT reap:
+                // finished takes are salvageable — present as paused so the
+                // user can resume (new take) or finish (stitch what exists).
+                session.child = None;
+                let mut take = session.current.clone();
+                if let Some(scr) = &take.screen {
+                    if !scr.is_file() {
+                        take.screen = None;
+                    }
+                }
+                if take.primary.is_file() {
+                    session.takes.push(take);
+                }
                 RecordingStatus {
                     recording: false,
-                    paused: false,
-                    take: 0,
+                    paused: true,
+                    take: session.takes.len() as u32,
                     elapsed_s: 0.0,
-                    total_s: 0.0,
-                    out_path: Some(path),
+                    total_s: session.finished_s,
+                    out_path: Some(session.current.primary.to_string_lossy().into_owned()),
                 }
             }
         },
@@ -641,10 +672,14 @@ pub async fn stop() -> Result<RecordingOutcome> {
     if !session_exists {
         return Err(CoreError::InvalidArg("no recording is running".into()));
     }
-    // Finalize the in-flight take (no-op when paused).
+    // Finalize the in-flight take (no-op when paused). A finalize failure
+    // must NOT abort: finished takes are still worth stitching.
     let recording = active().lock().unwrap().as_ref().map(|s| s.child.is_some()).unwrap_or(false);
+    let mut finalize_note: Option<String> = None;
     if recording {
-        pause().await?;
+        if let Err(e) = pause().await {
+            finalize_note = Some(e.to_string());
+        }
     }
     let (takes, base) = {
         let mut guard = active().lock().unwrap();
@@ -652,18 +687,24 @@ pub async fn stop() -> Result<RecordingOutcome> {
         (session.takes, session.base)
     };
     if takes.is_empty() {
-        return Err(CoreError::Other("capture produced no usable takes".into()));
+        return Err(CoreError::Other(match finalize_note {
+            Some(note) => format!("capture produced no usable takes ({note})"),
+            None => "capture produced no usable takes".into(),
+        }));
     }
     // Primary stream (always): concat normalizes fragmented takes too.
     let primaries: Vec<PathBuf> = takes.iter().map(|t| t.primary.clone()).collect();
     let out = recordings_dir().join(format!("{base}.mp4"));
     concat(&primaries, &out).await?;
-    // Screen stream (dual sessions).
+    // Screen stream (dual sessions). A screen-side failure degrades to a
+    // camera-only outcome — never discard a good primary over the overlay.
     let screens: Vec<PathBuf> = takes.iter().filter_map(|t| t.screen.clone()).collect();
     let screen_path = if screens.len() == takes.len() && !screens.is_empty() {
         let sout = recordings_dir().join(format!("{base}-screen.mp4"));
-        concat(&screens, &sout).await?;
-        Some(sout.to_string_lossy().into_owned())
+        match concat(&screens, &sout).await {
+            Ok(()) => Some(sout.to_string_lossy().into_owned()),
+            Err(_) => None,
+        }
     } else {
         None
     };
@@ -775,8 +816,10 @@ pub async fn combine_recordings(paths: &[String]) -> Result<String> {
         let out = Command::new(&ffprobe)
             .args([
                 "-v", "quiet",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height",
+                // ALL streams: a video-only file must not pass as a match
+                // for camera takes (stream-copy concat would desync), and
+                // channel counts must agree too.
+                "-show_entries", "stream=codec_type,codec_name,width,height,channels",
                 "-of", "csv=p=0",
                 p,
             ])
