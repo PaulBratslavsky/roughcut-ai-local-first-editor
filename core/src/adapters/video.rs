@@ -444,7 +444,7 @@ fn needs_faststart(path: &str) -> bool {
 pub fn asset_cache_key(media: &Media) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(b"v2:"); // peaks normalization — regenerate older assets
+    hasher.update(b"v3:"); // peaks floor 8 // peaks normalization — regenerate older assets
     hasher.update(media.file_path.as_bytes());
     if let Ok(meta) = std::fs::metadata(&media.file_path) {
         hasher.update(meta.len().to_le_bytes());
@@ -477,10 +477,11 @@ pub fn compute_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) 
         peaks.push(((max * 255) / 32768).min(255) as u8);
     }
     // Normalize toward the file's own loudest moment: a quiet laptop mic
-    // otherwise renders as a flat line. Floor of 24 so genuine silence
-    // doesn't get amplified into a fake waveform.
+    // otherwise renders as a flat line. Floor of 8 (~3%) — whisper can
+    // transcribe speech well below the old floor of 24, and a transcribable
+    // take deserves a visible waveform; true silence stays flat.
     let loudest = peaks.iter().copied().max().unwrap_or(0) as u32;
-    if loudest >= 24 && loudest < 240 {
+    if loudest >= 8 && loudest < 240 {
         let scale_num = 240u32;
         for v in &mut peaks {
             *v = ((*v as u32 * scale_num) / loudest).min(255) as u8;

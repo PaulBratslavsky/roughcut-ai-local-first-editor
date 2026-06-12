@@ -79,7 +79,8 @@ function MicMeter({ micName }: { micName?: string }) {
             const d = (v - 128) / 128;
             sum += d * d;
           }
-          setLevel(Math.min(1, Math.sqrt(sum / buf.length) * 4));
+          const rms = Math.sqrt(sum / buf.length);
+          setLevel(Math.min(1, Math.pow(rms * 6, 0.5)));
           raf = requestAnimationFrame(tick);
         };
         tick();
