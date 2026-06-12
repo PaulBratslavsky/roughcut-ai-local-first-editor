@@ -340,6 +340,11 @@ async fn spawn_take(
     args.extend([
         "-map".into(), "0:v".into(),
         "-map".into(), "0:a".into(),
+        // Mic gain: macOS default input levels are WHISPER-quiet (live
+        // capture measured 2.4% peak speech). Dynamic normalization lifts
+        // voice to a usable level at record time, like every screen
+        // recorder's mic boost.
+        "-af".into(), "dynaudnorm=f=300:g=11".into(),
         "-c:v".into(), "h264_videotoolbox".into(),
         "-b:v".into(), "6M".into(),
         "-pix_fmt".into(), "yuv420p".into(),
