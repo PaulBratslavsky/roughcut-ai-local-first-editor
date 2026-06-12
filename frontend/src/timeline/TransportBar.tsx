@@ -1,7 +1,9 @@
 // Transport row above the canvas timeline: play/pause, speed, show/skip cuts
 // toggles, split-at-playhead, zoom buttons.
 
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
+import { audibleAnalyser, onAudibleChange } from "../playback/meter";
 import { useSplitClip, useTimeline } from "../ipc/queries";
 import {
   setPlaybackRate,
@@ -34,6 +36,46 @@ function ToggleSwitch({
       </button>
       <span className="switch-label">{label}</span>
     </label>
+  );
+}
+
+/** Live output level while playing — "is sound actually coming out". */
+function PlaybackMeter() {
+  const playing = useStore(viewStore, (s) => s.playing);
+  const [level, setLevel] = useState(0);
+  const rafRef = useRef(0);
+  useEffect(() => {
+    if (!playing) {
+      setLevel(0);
+      return;
+    }
+    let analyser = audibleAnalyser();
+    const off = onAudibleChange(() => {
+      analyser = audibleAnalyser();
+    });
+    const buf = new Uint8Array(512);
+    const tick = () => {
+      if (analyser) {
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) {
+          const d = (v - 128) / 128;
+          sum += d * d;
+        }
+        setLevel(Math.min(1, Math.sqrt(sum / buf.length) * 4));
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => {
+      off();
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [playing]);
+  return (
+    <span className="mic-meter playback-meter" title="playback level">
+      <span className="mic-meter-fill" style={{ width: `${Math.round(level * 100)}%` }} />
+    </span>
   );
 }
 
@@ -71,6 +113,7 @@ export function TransportBar({ projectId }: { projectId: string }) {
             </svg>
           )}
         </button>
+        <PlaybackMeter />
         <select
           className="select rate-select"
           value={String(rate)}

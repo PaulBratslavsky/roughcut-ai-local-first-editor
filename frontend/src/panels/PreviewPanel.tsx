@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { isTauri, mediaSrc } from "../ipc/api";
 import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
+import { registerAudibleElement } from "../playback/meter";
 import { usePlaybackEngine } from "../playback/engine";
 import { excludedRanges, excludedTotal, toEditedTime, type Range } from "../playback/time";
 import {
@@ -53,6 +54,12 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   // re-synced whenever drift exceeds 50ms. Offset 0 = no follower at all.
   const audioOffset = project?.audio_offset_s ?? 0;
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    registerAudibleElement(
+      audioOffset !== 0 ? audioRef.current : videoRef.current,
+    );
+    return () => registerAudibleElement(null);
+  }, [audioOffset, src]);
   useEffect(() => {
     const video = videoRef.current;
     const audio = audioRef.current;

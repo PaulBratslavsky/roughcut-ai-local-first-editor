@@ -1621,7 +1621,8 @@ input, select { font: inherit; }
 .recorder-controls {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px 14px;
+  flex-wrap: wrap;
   justify-content: center;
   min-height: 44px;
 }
@@ -1632,7 +1633,7 @@ input, select { font: inherit; }
   font-size: 12px;
   color: var(--fg-dim);
 }
-.recorder-field select { max-width: 220px; }
+.recorder-field select { max-width: 180px; }
 .recorder-go { min-width: 130px; }
 .recorder-stop { min-width: 130px; background: #e5484d; border-color: #e5484d; }
 .recorder-hint, .recorder-note {
@@ -1723,7 +1724,8 @@ input, select { font: inherit; }
   margin-top: 4px;
 }
 
-.recorder-source { display: inline-flex; gap: 2px; border: 1px solid var(--line); }
+.recorder-source { display: inline-flex; gap: 2px; border: 1px solid var(--line); flex-shrink: 0; }
+.recorder-source .tab { white-space: nowrap; padding: 4px 10px; }
 .recorder-screen-ph {
   display: flex;
   flex-direction: column;
@@ -1758,3 +1760,5 @@ input, select { font: inherit; }
   background: var(--fg);
   transition: width 60ms linear;
 }
+
+.playback-meter { width: 52px; }
