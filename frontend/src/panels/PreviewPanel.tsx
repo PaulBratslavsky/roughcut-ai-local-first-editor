@@ -54,6 +54,71 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   // re-synced whenever drift exceeds 50ms. Offset 0 = no follower at all.
   const audioOffset = project?.audio_offset_s ?? 0;
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Dual-capture compositing: the screen rides as a synced, muted follower
+  // layer; the camera (the MASTER element — clock + audio) floats as the
+  // PiP. All CSS — sources untouched, layout switchable any time.
+  const layout = project?.layout ?? { mode: "pip", shape: "rounded", corner: "br", size: 0.25 };
+  const screenSrc = useMemo(
+    () => (project?.screen_media && isTauri ? mediaSrc(project.screen_media.file_path) : null),
+    [project?.screen_media],
+  );
+  const compositing = !!screenSrc && layout.mode !== "camera";
+  const screenRef = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    const master = videoRef.current;
+    const screen = screenRef.current;
+    if (!master || !screen || !compositing) return;
+    const resync = () => {
+      if (Math.abs(screen.currentTime - master.currentTime) > 0.08) {
+        screen.currentTime = master.currentTime;
+      }
+      screen.playbackRate = master.playbackRate;
+    };
+    const onPlay = () => {
+      resync();
+      void screen.play().catch(() => {});
+    };
+    const onPause = () => screen.pause();
+    master.addEventListener("play", onPlay);
+    master.addEventListener("pause", onPause);
+    master.addEventListener("seeked", resync);
+    master.addEventListener("timeupdate", resync);
+    master.addEventListener("ratechange", resync);
+    if (!master.paused) onPlay();
+    return () => {
+      master.removeEventListener("play", onPlay);
+      master.removeEventListener("pause", onPause);
+      master.removeEventListener("seeked", resync);
+      master.removeEventListener("timeupdate", resync);
+      master.removeEventListener("ratechange", resync);
+      screen.pause();
+    };
+  }, [compositing, screenSrc, src]);
+
+  const pipStyle = useMemo(() => {
+    if (!compositing) return undefined;
+    if (layout.mode === "screen") {
+      // Keep the master mounted (clock + audio) but invisible.
+      return { position: "absolute" as const, width: 1, height: 1, opacity: 0, pointerEvents: "none" as const };
+    }
+    const inset = "3%";
+    const pos: Record<string, string> = {};
+    if (layout.corner.includes("t")) pos.top = inset;
+    else pos.bottom = inset;
+    if (layout.corner.includes("l")) pos.left = inset;
+    else pos.right = inset;
+    return {
+      position: "absolute" as const,
+      width: `${Math.round(layout.size * 100)}%`,
+      ...(layout.shape === "round"
+        ? { aspectRatio: "1 / 1", borderRadius: "50%", objectFit: "cover" as const }
+        : { borderRadius: "6px" }),
+      ...pos,
+      zIndex: 2,
+      boxShadow: "0 2px 14px rgba(0,0,0,0.55)",
+    };
+  }, [compositing, layout]);
   useEffect(() => {
     registerAudibleElement(
       audioOffset !== 0 ? audioRef.current : videoRef.current,
@@ -93,8 +158,8 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   // The frame takes the media's real shape (vertical shorts get a tall,
   // centered frame instead of drowning in a 16:9 letterbox), capped so the
   // tools below stay reachable.
-  const w = project?.media?.width || 16;
-  const h = project?.media?.height || 9;
+  const w = (compositing ? project?.screen_media?.width : project?.media?.width) || 16;
+  const h = (compositing ? project?.screen_media?.height : project?.media?.height) || 9;
   const frameStyle = {
     aspectRatio: `${w} / ${h}`,
     width: `min(100%, calc(46vh * ${(w / h).toFixed(4)}))`,
@@ -121,11 +186,22 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
       {audioOffset !== 0 && src && <audio ref={audioRef} src={src} preload="auto" />}
       <div className="preview-stage" style={collapsed ? { display: "none" } : undefined}>
       <div className="preview-frame" style={frameStyle} onClick={() => togglePlaying()}>
+        {compositing && screenSrc && (
+          <video
+            key={screenSrc}
+            ref={screenRef}
+            src={screenSrc}
+            className="screen-layer"
+            muted
+            playsInline
+          />
+        )}
         {src ? (
           <video
             key={src}
             ref={videoRef}
             src={src}
+            style={pipStyle}
             className="preview-video"
             onTimeUpdate={onTimeUpdate}
             onEnded={() => setPlaying(false)}

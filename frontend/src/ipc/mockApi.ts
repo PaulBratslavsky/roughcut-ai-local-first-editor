@@ -398,6 +398,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       deleted_at: null,
       audio_offset_s: 0,
       screen_media: null,
+      layout: { mode: "pip", shape: "rounded", corner: "br", size: 0.25 },
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -776,6 +777,17 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       method: "heuristic",
       notes: "(browser mock) longest segments first",
     };
+  },
+
+  set_layout(args): unknown {
+    const p = requireProject(args.project_id);
+    p.layout = {
+      mode: String(args.mode ?? p.layout.mode),
+      shape: String(args.shape ?? p.layout.shape),
+      corner: String(args.corner ?? p.layout.corner),
+      size: Number(args.size ?? p.layout.size),
+    };
+    return clone(p.layout);
   },
 
   set_audio_offset(args): unknown {

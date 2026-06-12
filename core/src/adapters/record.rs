@@ -784,9 +784,9 @@ pub async fn combine_recordings(paths: &[String]) -> Result<String> {
 pub fn delete_recording(path: &str) -> Result<()> {
     let target = PathBuf::from(path);
     let dir = recordings_dir().canonicalize().unwrap_or_else(|_| recordings_dir());
-    let canonical = target
-        .canonicalize()
-        .map_err(|_| CoreError::NotFound(format!("file {path}")))?;
+    let Ok(canonical) = target.canonicalize() else {
+        return Ok(()); // already gone — deletion is idempotent
+    };
     if !canonical.starts_with(&dir) {
         return Err(CoreError::InvalidArg("not a RoughCut recording".into()));
     }

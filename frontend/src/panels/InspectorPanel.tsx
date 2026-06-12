@@ -47,6 +47,76 @@ function PaddingSlider({
 /** "Make it N minutes" as a deterministic control: type a target, see the
  *  plan ("cut 38 segments → 19:58"), Apply lands it as ONE undoable action —
  *  the same plan_duration_cut engine the chat and MCP clients use. */
+function LayoutSection({ projectId }: { projectId: string }) {
+  const project = useProject(projectId);
+  const queryClient = useQueryClient();
+  const layout = project.data?.layout;
+  if (!project.data?.screen_media || !layout) return null;
+  const apply = async (patch: Partial<typeof layout>) => {
+    await callTool("set_layout", { project_id: projectId, ...layout, ...patch });
+    await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+  };
+  return (
+    <section className="inspector-section">
+      <h3>Layout</h3>
+      <p className="section-note">Screen + camera compositing — switch any time, nothing is baked.</p>
+      <div className="layout-row">
+        {(["pip", "camera", "screen"] as const).map((m) => (
+          <button
+            key={m}
+            className={`chip-btn${layout.mode === m ? " active" : ""}`}
+            onClick={() => void apply({ mode: m })}
+          >
+            {m === "pip" ? "screen + face" : m === "camera" ? "camera only" : "screen only"}
+          </button>
+        ))}
+      </div>
+      {layout.mode === "pip" && (
+        <>
+          <div className="layout-row">
+            <span className="layout-label">face position</span>
+            <span className="corner-grid">
+              {(["tl", "tr", "bl", "br"] as const).map((c) => (
+                <button
+                  key={c}
+                  className={`corner-cell${layout.corner === c ? " active" : ""}`}
+                  title={c}
+                  onClick={() => void apply({ corner: c })}
+                />
+              ))}
+            </span>
+            <span className="layout-label">shape</span>
+            <button
+              className={`chip-btn${layout.shape === "round" ? " active" : ""}`}
+              onClick={() => void apply({ shape: "round" })}
+            >
+              ◯ round
+            </button>
+            <button
+              className={`chip-btn${layout.shape === "rounded" ? " active" : ""}`}
+              onClick={() => void apply({ shape: "rounded" })}
+            >
+              ▢ rounded
+            </button>
+          </div>
+          <div className="layout-row">
+            <span className="layout-label">size</span>
+            <input
+              type="range"
+              min={10}
+              max={45}
+              step={1}
+              defaultValue={Math.round(layout.size * 100)}
+              onMouseUp={(e) => void apply({ size: Number((e.target as HTMLInputElement).value) / 100 })}
+              onTouchEnd={(e) => void apply({ size: Number((e.target as HTMLInputElement).value) / 100 })}
+            />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function AudioSyncSection({ projectId }: { projectId: string }) {
   const project = useProject(projectId);
   const queryClient = useQueryClient();
@@ -282,6 +352,7 @@ export function InspectorPanel({ projectId }: { projectId: string }) {
 
       <TargetLengthSection projectId={projectId} />
       <AudioSyncSection projectId={projectId} />
+      <LayoutSection projectId={projectId} />
 
       <div className="inspector-divider" />
 

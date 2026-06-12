@@ -24,7 +24,7 @@ import {
   type CaptureDevices,
   type RecordingFile,
 } from "../ipc/api";
-import { mediaSrc } from "../ipc/api";
+import { callTool, mediaSrc } from "../ipc/api";
 import { ingestFile } from "../ingest";
 import { setProjectId, setScreen } from "../state/viewStore";
 
@@ -148,6 +148,21 @@ function RecordingsLibrary({
   const refresh = () => void listRecordings().then(setFiles).catch(() => setFiles([]));
   useEffect(refresh, []);
 
+  const removeMany = async () => {
+    const n = picked.size;
+    const sure = await ask(
+      `Delete ${n} recording${n === 1 ? "" : "s"} permanently? This deletes the video files themselves.`,
+      { title: "Delete recordings", kind: "warning" },
+    );
+    if (!sure) return;
+    for (const path of picked) {
+      await deleteRecording(path).catch(() => {});
+      if (previewing === path) onPreview(null);
+    }
+    setPicked(new Set());
+    refresh();
+  };
+
   const remove = async (f: RecordingFile) => {
     const sure = await ask(`Delete "${f.name}" permanently? This is the video file itself.`, {
       title: "Delete recording",
@@ -197,11 +212,18 @@ function RecordingsLibrary({
     <aside className="rec-library">
       <div className="rec-library-head">
         <span className="rec-library-title">previous recordings</span>
-        {picked.size >= 2 && (
-          <button className="primary-btn" disabled={busy} onClick={() => void combine()}>
-            {busy ? "stitching…" : `stitch ${picked.size} & import`}
-          </button>
-        )}
+        <span className="rec-library-actions">
+          {picked.size >= 2 && (
+            <button className="primary-btn" disabled={busy} onClick={() => void combine()}>
+              {busy ? "stitching…" : `stitch ${picked.size} & import`}
+            </button>
+          )}
+          {picked.size >= 1 && (
+            <button className="ghost-btn rec-bulk-delete" disabled={busy} onClick={() => void removeMany()}>
+              ✕ delete {picked.size}
+            </button>
+          )}
+        </span>
       </div>
       <div className="rec-library-list">
         {files.map((f) => (
@@ -254,6 +276,11 @@ export function RecorderPanel() {
   const [previewNote, setPreviewNote] = useState<string | null>(null);
   const [screenPerm, setScreenPerm] = useState<boolean | null>(null);
   const [previewFile, setPreviewFile] = useState<RecordingFile | null>(null);
+  // PiP layout chosen at record time — saved onto the project after a dual
+  // take so the editor composites the same way you framed it.
+  const [pipCorner, setPipCorner] = useState<"tl" | "tr" | "bl" | "br">("br");
+  const [pipShape, setPipShape] = useState<"rounded" | "round">("rounded");
+  const [pipSize, setPipSize] = useState(25);
   const [permHint, setPermHint] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -435,7 +462,17 @@ export function RecorderPanel() {
         onCreated: (id) => {
           createdId = id;
           if (screenPath) {
-            void attachScreenMedia(id, screenPath).catch(() => {});
+            void attachScreenMedia(id, screenPath)
+              .then(() =>
+                callTool("set_layout", {
+                  project_id: id,
+                  mode: "pip",
+                  corner: pipCorner,
+                  shape: pipShape,
+                  size: pipSize / 100,
+                }),
+              )
+              .catch(() => {});
           }
         },
       });
@@ -459,7 +496,7 @@ export function RecorderPanel() {
           void queryClient.invalidateQueries();
         });
     },
-    [queryClient],
+    [queryClient, pipCorner, pipShape, pipSize],
   );
 
   const finish = useCallback(async () => {
@@ -529,7 +566,48 @@ export function RecorderPanel() {
           </button>
         </div>
       )}
-      <div className="recorder-stage">
+      <div className={`recorder-stage${source === "both" && !previewFile ? " dual" : ""}`}>
+        {source === "both" && !previewFile && (
+          <>
+            <div className="screen-backdrop">
+              <span>
+                display {screen ?? "?"} records here (with cursor)
+              </span>
+            </div>
+            {(["tl", "tr", "bl", "br"] as const).map((c) => (
+              <button
+                key={c}
+                className={`corner-dot ${c}${pipCorner === c ? " active" : ""}`}
+                title={`dock face ${c}`}
+                onClick={() => setPipCorner(c)}
+              />
+            ))}
+            {phase === "setup" && (
+              <div className="stage-chips">
+                <button
+                  className={`chip-btn${pipShape === "round" ? " active" : ""}`}
+                  onClick={() => setPipShape("round")}
+                >
+                  ◯
+                </button>
+                <button
+                  className={`chip-btn${pipShape === "rounded" ? " active" : ""}`}
+                  onClick={() => setPipShape("rounded")}
+                >
+                  ▢
+                </button>
+                <input
+                  type="range"
+                  min={10}
+                  max={45}
+                  value={pipSize}
+                  onChange={(e) => setPipSize(Number(e.target.value))}
+                  title="face size"
+                />
+              </div>
+            )}
+          </>
+        )}
         {previewFile && phase === "setup" ? (
           <video
             key={previewFile.path}
@@ -548,7 +626,24 @@ export function RecorderPanel() {
             </span>
           </div>
         ) : (
-          <video ref={videoRef} muted playsInline className="recorder-preview" />
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            className={`recorder-preview${source === "both" ? " as-pip" : ""}`}
+            style={
+              source === "both"
+                ? {
+                    width: `${pipSize}%`,
+                    ...(pipCorner.includes("t") ? { top: "4%" } : { bottom: "4%" }),
+                    ...(pipCorner.includes("l") ? { left: "3%" } : { right: "3%" }),
+                    ...(pipShape === "round"
+                      ? { aspectRatio: "1 / 1", borderRadius: "50%", objectFit: "cover" as const }
+                      : { borderRadius: "8px" }),
+                  }
+                : undefined
+            }
+          />
         )}
         {phase === "countdown" && <div className="recorder-countdown">{count}</div>}
         {previewNote && <div className="recorder-preview-note">{previewNote}</div>}
@@ -577,25 +672,37 @@ export function RecorderPanel() {
           <>
             <div className="recorder-source">
               <button
-                className={`tab${source === "camera" ? " active" : ""}`}
+                className={`tab icon-tab${source === "camera" ? " active" : ""}`}
                 onClick={() => setSource("camera")}
+                title="Camera only"
               >
-                camera
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <rect x="2" y="6" width="13" height="12" rx="2" />
+                  <path d="M15 10.5 22 7v10l-7-3.5z" />
+                </svg>
               </button>
               <button
-                className={`tab${source === "screen" ? " active" : ""}`}
+                className={`tab icon-tab${source === "screen" ? " active" : ""}`}
                 onClick={() => setSource("screen")}
                 disabled={devices.screens.length === 0}
+                title="Screen only"
               >
-                screen
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <rect x="2" y="4" width="20" height="13" rx="1.5" />
+                  <path d="M9 21h6M12 17v4" />
+                </svg>
               </button>
               <button
-                className={`tab${source === "both" ? " active" : ""}`}
+                className={`tab icon-tab${source === "both" ? " active" : ""}`}
                 onClick={() => setSource("both")}
                 disabled={devices.screens.length === 0 || devices.cameras.length === 0}
-                title="presentation mode: camera AND screen, two synced files"
+                title="Screen + camera (presentation): two synced files, layout adjustable after"
               >
-                screen + camera
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <rect x="2" y="4" width="20" height="13" rx="1.5" />
+                  <circle cx="17.5" cy="13" r="3" fill="currentColor" stroke="none" />
+                  <path d="M9 21h6M12 17v4" />
+                </svg>
               </button>
             </div>
             {source !== "screen" && (

@@ -608,10 +608,36 @@ pub struct Project {
     #[serde(default)]
     pub audio_offset_s: f64,
     /// Dual-capture companion: the screen recording that runs alongside the
-    /// primary (camera) media on the same clock. Layout (M4) composites the
-    /// two at preview/export; the timeline + transcript stay single-source.
+    /// primary (camera) media on the same clock. `layout` composites the two
+    /// at preview/export; the timeline + transcript stay single-source.
     #[serde(default)]
     pub screen_media: Option<Media>,
+    /// How camera and screen compose (only meaningful with screen_media).
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+/// Presentation layout: which stream fills the frame and where the face
+/// sits. Metadata — compositing happens at preview and export, never in
+/// the source files.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Layout {
+    /// "pip" (screen full, camera floating) | "camera" | "screen"
+    pub mode: String,
+    /// "rounded" (square, rounded corners) | "round" (circle/oval)
+    pub shape: String,
+    /// "tl" | "tr" | "bl" | "br"
+    pub corner: String,
+    /// Camera width as a fraction of the frame width (0.10..=0.45).
+    pub size: f64,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self { mode: "pip".into(), shape: "rounded".into(), corner: "br".into(), size: 0.25 }
+    }
 }
 
 impl Project {
@@ -630,6 +656,7 @@ impl Project {
             deleted_at: None,
             audio_offset_s: 0.0,
             screen_media: None,
+            layout: Layout::default(),
         }
     }
 

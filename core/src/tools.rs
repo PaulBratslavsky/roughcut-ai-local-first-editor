@@ -367,6 +367,34 @@ handler!(h_read_transcript, |e, a, _s| {
     })
 });
 
+handler!(h_set_layout, |e, a, _s| {
+    let pid = arg_uuid(a, "project_id")?;
+    let mut layout = e.open_project(pid)?.layout;
+    if let Some(v) = a["mode"].as_str() {
+        if !["pip", "camera", "screen"].contains(&v) {
+            return Err(CoreError::InvalidArg("mode: pip | camera | screen".into()));
+        }
+        layout.mode = v.into();
+    }
+    if let Some(v) = a["shape"].as_str() {
+        if !["rounded", "round"].contains(&v) {
+            return Err(CoreError::InvalidArg("shape: rounded | round".into()));
+        }
+        layout.shape = v.into();
+    }
+    if let Some(v) = a["corner"].as_str() {
+        if !["tl", "tr", "bl", "br"].contains(&v) {
+            return Err(CoreError::InvalidArg("corner: tl | tr | bl | br".into()));
+        }
+        layout.corner = v.into();
+    }
+    if let Some(v) = a["size"].as_f64() {
+        layout.size = v.clamp(0.10, 0.45);
+    }
+    e.set_layout(pid, layout.clone())?;
+    Ok(serde_json::to_value(layout)?)
+});
+
 handler!(h_set_audio_offset, |e, a, _s| {
     let pid = arg_uuid(a, "project_id")?;
     let offset = a["offset_s"].as_f64().unwrap_or(0.0).clamp(-2.0, 2.0);
@@ -705,6 +733,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
+    tool!("set_layout", "Presentation layout for dual-capture projects (screen_media): mode pip|camera|screen, shape rounded|round, corner tl|tr|bl|br, size 0.10-0.45 (camera width fraction). Composited at preview/export; source files untouched.",
+        || obj(json!({"project_id": pid_schema(), "mode": {"type": "string"}, "shape": {"type": "string"}, "corner": {"type": "string"}, "size": {"type": "number"}}), &["project_id"]),
+        agent: false, meta: false, h_set_layout),
     tool!("set_audio_offset", "A/V sync nudge, seconds (clamped to ±2). POSITIVE delays audio — the fix when you hear words before lips move (mics start before cameras warm up). Applied non-destructively at preview and export; not an undoable edit.",
         || obj(json!({"project_id": pid_schema(), "offset_s": {"type": "number"}}), &["project_id", "offset_s"]),
         agent: false, meta: false, h_set_audio_offset),

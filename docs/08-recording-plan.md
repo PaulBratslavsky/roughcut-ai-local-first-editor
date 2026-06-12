@@ -105,7 +105,7 @@ shows the camera full-frame (layout machinery not built yet); the editor
 works exactly as today because cuts ride the shared clock.
 → Value: presentation recording with post-hoc framing safety.
 
-**M4 — layout presets.**
+**M4 — layout presets.** ✅ SHIPPED (preview side; export bake = M5)
 The `LAYOUT` card (Tools) + recorder presets: full camera / full screen /
 pip bottom-right; oval and rounded-square shapes; S/M/L. Live in preview via
 CSS masking; stored as an undoable EditOp.
