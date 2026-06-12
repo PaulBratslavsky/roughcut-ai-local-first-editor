@@ -1775,3 +1775,33 @@ input, select { font: inherit; }
   font-size: 12px;
 }
 .perm-hint { color: var(--fg-dim); }
+
+/* recorder file preview (confirm-before-import) */
+.preview-confirm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-size: 12px;
+}
+.preview-confirm-name {
+  color: var(--fg-dim);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview { transform: none; } /* never mirror a file */
+.rec-library-name.as-btn {
+  background: none;
+  border: none;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  flex: 1;
+  min-width: 0;
+}
+.rec-library-name.as-btn:hover { text-decoration: underline; }
+.rec-library-name.as-btn.current { text-decoration: underline; font-weight: 600; }

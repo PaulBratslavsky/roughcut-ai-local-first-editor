@@ -24,6 +24,7 @@ import {
   type CaptureDevices,
   type RecordingFile,
 } from "../ipc/api";
+import { mediaSrc } from "../ipc/api";
 import { ingestFile } from "../ingest";
 import { setProjectId, setScreen } from "../state/viewStore";
 
@@ -109,7 +110,15 @@ function fmtDur(s: number): string {
 /** The recordings library (~/Movies/RoughCut): import one as a project, or
  *  select several takes and stitch them into one — Camtasia-bin style, but
  *  the result stays a single source the transcript editor can edit. */
-function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string) => void }) {
+function RecordingsLibrary({
+  onIngest,
+  onPreview,
+  previewing,
+}: {
+  onIngest: (name: string, path: string) => void;
+  onPreview: (f: RecordingFile | null) => void;
+  previewing: string | null;
+}) {
   const [files, setFiles] = useState<RecordingFile[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -126,6 +135,7 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
     if (!sure) return;
     try {
       await deleteRecording(f.path);
+      if (previewing === f.path) onPreview(null);
       setPicked((old) => {
         const next = new Set(old);
         next.delete(f.path);
@@ -175,20 +185,23 @@ function RecordingsLibrary({ onIngest }: { onIngest: (name: string, path: string
       <div className="rec-library-list">
         {files.map((f) => (
           <div key={f.path} className="rec-library-row">
-            <label className="rec-library-pick">
+            <label className="rec-library-pick" onClick={(e) => e.stopPropagation()}>
               <input
                 type="checkbox"
                 checked={picked.has(f.path)}
                 onChange={() => toggle(f.path)}
               />
-              <span className="rec-library-name">{f.name}</span>
             </label>
+            <button
+              className={`rec-library-name as-btn${previewing === f.path ? " current" : ""}`}
+              title="Preview in the player"
+              onClick={() => onPreview(f)}
+            >
+              {f.name}
+            </button>
             <span className="rec-library-meta">
               {fmtDur(f.duration_s)} · {f.size_mb.toFixed(0)} MB
             </span>
-            <button className="ghost-btn" disabled={busy} onClick={() => onIngest(f.name, f.path)}>
-              import
-            </button>
             <button
               className="icon-btn rec-delete"
               title="Delete this recording file"
@@ -219,6 +232,7 @@ export function RecorderPanel() {
   const [doneTakesS, setDoneTakesS] = useState(0);
   const [previewNote, setPreviewNote] = useState<string | null>(null);
   const [screenPerm, setScreenPerm] = useState<boolean | null>(null);
+  const [previewFile, setPreviewFile] = useState<RecordingFile | null>(null);
   const [permHint, setPermHint] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -476,8 +490,35 @@ export function RecorderPanel() {
 
       <div className="recorder-body">
       <div className="recorder-main">
+      {previewFile && phase === "setup" && (
+        <div className="preview-confirm-bar">
+          <span className="preview-confirm-name">previewing: {previewFile.name}</span>
+          <button
+            className="primary-btn"
+            onClick={() => {
+              const f = previewFile;
+              setPreviewFile(null);
+              if (f) ingestRecording(f.name, f.path);
+            }}
+          >
+            ↓ import as project
+          </button>
+          <button className="ghost-btn" onClick={() => setPreviewFile(null)}>
+            ✕ back to camera
+          </button>
+        </div>
+      )}
       <div className="recorder-stage">
-        {source === "screen" && phase !== "recording" && phase !== "paused" ? (
+        {previewFile && phase === "setup" ? (
+          <video
+            key={previewFile.path}
+            src={mediaSrc(previewFile.path) ?? undefined}
+            className="recorder-preview file-preview"
+            controls
+            autoPlay
+            playsInline
+          />
+        ) : source === "screen" && phase !== "recording" && phase !== "paused" ? (
           <div className="recorder-screen-ph">
             <span>display {screen ?? "?"} will be captured (cursor included)</span>
             <span className="recorder-screen-sub">
@@ -608,7 +649,16 @@ export function RecorderPanel() {
         ~/Movies/RoughCut and open as a project automatically.
       </p>
       </div>
-      {phase === "setup" && <RecordingsLibrary onIngest={ingestRecording} />}
+      {phase === "setup" && (
+        <RecordingsLibrary
+          onIngest={(name, path) => {
+            setPreviewFile(null);
+            ingestRecording(name, path);
+          }}
+          onPreview={setPreviewFile}
+          previewing={previewFile?.path ?? null}
+        />
+      )}
       </div>
     </div>
   );
