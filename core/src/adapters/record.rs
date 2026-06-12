@@ -202,6 +202,29 @@ fn active() -> &'static Mutex<Option<Session>> {
     A.get_or_init(Default::default)
 }
 
+/// Refuse to start a take with under 2 GB free — running out mid-take
+/// corrupts nothing (fragmented takes), but the user deserves the warning
+/// BEFORE the red light, not after.
+fn check_disk_space(dir: &std::path::Path) -> Result<()> {
+    let out = std::process::Command::new("df")
+        .args(["-Pk", &dir.to_string_lossy()])
+        .output();
+    let Ok(out) = out else { return Ok(()) }; // best effort
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(line) = text.lines().nth(1) else { return Ok(()) };
+    let Some(avail_kb) = line.split_whitespace().nth(3).and_then(|v| v.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+    let free_gb = avail_kb as f64 / 1_048_576.0;
+    if free_gb < 2.0 {
+        return Err(CoreError::Unavailable(format!(
+            "only {free_gb:.1} GB free on disk — free up space before recording              (a minute of capture is roughly 50-100 MB)"
+        )));
+    }
+    Ok(())
+}
+
 fn recordings_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Movies/RoughCut")
 }
@@ -451,6 +474,7 @@ pub async fn start_capture_full(
     }
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
+    check_disk_space(&dir)?;
     let kind = if screen_index.is_some() {
         "presentation"
     } else if is_screen {

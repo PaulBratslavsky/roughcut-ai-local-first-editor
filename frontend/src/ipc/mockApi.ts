@@ -415,7 +415,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
                 source_in: 0,
                 source_out: 30,
                 included: true,
-                origin: "rough_cut",
+                origin: "initial",
                 order: 0,
                 linked_segment_ids: [],
               },

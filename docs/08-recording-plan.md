@@ -111,12 +111,12 @@ pip bottom-right; oval and rounded-square shapes; S/M/L. Live in preview via
 CSS masking; stored as an undoable EditOp.
 → Value: the feature as pitched — switch framing after the fact.
 
-**M5 — export compositing.**
+**M5 — export compositing.** ✅ SHIPPED
 MP4 render bakes the layout (overlay + alpha mask); NLE exports carry both
 tracks; export-validation doc gains a dual-track fixture.
 → Value: the recording leaves the app correctly everywhere.
 
-**M6 — polish → v1.**
+**M6 — polish → v1.** ✅ SHIPPED (R shortcut, disk guard, meters, crash-safe takes; level meter landed early)
 Mic level meter, mirrored preview, disk-space guard, crash-safe `.part`
 recovery on relaunch, `R` shortcut, recording indicator, README/landing
 update.

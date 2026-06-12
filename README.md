@@ -110,7 +110,20 @@ batch of cuts in one `apply_edits` call, plan duration targets, and export.
 Destructive operations (export, delete) ask **you** for confirmation in the
 app. The full surface is documented in [`docs/tool-api.md`](docs/tool-api.md).
 
-### DaVinci Resolve (free version included)
+### Record in the app
+
+RoughCut records as well as edits: camera, screen, or both at once
+(presentation mode — two synced files, one ffmpeg process). Takes are
+crash-safe fragmented MP4; pause for a break and the takes stitch
+losslessly on finish. Dual recordings composite live — screen full-frame
+with your face as a round or rounded bubble in any corner, resizable,
+switchable AFTER recording (Tools ▸ Layout) because layout is metadata,
+never baked into the source. MP4 export bakes your layout; NLE exports
+carry camera and screen as separate tracks. Recordings live in
+`~/Movies/RoughCut` and double as a library: preview, import, stitch,
+or append onto an existing project from the Clips tab.
+
+## DaVinci Resolve (free version included)
 
 The Setup screen installs two Scripts-menu entries into Resolve
 (Workspace ▸ Scripts ▸ Utility): **RoughCut AI Draft** turns a selected

@@ -22,8 +22,10 @@ pub fn write(project: &Project, media: &Media) -> String {
         .sum();
 
     let mut video_items = String::new();
+    let mut screen_items = String::new();
     let mut audio_items = String::new();
     let mut record = 0_i64;
+    let screen = project.screen_media.as_ref();
     for (i, clip) in project.timeline.included_clips().enumerate() {
         let in_f = to_frame(clip.source_in, fps);
         let out_f = to_frame(clip.source_out, fps);
@@ -67,6 +69,43 @@ pub fn write(project: &Project, media: &Media) -> String {
             start = record,
             end = record + dur,
         ));
+        // Dual-capture: the screen rides as a second video track with the
+        // SAME record/source timings (shared clock — cuts apply to both).
+        // No baked transforms: the finishing tool positions the face.
+        if let Some(scr) = screen {
+            let s_name = std::path::Path::new(&scr.file_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| scr.file_path.clone());
+            let s_url = format!("file://{}", scr.file_path.replace(' ', "%20"));
+            let s_file = if i == 0 {
+                format!(
+                    "<file id=\"file-2\"><name>{fname}</name><pathurl>{url}</pathurl>\
+                     <rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>\
+                     <duration>{sdur}</duration>\
+                     <media><video><samplecharacteristics>\
+                     <width>{w}</width><height>{h}</height>\
+                     </samplecharacteristics></video></media></file>",
+                    fname = xml_escape(&s_name),
+                    url = xml_escape(&s_url),
+                    sdur = to_frame(scr.duration, fps),
+                    w = scr.width,
+                    h = scr.height,
+                )
+            } else {
+                "<file id=\"file-2\"/>".to_string()
+            };
+            screen_items.push_str(&format!(
+                "<clipitem id=\"clipitem-s{n}\"><name>{fname}</name>\
+                 <rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>\
+                 <start>{start}</start><end>{end}</end><in>{in_f}</in><out>{out_f}</out>\
+                 {s_file}</clipitem>",
+                n = i + 1,
+                fname = xml_escape(&s_name),
+                start = record,
+                end = record + dur,
+            ));
+        }
         record += dur;
     }
 
@@ -79,10 +118,16 @@ pub fn write(project: &Project, media: &Media) -> String {
          <width>{w}</width><height>{h}</height>\
          <rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>\
          </samplecharacteristics></format>\
-         <track>{video_items}</track></video>\
+         {screen_track}<track>{video_items}</track></video>\
          <audio><track>{audio_items}</track></audio></media>\
          </sequence></xmeml>\n",
-        w = media.width,
-        h = media.height,
+        w = screen.map(|s| s.width).unwrap_or(media.width),
+        h = screen.map(|s| s.height).unwrap_or(media.height),
+        screen_track = if screen_items.is_empty() {
+            String::new()
+        } else {
+            // V1 (under) = screen; the camera track stacks above it.
+            format!("<track>{screen_items}</track>")
+        },
     )
 }
