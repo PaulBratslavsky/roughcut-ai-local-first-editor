@@ -193,6 +193,8 @@ pub fn generate_rough_cut(
     aggressiveness: Aggressiveness,
     custom_fillers: &[String],
     silence_min_duration: f64,
+    raw_peaks: Option<&[u8]>,
+    pps: u32,
 ) -> RoughCutOutcome {
     let min_silence = match aggressiveness {
         Aggressiveness::Natural => silence_min_duration,
@@ -207,8 +209,18 @@ pub fn generate_rough_cut(
     let mut timeline = Timeline::new(duration);
     use crate::model::ClipOrigin::AiCut;
 
-    for r in detect_silences(transcript, duration, min_silence) {
-        let (s, e) = (r.start + breath, r.end - breath);
+    // Hybrid: word-gap candidates refined against real energy. Confirmed
+    // ranges already carry asymmetric onset/tail guards — no extra breath
+    // padding. Unconfirmed (no audio / flat dynamics) keep the old breath
+    // treatment. Candidates whisper invented but audio refutes are SKIPPED.
+    let candidates =
+        silence_candidates(transcript, duration, (min_silence * 0.6).max(0.3));
+    for r in refine_silences(&candidates, raw_peaks, pps, min_silence) {
+        let (s, e) = if r.source == "confirmed" {
+            (r.start, r.end)
+        } else {
+            (r.start + breath, r.end - breath)
+        };
         if e > s {
             timeline.set_range_included(s, e, false, AiCut);
         }
@@ -328,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn rough_cut_removes_things() {
         let (media, mut t) = fixture().await;
-        let out = generate_rough_cut(&mut t, media.duration, Aggressiveness::Natural, &[], 0.8);
+        let out = generate_rough_cut(&mut t, media.duration, Aggressiveness::Natural, &[], 0.8, None, 50);
         assert!(out.cut_count >= 5, "expected several cuts, got {}", out.cut_count);
         assert!(out.timeline.included_duration() < media.duration);
         // Best take survived, earlier take did not.
@@ -353,5 +365,210 @@ mod tests {
         let hits = find_segments(&t, "the tangent about my weekend hiking");
         assert!(!hits.is_empty());
         assert!(hits.iter().any(|s| s.text.contains("hiking")));
+    }
+}
+
+// --- hybrid silence refinement (transcript candidates ∩ audio energy) ------
+
+/// A silence range with provenance: "confirmed" = audio energy agrees;
+/// "transcript_only" = whisper's word said so but audio couldn't check
+/// (no peaks, or the file's dynamics are too flat to trust).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefinedSilence {
+    pub start: f64,
+    pub end: f64,
+    pub source: &'static str,
+    pub confidence: f64,
+}
+
+/// Candidate windows from WORD gaps (not segment gaps — whisper stretches
+/// segments across trailing dead air, so the segment view structurally
+/// misses pauses that word timings expose).
+pub fn silence_candidates(transcript: &Transcript, duration: f64, min_gap: f64) -> Vec<TimeRange> {
+    let mut bounds: Vec<(f64, f64)> = vec![];
+    for seg in transcript.segments.iter().filter(|s| !s.is_silence) {
+        if seg.words.is_empty() {
+            bounds.push((seg.start, seg.end));
+        } else {
+            for w in &seg.words {
+                bounds.push((w.start, w.end));
+            }
+        }
+    }
+    bounds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = vec![];
+    let mut prev_end = 0.0_f64;
+    for (start, end) in bounds {
+        if start - prev_end >= min_gap {
+            out.push(TimeRange { start: prev_end, end: start });
+        }
+        prev_end = prev_end.max(end);
+    }
+    if duration > 0.0 && duration - prev_end >= min_gap {
+        out.push(TimeRange { start: prev_end, end: duration });
+    }
+    merge(out)
+}
+
+/// Keep this much attached to the NEXT speech onset (consonant attacks are
+/// fragile) and after the previous word's tail (decay is forgiving).
+const KEEP_PRE_ONSET_S: f64 = 0.12;
+const KEEP_POST_TAIL_S: f64 = 0.06;
+/// Loud blips shorter than this inside a quiet span are breaths/clicks.
+const BLIP_S: f64 = 0.10;
+
+/// Refine candidates against raw audio peaks. Thresholds derive from the
+/// file's OWN dynamics (a MacBook mic peaks speech at 2.4% absolute — fixed
+/// dB thresholds classify whole recordings as silence): noise floor = p10,
+/// speech = p95, with enter/exit hysteresis between them. When the file's
+/// dynamics are too flat to trust (speech < 2x floor), candidates pass
+/// through as transcript_only instead of pretending precision.
+pub fn refine_silences(
+    candidates: &[TimeRange],
+    raw_peaks: Option<&[u8]>,
+    pps: u32,
+    min_duration: f64,
+) -> Vec<RefinedSilence> {
+    let transcript_only = |c: &[TimeRange]| {
+        c.iter()
+            .filter(|r| r.end - r.start >= min_duration)
+            .map(|r| RefinedSilence {
+                start: r.start,
+                end: r.end,
+                source: "transcript_only",
+                confidence: 0.5,
+            })
+            .collect::<Vec<_>>()
+    };
+    let Some(peaks) = raw_peaks else { return transcript_only(candidates) };
+    if peaks.is_empty() || pps == 0 {
+        return transcript_only(candidates);
+    }
+
+    let mut sorted: Vec<u8> = peaks.to_vec();
+    sorted.sort_unstable();
+    let pct = |p: f64| -> f64 {
+        sorted[((sorted.len() - 1) as f64 * p) as usize] as f64
+    };
+    let floor = pct(0.10);
+    let speech = pct(0.95);
+    // Honesty gate: flat dynamics (constant fan, broken gain) make energy
+    // uninformative — degrade loudly-typed rather than silently wrong.
+    if speech < (floor * 2.0).max(3.0) {
+        return transcript_only(candidates);
+    }
+    let range = speech - floor;
+    let enter = floor + 0.15 * range; // below this = silent
+    let exit = floor + 0.30 * range; // must exceed this to count as speech
+    let blip = ((BLIP_S * pps as f64).round() as usize).max(1);
+
+    let mut out = vec![];
+    for cand in candidates {
+        // Look slightly beyond whisper's sloppy boundaries.
+        let w_start = ((cand.start - 0.5).max(0.0) * pps as f64) as usize;
+        let w_end = (((cand.end + 0.5) * pps as f64) as usize).min(peaks.len());
+        if w_start >= w_end {
+            continue;
+        }
+        // Longest quiet run in the window, closing loud blips < BLIP_S.
+        let mut best: Option<(usize, usize)> = None;
+        let mut run_start: Option<usize> = None;
+        let mut loud_run = 0usize;
+        for i in w_start..=w_end {
+            let level = if i < w_end { peaks[i] as f64 } else { f64::MAX };
+            let quiet = level <= enter || (run_start.is_some() && level < exit);
+            if quiet {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                }
+                loud_run = 0;
+            } else if let Some(rs) = run_start {
+                loud_run += 1;
+                if loud_run > blip || i == w_end {
+                    let end = i - loud_run;
+                    if best.map(|(bs, be)| be - bs).unwrap_or(0) < end - rs {
+                        best = Some((rs, end));
+                    }
+                    run_start = None;
+                    loud_run = 0;
+                }
+            }
+        }
+        let Some((qs, qe)) = best else { continue }; // audio disagrees: loud
+        let mut start = qs as f64 / pps as f64 + KEEP_POST_TAIL_S;
+        let mut end = qe as f64 / pps as f64 - KEEP_PRE_ONSET_S;
+        // Never cut outside the candidate either (words live there).
+        start = start.max(cand.start);
+        end = end.min(cand.end + 0.5);
+        if end - start >= min_duration {
+            out.push(RefinedSilence { start, end, source: "confirmed", confidence: 0.9 });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod hybrid_tests {
+    use super::*;
+
+    /// 20s @ 50pps: speech at [0..5], [8..12], silence elsewhere, with a
+    /// 100ms breath blip at 6.5s.
+    fn synth_peaks() -> Vec<u8> {
+        let pps = 50usize;
+        let mut p = vec![6u8; 20 * pps];
+        for i in 0..(5 * pps) {
+            p[i] = 180;
+        }
+        for i in (8 * pps)..(12 * pps) {
+            p[i] = 180;
+        }
+        for i in (13 * pps)..(13 * pps + 5) {
+            p[i] = 120; // breath blip, 100ms
+        }
+        p
+    }
+
+    #[test]
+    fn refines_sloppy_whisper_bounds_to_energy() {
+        // Whisper thinks silence is 4.8..8.3 (±sloppy); energy says 5..8.
+        let cands = vec![TimeRange { start: 4.8, end: 8.3 }];
+        let out = refine_silences(&cands, Some(&synth_peaks()), 50, 0.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, "confirmed");
+        assert!((out[0].start - 5.06).abs() < 0.06, "start {}", out[0].start);
+        assert!((out[0].end - 7.88).abs() < 0.06, "end {}", out[0].end);
+    }
+
+    #[test]
+    fn breath_blip_does_not_split_a_silence() {
+        let cands = vec![TimeRange { start: 12.0, end: 20.0 }];
+        let out = refine_silences(&cands, Some(&synth_peaks()), 50, 1.0);
+        assert_eq!(out.len(), 1, "blip must not split: {out:?}");
+        assert!(out[0].end - out[0].start > 6.0);
+    }
+
+    #[test]
+    fn loud_candidate_is_rejected() {
+        // Whisper hallucinated a gap where audio is full-volume speech.
+        let cands = vec![TimeRange { start: 9.0, end: 11.0 }];
+        let out = refine_silences(&cands, Some(&synth_peaks()), 50, 0.5);
+        assert!(out.is_empty(), "audio disagrees -> no cut: {out:?}");
+    }
+
+    #[test]
+    fn flat_dynamics_degrade_to_transcript_only() {
+        let flat = vec![100u8; 1000]; // constant fan noise
+        let cands = vec![TimeRange { start: 2.0, end: 4.0 }];
+        let out = refine_silences(&cands, Some(&flat), 50, 0.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, "transcript_only");
+    }
+
+    #[test]
+    fn no_peaks_means_transcript_only() {
+        let cands = vec![TimeRange { start: 1.0, end: 3.0 }];
+        let out = refine_silences(&cands, None, 50, 0.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, "transcript_only");
     }
 }

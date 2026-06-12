@@ -67,6 +67,9 @@ pub struct Inner {
     confirms: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<bool>>>,
     /// Off in headless/test contexts (no UI to answer the prompt).
     require_confirm: std::sync::atomic::AtomicBool,
+    /// Transient: raw peaks staged by generate_rough_cut for the very next
+    /// apply (RoughCut refines silences against real energy). Consumed once.
+    pub(crate) rough_cut_peaks: Mutex<Option<Vec<u8>>>,
     state: Mutex<HashMap<Uuid, ProjectState>>,
 }
 
@@ -93,6 +96,7 @@ impl Editor {
                 embedder_override: Mutex::new(None),
                 confirms: Mutex::new(HashMap::new()),
                 require_confirm: std::sync::atomic::AtomicBool::new(false),
+                rough_cut_peaks: Mutex::new(None),
                 state: Mutex::new(HashMap::new()),
             }),
         }

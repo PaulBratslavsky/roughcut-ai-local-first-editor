@@ -584,10 +584,12 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   // ---- Analysis -------------------------------------------------------------
 
-  detect_silences(args) {
+  detect_silences(args): unknown {
     requireProject(args.project_id);
-    const segs = state.transcript?.segments.filter((s) => s.is_silence) ?? [];
-    return { segments: segs.map((s) => ({ start: s.start, end: s.end })) };
+    const gaps = (state.transcript?.segments ?? [])
+      .filter((s) => s.is_silence)
+      .map((s) => ({ start: s.start, end: s.end, source: "transcript_only", confidence: 0.5 }));
+    return { method: "transcript", segments: gaps };
   },
 
   detect_fillers(args) {

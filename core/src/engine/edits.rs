@@ -39,7 +39,14 @@ impl Editor {
             let before_clips = project.timeline.clips.clone();
             let before_padding = project.timeline.global_padding;
             let mut split_ids = vec![];
-            apply_op(project, transcript.as_mut(), &op, &prefs, &mut split_ids)?;
+            apply_op(
+                project,
+                transcript.as_mut(),
+                &op,
+                &prefs,
+                &mut split_ids,
+                self.inner.rough_cut_peaks.lock().unwrap().take().as_deref(),
+            )?;
             project.timeline.normalize();
             project.updated_at = Utc::now();
             let action = EditAction::new(source, op);
@@ -115,6 +122,13 @@ impl Editor {
         }
         let prefs = self.inner.store.load_preferences()?;
         let aggr = aggressiveness.unwrap_or(prefs.cut_aggressiveness);
+        // Hybrid silences: stage raw audio peaks for the RoughCut apply
+        // (best effort — no ffmpeg means transcript-only detection).
+        let media = self.with_project(project_id, |p, _| Ok(p.media.clone()))?;
+        if let Some(media) = media {
+            let peaks = crate::adapters::video::load_raw_peaks(&media).await;
+            *self.inner.rough_cut_peaks.lock().unwrap() = peaks;
+        }
         let outcome = self.apply_edit(project_id, EditOp::RoughCut { aggressiveness: aggr }, source)?;
         let cut_count = outcome.timeline.cut_count;
         Ok((outcome.action, outcome.timeline, cut_count))
@@ -146,7 +160,7 @@ impl Editor {
             match popped {
                 Some(entry) => {
                     let replay = if is_undo { &entry.inverse } else { &entry.redo };
-                    apply_op(project, transcript.as_mut(), replay, &prefs, &mut vec![])?;
+                    apply_op(project, transcript.as_mut(), replay, &prefs, &mut vec![], None)?;
                     project.timeline.normalize();
                     project.updated_at = Utc::now();
                     self.inner.store.save_project(project)?;
@@ -213,6 +227,9 @@ fn apply_op(
     op: &EditOp,
     prefs: &Preferences,
     split_ids: &mut Vec<Uuid>,
+    // Raw audio peaks for RoughCut's hybrid silence refinement; None for
+    // journal replays (snapshots replay exactly, never re-detect).
+    rough_cut_peaks: Option<&[u8]>,
 ) -> Result<()> {
     match op {
         EditOp::CutRange { start, end } => {
@@ -273,6 +290,8 @@ fn apply_op(
                 *aggressiveness,
                 &prefs.custom_filler_words,
                 prefs.silence_min_duration_s,
+                rough_cut_peaks,
+                crate::adapters::video::PEAKS_PER_SECOND,
             );
             // COMPOSE with the existing cut: AI exclusions are added on top of
             // whatever is already cut (manual or MCP edits survive — and the

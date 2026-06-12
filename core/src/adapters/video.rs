@@ -388,14 +388,12 @@ impl VideoEngine for FfmpegCli {
         // ---- waveform peaks (u8 per 1/PEAKS_PER_SECOND s) -------------------
         let peaks_file = cache.join("peaks.bin");
         if !peaks_file.is_file() {
-            const RATE: u32 = 8000;
-            let mut cmd = ffmpeg_cmd()?;
-            cmd.args([
-                "-i", &media.file_path, "-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f",
-                "s16le", "pipe:1",
-            ]);
-            let pcm = Self::run_binary(&mut cmd, "ffmpeg peaks decode").await?;
-            let peaks = compute_peaks(&pcm, RATE, PEAKS_PER_SECOND);
+            let raw = decode_raw_peaks(&media.file_path).await?;
+            // Raw levels persist for ANALYSIS (silence detection needs real
+            // energy); the display copy is normalized for visibility.
+            std::fs::write(cache.join("peaks_raw.bin"), &raw)?;
+            let mut peaks = raw;
+            normalize_peaks(&mut peaks);
             std::fs::write(&peaks_file, &peaks)?;
         }
 
@@ -555,8 +553,9 @@ pub fn asset_cache_key(media: &Media) -> String {
     format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
-/// Max |sample| per bucket, scaled to u8. Pure — unit-tested without ffmpeg.
-pub fn compute_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) -> Vec<u8> {
+/// Max |sample| per bucket, scaled to u8 — RAW levels, no normalization
+/// (analysis wants real energy, not display scaling). Pure.
+pub fn raw_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) -> Vec<u8> {
     let bucket = (sample_rate / peaks_per_second).max(1) as usize;
     let mut peaks = Vec::with_capacity(pcm_s16le.len() / 2 / bucket + 1);
     let mut max: i32 = 0;
@@ -574,18 +573,51 @@ pub fn compute_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) 
     if n > 0 {
         peaks.push(((max * 255) / 32768).min(255) as u8);
     }
-    // Normalize toward the file's own loudest moment: a quiet laptop mic
-    // otherwise renders as a flat line. Floor of 8 (~3%) — whisper can
-    // transcribe speech well below the old floor of 24, and a transcribable
-    // take deserves a visible waveform; true silence stays flat.
+    peaks
+}
+
+/// Normalize toward the file's own loudest moment: a quiet laptop mic
+/// otherwise renders as a flat line. Floor of 4 (~1.5%) — live capture
+/// measured real speech peaking at 6/255; true silence stays flat.
+pub fn normalize_peaks(peaks: &mut [u8]) {
     let loudest = peaks.iter().copied().max().unwrap_or(0) as u32;
     if loudest >= 4 && loudest < 240 {
-        let scale_num = 240u32;
-        for v in &mut peaks {
-            *v = ((*v as u32 * scale_num) / loudest).min(255) as u8;
+        for v in peaks.iter_mut() {
+            *v = ((*v as u32 * 240) / loudest).min(255) as u8;
         }
     }
+}
+
+/// Display peaks: raw buckets, normalized. Pure — unit-tested without ffmpeg.
+pub fn compute_peaks(pcm_s16le: &[u8], sample_rate: u32, peaks_per_second: u32) -> Vec<u8> {
+    let mut peaks = raw_peaks(pcm_s16le, sample_rate, peaks_per_second);
+    normalize_peaks(&mut peaks);
     peaks
+}
+
+/// Decode mono PCM and bucket to raw u8 peaks.
+pub async fn decode_raw_peaks(file_path: &str) -> Result<Vec<u8>> {
+    const RATE: u32 = 8000;
+    let mut cmd = ffmpeg_cmd()?;
+    cmd.args([
+        "-i", file_path, "-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f", "s16le", "pipe:1",
+    ]);
+    let pcm = FfmpegCli::run_binary(&mut cmd, "ffmpeg peaks decode").await?;
+    Ok(raw_peaks(&pcm, RATE, PEAKS_PER_SECOND))
+}
+
+/// Raw analysis peaks for `media`, from cache or a one-off decode (caches
+/// that predate raw peaks get backfilled). None = no ffmpeg/decoder.
+pub async fn load_raw_peaks(media: &Media) -> Option<Vec<u8>> {
+    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
+    let raw_file = cache.join("peaks_raw.bin");
+    if let Ok(bytes) = std::fs::read(&raw_file) {
+        return Some(bytes);
+    }
+    let raw = decode_raw_peaks(&media.file_path).await.ok()?;
+    let _ = std::fs::create_dir_all(&cache);
+    let _ = std::fs::write(&raw_file, &raw);
+    Some(raw)
 }
 
 fn parse_rate(s: &str) -> f64 {

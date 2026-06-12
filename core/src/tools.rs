@@ -222,11 +222,24 @@ handler!(h_transcribe, |e, a, _s| {
 handler!(h_detect_silences, |e, a, _s| {
     let project_id = arg_uuid(a, "project_id")?;
     let min = a["min_duration_s"].as_f64().unwrap_or(0.8);
-    e.with_project(project_id, |p, t| {
+    let (transcript, duration, media) = e.with_project(project_id, |p, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-        let ranges = detect::detect_silences(t, p.timeline.duration, min);
-        Ok(json!({ "segments": ranges }))
-    })
+        Ok((t.clone(), p.timeline.duration, p.media.clone()))
+    })?;
+    // Audio pass OUTSIDE the state lock (decode can take a moment).
+    let peaks = match &media {
+        Some(m) => crate::adapters::video::load_raw_peaks(m).await,
+        None => None,
+    };
+    let candidates = detect::silence_candidates(&transcript, duration, (min * 0.6).max(0.3));
+    let refined = detect::refine_silences(
+        &candidates,
+        peaks.as_deref(),
+        crate::adapters::video::PEAKS_PER_SECOND,
+        min,
+    );
+    let method = if peaks.is_some() { "hybrid" } else { "transcript" };
+    Ok(json!({ "method": method, "segments": refined }))
 });
 
 handler!(h_detect_fillers, |e, a, _s| {
@@ -702,7 +715,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("transcribe", "Transcribe the project's media on-device into time-aligned text.",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),
-    tool!("detect_silences", "Find dead-air ranges in the transcript/audio.",
+    tool!("detect_silences", "Find dead-air ranges: word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only.",
         || obj(json!({"project_id": pid_schema(), "min_duration_s": {"type": "number"}}), &["project_id"]),
         agent: false, meta: false, h_detect_silences),
     tool!("detect_fillers", "Flag filler words (um, uh, ...) in the transcript. Persists the flags.",
