@@ -1,9 +1,10 @@
 // Transport row above the canvas timeline: play/pause, speed, show/skip cuts
 // toggles, split-at-playhead, zoom buttons.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useStore } from "@tanstack/react-store";
-import { audibleAnalyser, onAudibleChange } from "../playback/meter";
+import { useMediaAssets } from "../ipc/queries";
+import { loadTimelineAssets } from "./assets";
 import { useSplitClip, useTimeline } from "../ipc/queries";
 import {
   setPlaybackRate,
@@ -39,40 +40,30 @@ function ToggleSwitch({
   );
 }
 
-/** Live output level while playing — "is sound actually coming out". */
-function PlaybackMeter() {
+/** Live output level while playing: driven by the SAME peaks data the
+ *  waveform renders — deterministic, and zero WebAudio anywhere near the
+ *  playback path (a media-element tap once silenced playback entirely). */
+function PlaybackMeter({ projectId }: { projectId: string }) {
   const playing = useStore(viewStore, (s) => s.playing);
-  const [level, setLevel] = useState(0);
-  const rafRef = useRef(0);
+  const playhead = useStore(viewStore, (s) => s.playhead);
+  const { data: assetMeta } = useMediaAssets(projectId);
+  const peaksRef = useRef<{ peaks: Uint8Array | null; pps: number }>({ peaks: null, pps: 50 });
   useEffect(() => {
-    if (!playing) {
-      setLevel(0);
-      return;
-    }
-    let analyser = audibleAnalyser();
-    const off = onAudibleChange(() => {
-      analyser = audibleAnalyser();
+    let stale = false;
+    if (!assetMeta) return;
+    void loadTimelineAssets({ ...assetMeta, thumbnails: [] }).then((a) => {
+      if (!stale) peaksRef.current = { peaks: a.peaks, pps: a.pps };
     });
-    const buf = new Uint8Array(512);
-    const tick = () => {
-      if (analyser) {
-        analyser.getByteTimeDomainData(buf);
-        let sum = 0;
-        for (const v of buf) {
-          const d = (v - 128) / 128;
-          sum += d * d;
-        }
-        const rms = Math.sqrt(sum / buf.length);
-          setLevel(Math.min(1, Math.pow(rms * 6, 0.5)));
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    tick();
     return () => {
-      off();
-      cancelAnimationFrame(rafRef.current);
+      stale = true;
     };
-  }, [playing]);
+  }, [assetMeta]);
+  let level = 0;
+  if (playing && peaksRef.current.peaks) {
+    const { peaks, pps } = peaksRef.current;
+    const i = Math.min(peaks.length - 1, Math.max(0, Math.floor(playhead * pps)));
+    level = Math.pow(peaks[i] / 255, 0.7);
+  }
   return (
     <span className="mic-meter playback-meter" title="playback level">
       <span className="mic-meter-fill" style={{ width: `${Math.round(level * 100)}%` }} />
@@ -114,7 +105,7 @@ export function TransportBar({ projectId }: { projectId: string }) {
             </svg>
           )}
         </button>
-        <PlaybackMeter />
+        <PlaybackMeter projectId={projectId} />
         <select
           className="select rate-select"
           value={String(rate)}

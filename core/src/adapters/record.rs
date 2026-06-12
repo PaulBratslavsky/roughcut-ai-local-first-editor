@@ -345,6 +345,10 @@ async fn spawn_take(
         // voice to a usable level at record time, like every screen
         // recorder's mic boost.
         "-af".into(), "dynaudnorm=f=300:g=11".into(),
+        // Mono, explicitly: the MacBook mic array reports THREE channels
+        // and CoreAudio/WebKit refuse 3-channel AAC outright — recordings
+        // played silent everywhere outside ffmpeg.
+        "-ac".into(), "1".into(),
         "-c:v".into(), "h264_videotoolbox".into(),
         "-b:v".into(), "6M".into(),
         "-pix_fmt".into(), "yuv420p".into(),

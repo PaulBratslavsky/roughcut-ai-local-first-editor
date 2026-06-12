@@ -367,7 +367,11 @@ impl VideoEngine for FfmpegCli {
 /// a crash never leaves a half-copy that looks playable. Idempotent and
 /// deduplicated; Ok(None) = the source plays as-is.
 pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
-    if !needs_faststart(&media.file_path) {
+    let fix_index = needs_faststart(&media.file_path);
+    // CoreAudio/WebKit refuse >2-channel AAC outright (the MacBook mic array
+    // records 3ch) — those files play SILENT; downmix to stereo in the copy.
+    let fix_audio = audio_channels(&media.file_path).await.unwrap_or(0) > 2;
+    if !fix_index && !fix_audio {
         return Ok(None);
     }
     let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
@@ -387,21 +391,36 @@ pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
         let result = async {
             let part = cache.join("play.mp4.part");
             let mut cmd = ffmpeg_cmd()?;
-            cmd.args([
-                "-y",
-                "-i", &media.file_path,
-                "-c", "copy",
-                "-movflags", "+faststart",
-                "-f", "mp4",
-                &part.to_string_lossy(),
-            ]);
-            FfmpegCli::run(&mut cmd, "ffmpeg faststart remux").await?;
+            cmd.arg("-y").args(["-i", &media.file_path, "-c:v", "copy"]);
+            if fix_audio {
+                cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "192k"]);
+            } else {
+                cmd.args(["-c:a", "copy"]);
+            }
+            cmd.args(["-movflags", "+faststart", "-f", "mp4", &part.to_string_lossy()]);
+            FfmpegCli::run(&mut cmd, "ffmpeg playable remux").await?;
             std::fs::rename(&part, &play)?;
             Ok::<_, crate::error::CoreError>(Some(play.to_string_lossy().into_owned()))
         }
         .await;
         result
     }
+}
+
+/// Audio channel count of the first audio stream (0 when probing fails).
+async fn audio_channels(path: &str) -> Result<u32> {
+    let probe = ffprobe_path()
+        .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
+    let mut cmd = Command::new(probe);
+    cmd.args([
+        "-v", "quiet",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=channels",
+        "-of", "csv=p=0",
+        path,
+    ]);
+    let out = FfmpegCli::run(&mut cmd, "ffprobe channels").await?;
+    Ok(out.trim().parse().unwrap_or(0))
 }
 
 /// True when an mp4/mov's `moov` index sits AFTER the `mdat` payload —
