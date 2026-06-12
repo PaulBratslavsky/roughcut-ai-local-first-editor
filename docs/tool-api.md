@@ -65,7 +65,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { action: EditAction, timeline: Timeline, cut_count: number }`
 
 ### Editing
-- `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
+- `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` (+ `requested`; on a mid-batch failure returns a PARTIAL receipt `{applied, requested, actions, failed_at, error, note}` — applied edits are journaled and undoable) — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
 - `cut_range { project_id, start, end } -> { action: EditAction, timeline: Timeline }`
 - `restore_range { project_id, start, end } -> { action, timeline }`
 - `cut_by_transcript { project_id, segment_ids: string[] } -> { action, timeline }`
@@ -106,6 +106,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `list_projects {} -> { projects: [ProjectSummary], trash: [ProjectSummary] }`
 - `get_timeline { project_id } -> Timeline`
 - `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented)
+- `undo_actions { project_id, action_ids } -> { undone, timeline }` — undo a specific recent action set (a chat turn); errors if newer edits exist so it can never revert unrelated work
 - `undo { project_id } -> { action: EditAction|null, timeline }`
 - `redo { project_id } -> { action: EditAction|null, timeline }`
 - `get_preferences {} -> Preferences`

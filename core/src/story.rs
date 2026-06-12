@@ -137,7 +137,22 @@ async fn llm_outline(
         fn default_priority() -> u8 {
             3
         }
-        let mut raw: Vec<RawBeat> = crate::llm::ask_json_with(
+        let beat_schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "role": {"type": "string", "enum": ["hook","setup","point","example","tangent","recap","outro"]},
+                    "cut_priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "first": {"type": "integer"},
+                    "last": {"type": "integer"}
+                },
+                "required": ["title", "first", "last"]
+            }
+        });
+        let mut raw: Vec<RawBeat> = crate::llm::ask_json_schema(
             inference,
             model,
             "outline",
@@ -151,6 +166,7 @@ async fn llm_outline(
              must be contiguous, non-overlapping, and cover every line.",
             &numbered,
             0.1,
+            Some(&beat_schema),
         )
         .await?;
         // The prompt demands contiguous, non-overlapping beats; weak models
@@ -357,7 +373,20 @@ pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview
             #[serde(default)]
             restore: bool,
         }
-        let verdicts: Result<Vec<Verdict>> = crate::llm::ask_json_with(
+        let verdict_schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "integer"},
+                    "ok": {"type": "boolean"},
+                    "why": {"type": "string"},
+                    "restore": {"type": "boolean"}
+                },
+                "required": ["b", "ok"]
+            }
+        });
+        let verdicts: Result<Vec<Verdict>> = crate::llm::ask_json_schema(
             inference.as_ref(),
             &prefs.inference_model,
             "flow review",
@@ -371,6 +400,7 @@ pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview
              NOT ok.",
             &listed,
             0.0,
+            Some(&verdict_schema),
         )
         .await;
         {
@@ -544,7 +574,15 @@ pub async fn story_edit(
         #[serde(default)]
         rationale: String,
     }
-    let plan: Plan = crate::llm::ask_json_with(
+    let plan_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "cut_beats": {"type": "array", "items": {"type": "integer"}},
+            "rationale": {"type": "string"}
+        },
+        "required": ["cut_beats"]
+    });
+    let plan: Plan = crate::llm::ask_json_schema(
         inference.as_ref(),
         &prefs.inference_model,
         "story plan",
@@ -556,6 +594,7 @@ pub async fn story_edit(
          one sentence}.",
         &format!("Instruction: {instruction}\n{target_line}\n\nBeats:\n{listed}"),
         0.1,
+        Some(&plan_schema),
     )
     .await?;
     // Guardrails: a "story edit" that deletes (almost) everything is a bug,

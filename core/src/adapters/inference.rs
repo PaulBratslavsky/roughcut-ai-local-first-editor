@@ -59,6 +59,11 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
     pub temperature: f64,
+    /// OpenAI-style structured outputs: {"type":"json_schema","json_schema":
+    /// {...}} — both Ollama's compat layer and llama-server ground decoding
+    /// in the schema (research: ~33% -> ~78% correct calls on small models).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +89,14 @@ impl OpenAiCompatClient {
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key,
-            http: reqwest::Client::new(),
+            // A wedged local server must not hang a chat turn forever; 300s
+            // covers a 26b model chewing a 24k-char context, nothing covers
+            // a dead socket without this.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
         }
     }
 }

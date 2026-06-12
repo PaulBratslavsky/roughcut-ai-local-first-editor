@@ -230,6 +230,7 @@ pub async fn run_instruction_with(
     let mut readonly_rounds = 0usize;
     let mut steered = false;
 
+    let mut last_turn_error: Option<String> = None;
     for step in 0..MAX_STEPS {
         step_text(
             editor,
@@ -249,6 +250,7 @@ pub async fn run_instruction_with(
                 messages: messages.clone(),
                 tools: Some(tool_schemas.clone()),
                 temperature: 0.1,
+                response_format: None,
             })
             .await
         {
@@ -259,21 +261,85 @@ pub async fn run_instruction_with(
                 step_text(editor, project_id, 0, "thinking", format!("{e} — falling back to offline editing"));
                 return run_instruction_offline(editor, project_id, instruction, source).await;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Edits already landed this turn must never vanish behind
+                // "Something went wrong": report the partial outcome so the
+                // chat shows the real action count and its undo affordance.
+                if !actions.is_empty() {
+                    let summary = format!(
+                        "The model connection failed after {} change(s) were applied — \
+                         review the timeline or undo. ({e})",
+                        actions.len()
+                    );
+                    step_text(editor, project_id, step, "final", summary.clone());
+                    return Ok(InstructionOutcome { actions, summary });
+                }
+                return Err(e);
+            }
         };
         let msg = response.message;
         let tool_calls = msg.tool_calls.clone().unwrap_or_default();
         if tool_calls.is_empty() {
-            summary = msg.content.clone().unwrap_or_else(|| "Done.".into());
+            // The model's text is NOT the source of truth — small models
+            // claim success after errors. Append a deterministic receipt
+            // built from what actually landed.
+            let text = msg.content.clone().unwrap_or_else(|| "Done.".into());
+            summary = if actions.is_empty() {
+                match &last_turn_error {
+                    Some(err) => format!(
+                        "{text}\n\n[No changes were applied — the last edit failed: {err}]"
+                    ),
+                    None => format!("{text}\n\n[No changes were applied.]"),
+                }
+            } else {
+                format!("{text}\n\n[Applied {} change(s) — undoable.]", actions.len())
+            };
             step_text(editor, project_id, step, "final", summary.clone());
             break;
         }
         messages.push(msg);
         let mut round_mutated = false;
+        let mut last_error: Option<String> = None;
+        let _ = &last_turn_error;
         for call in tool_calls {
             let name = call.function.name.clone();
-            let mut args: Value =
-                serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
+            // NEVER dispatch on garbled arguments (the #1 small-model failure
+            // mode): a parse failure used to coerce to {} — which EXECUTED
+            // mutating tools with defaults — and non-object JSON panicked on
+            // index assignment. Feed the parse error + schema back instead;
+            // that's the research-backed repair loop.
+            let parsed: std::result::Result<Value, _> =
+                serde_json::from_str(&call.function.arguments);
+            let mut args = match parsed {
+                Ok(v) if v.is_object() => v,
+                other => {
+                    let why = match other {
+                        Ok(v) => format!("arguments were {} — expected a JSON object", match v {
+                            Value::Array(_) => "an array",
+                            Value::String(_) => "a string",
+                            _ => "not an object",
+                        }),
+                        Err(e) => format!("arguments were not valid JSON: {e}"),
+                    };
+                    let schema = tools::agent_defs()
+                        .into_iter()
+                        .find(|d| d.name == name)
+                        .map(|d| d.input_schema)
+                        .unwrap_or(Value::Null);
+                    let feedback = json!({
+                        "error": {
+                            "code": "malformed_arguments",
+                            "message": format!("{why}. Re-send this call with arguments matching the schema."),
+                        },
+                        "expected_schema": schema,
+                    });
+                    emit_step(editor, project_id, step, "tool_call", Some(name.clone()), None, None, None);
+                    emit_step(editor, project_id, step, "tool_result", Some(name.clone()), None, Some(feedback.clone()), None);
+                    messages.push(ChatMessage::tool_result(&call.id, serde_json::to_string(&feedback)?));
+                    last_error = Some("malformed arguments".into());
+                    continue;
+                }
+            };
             // The model sometimes forgets the project id — inject it.
             if args.get("project_id").and_then(|v| v.as_str()).is_none() {
                 args["project_id"] = json!(project_id.to_string());
@@ -289,9 +355,16 @@ pub async fn run_instruction_with(
                     "result": cached,
                 })
             } else {
-                let r = match tools::dispatch_basic(editor, &name, &args, source).await {
+                match tools::dispatch_basic(editor, &name, &args, source).await {
                     Ok(mut v) => {
                         harvest_actions(&v, &mut actions);
+                        // Partial apply_edits receipts carry their own error.
+                        if v["failed_at"].is_number() {
+                            last_error =
+                                Some(v["error"]["message"].as_str().unwrap_or("edit failed").to_string());
+                        } else {
+                            last_error = None;
+                        }
                         // Duration feedback: every edit tells the model where
                         // the cut stands, so duration targets are checkable.
                         if is_mutating(&name) {
@@ -305,14 +378,29 @@ pub async fn run_instruction_with(
                                 }
                             }
                         }
+                        // Only successes advance the act/read accounting and
+                        // enter the repeat cache as plain results.
+                        round_mutated |= is_mutating(&name);
+                        seen_calls.insert(call_key, truncate_json(&v));
                         v
                     }
-                    Err(e) => e.to_json(),
-                };
-                seen_calls.insert(call_key, truncate_json(&r));
-                r
+                    Err(e) => {
+                        // Errors cache with a REPAIR nudge, not a stop-searching
+                        // one — an identical retry would fail identically, but
+                        // the fix is new ARGUMENTS, not finalizing.
+                        last_error = Some(e.to_string());
+                        let err = e.to_json();
+                        seen_calls.insert(
+                            call_key,
+                            json!({
+                                "note": "this exact call FAILED before — fix the arguments before retrying",
+                                "result": truncate_json(&err),
+                            }),
+                        );
+                        err
+                    }
+                }
             };
-            round_mutated |= is_mutating(&name);
             emit_step(
                 editor,
                 project_id,
@@ -328,8 +416,15 @@ pub async fn run_instruction_with(
                 serde_json::to_string(&truncate_json(&result))?,
             ));
         }
+        if let Some(e) = last_error {
+            last_turn_error = Some(e);
+        } else if round_mutated {
+            last_turn_error = None;
+        }
         if round_mutated {
             readonly_rounds = 0;
+            // State changed: cached reads are stale and legit to repeat now.
+            seen_calls.clear();
         } else {
             readonly_rounds += 1;
             if readonly_rounds >= 2 && !steered {
@@ -454,9 +549,17 @@ fn truncate_json(v: &Value) -> Value {
         }
         // Recurse into elements so nested id arrays (beats[i].segment_ids,
         // issues[i].restore_segment_ids, actions[i].op.segment_ids) get the
-        // same stubbing as top-level ones.
+        // same stubbing as top-level ones — and a clipped array SAYS it was
+        // clipped instead of letting paged reads lie about their contents.
         Value::Array(arr) => {
-            Value::Array(arr.iter().take(20).map(truncate_json).collect())
+            let mut out: Vec<Value> = arr.iter().take(20).map(truncate_json).collect();
+            if arr.len() > 20 {
+                out.push(json!(format!(
+                    "(+{} more items truncated — request a narrower range)",
+                    arr.len() - 20
+                )));
+            }
+            Value::Array(out)
         }
         other => other.clone(),
     }

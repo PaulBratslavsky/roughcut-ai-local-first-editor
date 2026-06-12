@@ -2,8 +2,9 @@
 // and renders streaming agent-step events (tool calls, results, final summary).
 
 import { useEffect, useRef, useState } from "react";
-import { onAppEvent } from "../ipc/api";
-import { useApplyInstruction, useUndo } from "../ipc/queries";
+import { callTool, onAppEvent } from "../ipc/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { useApplyInstruction } from "../ipc/queries";
 import type { AgentStepEvent } from "../ipc/types";
 
 interface AgentMessage {
@@ -13,6 +14,7 @@ interface AgentMessage {
   steps: AgentStepEvent[];
   pending: boolean;
   actionCount: number;
+  actionIds: string[];
   undone: boolean;
   startedAt: number;
 }
@@ -171,7 +173,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
   const applyInstruction = useApplyInstruction();
-  const undo = useUndo();
+  const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pendingIdRef = useRef<string | null>(null);
 
@@ -214,8 +216,8 @@ export function ChatPanel({ projectId }: { projectId: string }) {
       .map((m) => ({ role: m.role === "user" ? ("user" as const) : ("agent" as const), text: m.text }));
     setMessages((msgs) => [
       ...msgs,
-      { id: nextId(), role: "user", text: instruction, steps: [], pending: false, actionCount: 0, undone: false, startedAt: Date.now() },
-      { id: agentId, role: "agent", text: "", steps: [], pending: true, actionCount: 0, undone: false, startedAt: Date.now() },
+      { id: nextId(), role: "user", text: instruction, steps: [], pending: false, actionCount: 0, actionIds: [], undone: false, startedAt: Date.now() },
+      { id: agentId, role: "agent", text: "", steps: [], pending: true, actionCount: 0, actionIds: [], undone: false, startedAt: Date.now() },
     ]);
     applyInstruction.mutate(
       { project_id: projectId, instruction, history },
@@ -224,7 +226,8 @@ export function ChatPanel({ projectId }: { projectId: string }) {
           setMessages((msgs) =>
             msgs.map((m) =>
               m.id === agentId
-                ? { ...m, pending: false, text: res.summary, actionCount: res.actions.length }
+                ? { ...m, pending: false, text: res.summary, actionCount: res.actions.length,
+                actionIds: res.actions.map((a) => a.id) }
                 : m,
             ),
           );
@@ -244,14 +247,23 @@ export function ChatPanel({ projectId }: { projectId: string }) {
     );
   };
 
-  const onUndo = (msgId: string) => {
-    undo.mutate(
-      { project_id: projectId },
-      {
-        onSuccess: () =>
-          setMessages((msgs) => msgs.map((m) => (m.id === msgId ? { ...m, undone: true } : m))),
-      },
-    );
+  // Undo the WHOLE turn (every action it applied), and only while those
+  // actions are still the newest journal entries — a plain `undo` popped one
+  // global entry, so an old button could revert unrelated later edits.
+  const onUndo = async (msgId: string) => {
+    const msg = messages.find((m) => m.id === msgId);
+    if (!msg || msg.actionIds.length === 0) return;
+    try {
+      await callTool("undo_actions", { project_id: projectId, action_ids: msg.actionIds });
+      await queryClient.invalidateQueries();
+      setMessages((msgs) => msgs.map((m) => (m.id === msgId ? { ...m, undone: true } : m)));
+    } catch (e) {
+      const o = e as { error?: { message?: string }; message?: string };
+      const why = o?.error?.message ?? o?.message ?? String(e);
+      setMessages((msgs) =>
+        msgs.map((m) => (m.id === msgId ? { ...m, text: `${m.text}\n\n[undo: ${why}]` } : m)),
+      );
+    }
   };
 
   return (
@@ -279,8 +291,12 @@ export function ChatPanel({ projectId }: { projectId: string }) {
               {m.pending && <ElapsedRow startedAt={m.startedAt} />}
               {m.text && <div className="agent-summary">{m.text}</div>}
               {!m.pending && m.actionCount > 0 && (
-                <button className="undo-link" onClick={() => onUndo(m.id)} disabled={m.undone || undo.isPending}>
-                  {m.undone ? "Undone" : "Undo this edit"}
+                <button className="undo-link" onClick={() => void onUndo(m.id)} disabled={m.undone}>
+                  {m.undone
+                    ? "Undone"
+                    : m.actionCount > 1
+                      ? `Undo all ${m.actionCount} edits`
+                      : "Undo this edit"}
                 </button>
               )}
             </div>

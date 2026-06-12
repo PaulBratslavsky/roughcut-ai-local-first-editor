@@ -515,6 +515,13 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return clone(state.preferences);
   },
 
+  undo_actions(args): unknown {
+    const p = requireProject(args.project_id);
+    const ids = (args.action_ids as string[]) ?? [];
+    for (let i = 0; i < ids.length; i++) state.undoStack.pop();
+    return { undone: ids.length, timeline: { cut_count: p.timeline.cut_count, included_duration_s: p.timeline.duration } };
+  },
+
   undo(args) {
     const p = requireProject(args.project_id);
     const snap = state.undoStack.pop();

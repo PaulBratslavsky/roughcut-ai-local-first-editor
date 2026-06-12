@@ -39,6 +39,19 @@ impl Editor {
             let before_clips = project.timeline.clips.clone();
             let before_padding = project.timeline.global_padding;
             let mut split_ids = vec![];
+            // Bounds validation for range ops BEFORE mutating: clamped
+            // garbage (start>end, both ends past EOF) used to no-op
+            // silently, journal a phantom entry, and report success — the
+            // exact false-positive a small model cannot repair from.
+            if let EditOp::CutRange { start, end } | EditOp::RestoreRange { start, end } = &op {
+                let dur = project.timeline.duration;
+                if *start >= *end || *start < 0.0 || *start >= dur {
+                    return Err(CoreError::InvalidArg(format!(
+                        "range {:.2}s–{:.2}s is invalid: need 0 <= start < end and start < {dur:.2}s (the source duration)",
+                        start, end
+                    )));
+                }
+            }
             apply_op(
                 project,
                 transcript.as_mut(),
@@ -132,6 +145,38 @@ impl Editor {
         let outcome = self.apply_edit(project_id, EditOp::RoughCut { aggressiveness: aggr }, source)?;
         let cut_count = outcome.timeline.cut_count;
         Ok((outcome.action, outcome.timeline, cut_count))
+    }
+
+    /// Undo a specific action set (one chat turn) — ONLY when they are
+    /// still the newest journal entries, so a stale button can never revert
+    /// unrelated later work.
+    pub fn undo_actions(&self, project_id: Uuid, ids: &[Uuid]) -> Result<(usize, Timeline)> {
+        if ids.is_empty() {
+            return Err(CoreError::InvalidArg("action_ids must be non-empty".into()));
+        }
+        self.ensure_loaded(project_id)?;
+        {
+            let state = self.inner.state.lock().unwrap();
+            let entry = state
+                .get(&project_id)
+                .ok_or_else(|| CoreError::NotFound(format!("project {project_id}")))?;
+            let top: Vec<Uuid> =
+                entry.undo.iter().rev().take(ids.len()).map(|j| j.action.id).collect();
+            let want: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
+            if top.len() != ids.len() || !top.iter().all(|id| want.contains(id)) {
+                return Err(CoreError::InvalidArg(
+                    "those actions are no longer the newest edits — undo them from the \
+                     top bar instead (newer changes exist)"
+                        .into(),
+                ));
+            }
+        }
+        let mut timeline = self.get_timeline(project_id)?;
+        for _ in 0..ids.len() {
+            let (_, tl) = self.step_history(project_id, true)?;
+            timeline = tl;
+        }
+        Ok((ids.len(), timeline))
     }
 
     pub fn undo(&self, project_id: Uuid) -> Result<(Option<EditAction>, Timeline)> {

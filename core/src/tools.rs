@@ -115,8 +115,82 @@ pub async fn dispatch_basic(
     let spec = REGISTRY
         .iter()
         .find(|s| s.name == name && !s.meta)
-        .ok_or_else(|| CoreError::NotFound(format!("unknown tool {name}")))?;
+        .ok_or_else(|| {
+            let known: Vec<&str> = REGISTRY.iter().filter(|s| !s.meta).map(|s| s.name).collect();
+            CoreError::NotFound(format!("unknown tool {name}; available: {}", known.join(", ")))
+        })?;
+    validate_args(spec, args)?;
     (spec.handler)(editor, args, source).await
+}
+
+/// Required-fields + primitive-type check against the declared schema —
+/// "required" was advertised but never enforced, and small models repair
+/// best from errors that echo expected vs got (research: strict validators
+/// matter more than model size).
+fn validate_args(spec: &ToolSpec, args: &Value) -> Result<()> {
+    let schema = (spec.schema)();
+    let Some(props) = schema["properties"].as_object() else { return Ok(()) };
+    if !args.is_object() {
+        return Err(CoreError::InvalidArg(format!(
+            "{}: arguments must be a JSON object, got {}",
+            spec.name,
+            json_kind(args)
+        )));
+    }
+    let mut problems: Vec<String> = vec![];
+    if let Some(required) = schema["required"].as_array() {
+        for r in required.iter().filter_map(|v| v.as_str()) {
+            if args.get(r).map(|v| v.is_null()).unwrap_or(true) {
+                let expected = props
+                    .get(r)
+                    .and_then(|p| p["type"].as_str())
+                    .unwrap_or("value");
+                problems.push(format!("missing required '{r}' ({expected})"));
+            }
+        }
+    }
+    for (key, value) in args.as_object().unwrap() {
+        let Some(prop) = props.get(key) else { continue }; // extra keys: ignore
+        let Some(expected) = prop["type"].as_str() else { continue };
+        if value.is_null() {
+            continue;
+        }
+        let ok = match expected {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            _ => true,
+        };
+        if !ok {
+            problems.push(format!(
+                "'{key}' must be a {expected}, got {} ({value})",
+                json_kind(value)
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidArg(format!(
+            "{}: {}. Schema: {}",
+            spec.name,
+            problems.join("; "),
+            serde_json::to_string(&schema).unwrap_or_default()
+        )))
+    }
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 // ----------------------------------------------------------- arg helpers
@@ -146,11 +220,21 @@ fn arg_uuid_opt(args: &Value, key: &str) -> Result<Option<Uuid>> {
 }
 
 fn arg_f64(args: &Value, key: &str) -> Result<f64> {
-    args[key].as_f64().ok_or_else(|| CoreError::InvalidArg(format!("missing number {key}")))
+    args[key].as_f64().ok_or_else(|| {
+        CoreError::InvalidArg(format!(
+            "'{key}' must be a number, got {}",
+            json_kind(&args[key])
+        ))
+    })
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args[key].as_str().ok_or_else(|| CoreError::InvalidArg(format!("missing string {key}")))
+    args[key].as_str().ok_or_else(|| {
+        CoreError::InvalidArg(format!(
+            "'{key}' must be a string, got {}",
+            json_kind(&args[key])
+        ))
+    })
 }
 
 fn arg_uuid_vec(args: &Value, key: &str) -> Result<Vec<Uuid>> {
@@ -445,7 +529,15 @@ handler!(h_story_edit, |e, a, s| {
         e,
         arg_uuid(a, "project_id")?,
         arg_str(a, "instruction")?,
-        a["target_duration_s"].as_f64(),
+        match &a["target_duration_s"] {
+            Value::Null => None,
+            v => Some(v.as_f64().ok_or_else(|| {
+                CoreError::InvalidArg(format!(
+                    "'target_duration_s' must be a number (seconds), got {}",
+                    json_kind(v)
+                ))
+            })?),
+        },
         s,
     )
     .await?;
@@ -524,24 +616,66 @@ handler!(h_find_segments, |e, a, _s| {
 handler!(h_apply_edits, |e, a, s| {
     let project_id = arg_uuid(a, "project_id")?;
     let ops: Vec<EditOp> = serde_json::from_value(a["edits"].clone())
-        .map_err(|err| CoreError::InvalidArg(format!("edits: {err}")))?;
+        .map_err(|err| CoreError::InvalidArg(format!(
+            "edits: {err}. Each edit is {{\"type\": one of cut_range|restore_range|cut_segments|\
+             restore_segments|trim_clip|split_clip|reorder_clip|set_global_padding, ...fields}}"
+        )))?;
     if ops.is_empty() {
         return Err(CoreError::InvalidArg("edits must be a non-empty array".into()));
     }
     if ops.len() > 100 {
         return Err(CoreError::InvalidArg("at most 100 edits per call".into()));
     }
+    // Journal-internal variants are NOT public edits: a hallucinated
+    // set_clips would wholesale-replace (wipe) the timeline, and rough_cut
+    // through this path skips peak staging — both have real tools.
+    for (i, op) in ops.iter().enumerate() {
+        if matches!(op, EditOp::SetClips { .. } | EditOp::RoughCut { .. }) {
+            return Err(CoreError::InvalidArg(format!(
+                "edit {i}: type '{}' is not allowed in apply_edits (use generate_rough_cut \
+                 for rough cuts; set_clips is journal-internal)",
+                op.kind()
+            )));
+        }
+    }
     let mut actions = vec![];
     let mut last: Option<crate::model::Timeline> = None;
-    for op in ops {
-        let outcome = e.apply_edit(project_id, op, s)?;
-        actions.push(outcome.action);
-        last = Some(outcome.timeline);
+    let total = ops.len();
+    for (i, op) in ops.into_iter().enumerate() {
+        match e.apply_edit(project_id, op, s) {
+            Ok(outcome) => {
+                actions.push(outcome.action);
+                last = Some(outcome.timeline);
+            }
+            Err(err) => {
+                // PARTIAL RECEIPT, never a bare error: edits 0..i landed and
+                // are journaled — an Err would tell the model (and MCP
+                // clients) "nothing happened" while the timeline changed,
+                // and its natural retry would re-apply the prefix.
+                let tl = e.get_timeline(project_id)?;
+                return Ok(json!({
+                    "applied": actions.len(),
+                    "requested": total,
+                    "actions": actions,
+                    "failed_at": i,
+                    "error": { "code": "edit_failed", "message": err.to_string() },
+                    "note": format!(
+                        "edits 0..{} were APPLIED and are undoable; edit {i} failed — \
+                         fix it and resend ONLY the remaining edits",
+                        actions.len()
+                    ),
+                    "cut_count": tl.cut_count,
+                    "included_duration_s": tl.included_duration(),
+                    "source_duration_s": tl.duration,
+                }));
+            }
+        }
     }
     // Lean receipt: no clip dumps. Use get_timeline if you need detail.
     let tl = last.unwrap();
     Ok(json!({
         "applied": actions.len(),
+        "requested": total,
         "actions": actions,
         "cut_count": tl.cut_count,
         "included_duration_s": tl.included_duration(),
@@ -653,6 +787,13 @@ handler!(h_get_timeline, |e, a, _s| {
 
 handler!(h_get_transcript, |e, a, _s| {
     Ok(serde_json::to_value(e.get_transcript(arg_uuid(a, "project_id")?)?)?)
+});
+
+handler!(h_undo_actions, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let ids = arg_uuid_vec(a, "action_ids")?;
+    let (undone, timeline) = e.undo_actions(project_id, &ids)?;
+    Ok(json!({ "undone": undone, "timeline": { "cut_count": timeline.cut_count, "included_duration_s": timeline.included_duration() } }))
 });
 
 handler!(h_undo, |e, a, _s| {
@@ -782,7 +923,16 @@ static REGISTRY: &[ToolSpec] = &[
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_read_transcript),
     tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
-        || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"type": "object", "description": "EditOp object with a type field"}}}), &["project_id", "edits"]),
+        || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"oneOf": [
+            {"type": "object", "properties": {"type": {"const": "cut_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
+            {"type": "object", "properties": {"type": {"const": "restore_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
+            {"type": "object", "properties": {"type": {"const": "cut_segments"}, "segment_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "segment_ids"]},
+            {"type": "object", "properties": {"type": {"const": "restore_segments"}, "segment_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "segment_ids"]},
+            {"type": "object", "properties": {"type": {"const": "trim_clip"}, "clip_id": {"type": "string"}, "new_source_in": {"type": "number"}, "new_source_out": {"type": "number"}}, "required": ["type", "clip_id", "new_source_in", "new_source_out"]},
+            {"type": "object", "properties": {"type": {"const": "split_clip"}, "clip_id": {"type": "string"}, "at_time": {"type": "number"}}, "required": ["type", "clip_id", "at_time"]},
+            {"type": "object", "properties": {"type": {"const": "reorder_clip"}, "clip_id": {"type": "string"}, "new_order": {"type": "integer"}}, "required": ["type", "clip_id", "new_order"]},
+            {"type": "object", "properties": {"type": {"const": "set_global_padding"}, "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}, "required": ["type", "start_s", "end_s"]}
+        ]}}}), &["project_id", "edits"]),
         agent: true, meta: false, mutating: true, h_apply_edits),
     tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "history": {"type": "array", "description": "recent chat turns, oldest first", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["user", "agent"]}, "text": {"type": "string"}}}}}), &["project_id", "instruction"]),
@@ -828,6 +978,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("get_transcript", "Get the FULL transcript including word-level timestamps — large for long videos; prefer read_transcript (paged) or find_segments (semantic search).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_get_transcript),
+    tool!("undo_actions", "Undo a SPECIFIC set of recent actions (e.g. everything one chat turn applied). Succeeds only while those actions are still the newest journal entries; otherwise errors so unrelated newer edits are never reverted.",
+        || obj(json!({"project_id": pid_schema(), "action_ids": {"type": "array", "items": {"type": "string"}}}), &["project_id", "action_ids"]),
+        agent: false, meta: false, mutating: true, h_undo_actions),
     tool!("undo", "Undo the last edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, mutating: true, h_undo),
     tool!("redo", "Redo the last undone edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),

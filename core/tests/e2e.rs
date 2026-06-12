@@ -585,3 +585,89 @@ async fn story_tools_degrade_honestly_without_a_model() {
     .await;
     assert!(out["after_s"].as_f64().unwrap() <= before * 0.55, "fallback should hit the target: {out}");
 }
+
+#[tokio::test]
+async fn chat_editing_stability_guards() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "guards", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // 1. Schema validation: wrong-typed arg fails with expected-vs-got text.
+    let err = tools::dispatch(
+        &editor,
+        "cut_range",
+        &json!({ "project_id": pid, "start": "five", "end": 10.0 }),
+        ActionSource::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("must be a number"), "got: {err}");
+
+    // 2. Invalid range fails loudly instead of phantom-journaling a no-op.
+    let err = tools::dispatch(
+        &editor,
+        "cut_range",
+        &json!({ "project_id": pid, "start": 30.0, "end": 10.0 }),
+        ActionSource::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid"), "got: {err}");
+
+    // 3. Journal-internal variants are rejected at the tool boundary.
+    let err = tools::dispatch(
+        &editor,
+        "apply_edits",
+        &json!({ "project_id": pid, "edits": [
+            { "type": "set_clips", "clips": [], "global_padding": { "start_s": 0, "end_s": 0, "linked": true } }
+        ]}),
+        ActionSource::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("not allowed"), "got: {err}");
+
+    // 4. Mid-batch failure returns a PARTIAL receipt, not a bare error.
+    let receipt = call(
+        &editor,
+        "apply_edits",
+        json!({ "project_id": pid, "edits": [
+            { "type": "cut_range", "start": 1.0, "end": 2.0 },
+            { "type": "cut_segments", "segment_ids": ["00000000-0000-0000-0000-000000000001"] },
+            { "type": "cut_range", "start": 3.0, "end": 4.0 }
+        ]}),
+    )
+    .await;
+    assert_eq!(receipt["applied"], 1, "{receipt}");
+    assert_eq!(receipt["failed_at"], 1);
+    assert!(receipt["note"].as_str().unwrap().contains("APPLIED"));
+
+    // 5. undo_actions reverts a specific turn — and refuses when stale.
+    let a1 = receipt["actions"][0]["id"].as_str().unwrap().to_string();
+    let r2 = call(
+        &editor,
+        "apply_edits",
+        json!({ "project_id": pid, "edits": [ { "type": "cut_range", "start": 5.0, "end": 6.0 } ] }),
+    )
+    .await;
+    let a2 = r2["actions"][0]["id"].as_str().unwrap().to_string();
+    // stale: a1 is no longer on top
+    let err = tools::dispatch(
+        &editor,
+        "undo_actions",
+        &json!({ "project_id": pid, "action_ids": [a1] }),
+        ActionSource::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no longer the newest"), "got: {err}");
+    // fresh: a2 undoes cleanly
+    let out = call(&editor, "undo_actions", json!({ "project_id": pid, "action_ids": [a2] })).await;
+    assert_eq!(out["undone"], 1);
+}
