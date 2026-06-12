@@ -1805,3 +1805,17 @@ input, select { font: inherit; }
 }
 .rec-library-name.as-btn:hover { text-decoration: underline; }
 .rec-library-name.as-btn.current { text-decoration: underline; font-weight: 600; }
+
+/* bigger, stateful mic meter */
+.mic-meter-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.mic-meter.big {
+  width: 120px;
+  height: 10px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+.mic-meter-fill.hot { background: #e5484d; }
+.mic-meter-status {
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}

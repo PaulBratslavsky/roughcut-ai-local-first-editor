@@ -1,8 +1,9 @@
-// Playback volume metering: PreviewPanel registers whichever element is
-// AUDIBLE (the <video>, or the shifted <audio> follower when an A/V sync
-// offset is active); the transport meter taps it through one WebAudio
-// graph per element. createMediaElementSource is once-per-element-forever,
-// hence the WeakMap of graphs.
+// Playback volume metering, NON-INVASIVE edition. createMediaElementSource
+// looked right but REROUTES the element's audio through the graph — and
+// WebKit hands the graph silence for asset-protocol media (CORS taint),
+// which silenced playback entirely. captureStream() taps a COPY of the
+// media without touching the element's own output; where it's unsupported
+// the meter simply stays idle and audio is never at risk.
 
 interface Graph {
   ctx: AudioContext;
@@ -23,23 +24,30 @@ export function onAudibleChange(l: () => void): () => void {
   return () => listeners.delete(l);
 }
 
-/** Analyser for the current audible element (builds the graph on demand). */
+type WithCapture = HTMLMediaElement & { captureStream?: () => MediaStream };
+
+/** Analyser for the current audible element, or null when tapping isn't
+ *  possible — playback itself is NEVER rerouted. */
 export function audibleAnalyser(): AnalyserNode | null {
   if (!audible) return null;
   let graph = graphs.get(audible);
   if (!graph) {
     try {
+      const capture = (audible as WithCapture).captureStream;
+      if (typeof capture !== "function") return null;
+      const stream = capture.call(audible);
+      if (stream.getAudioTracks().length === 0) return null;
       const ctx = new AudioContext();
-      const source = ctx.createMediaElementSource(audible);
+      const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
-      // Tap AND pass through — a bare analyser would mute playback.
+      // Stream sources are tap-only: nothing connects to the destination,
+      // so the element keeps playing its own audio untouched.
       source.connect(analyser);
-      analyser.connect(ctx.destination);
       graph = { ctx, analyser };
       graphs.set(audible, graph);
     } catch {
-      return null; // element already claimed by another context
+      return null;
     }
   }
   if (graph.ctx.state === "suspended") void graph.ctx.resume().catch(() => {});

@@ -46,12 +46,17 @@ function fmtClock(s: number): string {
  *  to a take. WebAudio analyser on the selected device (matched by label). */
 function MicMeter({ micName }: { micName?: string }) {
   const [level, setLevel] = useState(0);
+  const [state, setState] = useState<"starting" | "live" | "unavailable">("starting");
   useEffect(() => {
-    if (!navigator.mediaDevices?.getUserMedia) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setState("unavailable");
+      return;
+    }
     let stream: MediaStream | null = null;
     let ctx: AudioContext | null = null;
     let raf = 0;
     let cancelled = false;
+    setState("starting");
     void (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -67,10 +72,12 @@ function MicMeter({ micName }: { micName?: string }) {
         }
         if (cancelled) return;
         ctx = new AudioContext();
+        if (ctx.state === "suspended") await ctx.resume().catch(() => {});
         const src = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 512;
         src.connect(analyser);
+        setState("live");
         const buf = new Uint8Array(analyser.fftSize);
         const tick = () => {
           analyser.getByteTimeDomainData(buf);
@@ -85,7 +92,7 @@ function MicMeter({ micName }: { micName?: string }) {
         };
         tick();
       } catch {
-        /* no meter without permission — recording still works */
+        if (!cancelled) setState("unavailable");
       }
     })();
     return () => {
@@ -95,9 +102,22 @@ function MicMeter({ micName }: { micName?: string }) {
       void ctx?.close().catch(() => {});
     };
   }, [micName]);
+
+  if (state === "unavailable") {
+    return <span className="mic-meter-status">mic preview unavailable — recording still captures</span>;
+  }
+  const quiet = state === "live" && level < 0.04;
   return (
-    <span className="mic-meter" title="mic level">
-      <span className="mic-meter-fill" style={{ width: `${Math.round(level * 100)}%` }} />
+    <span className="mic-meter-wrap">
+      <span className="mic-meter big" title="mic level">
+        <span
+          className={`mic-meter-fill${level > 0.85 ? " hot" : ""}`}
+          style={{ width: `${Math.round(level * 100)}%` }}
+        />
+      </span>
+      <span className="mic-meter-status">
+        {state === "starting" ? "mic…" : quiet ? "speak to test the mic" : "mic ✓"}
+      </span>
     </span>
   );
 }
