@@ -41,8 +41,10 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   // core then provides a remuxed playable copy alongside peaks/thumbnails.
   const { data: assets } = useMediaAssets(projectId);
   const src = useMemo(() => {
-    if (!project?.media || !isTauri) return null;
-    return mediaSrc(assets?.playback_path ?? project.media.file_path);
+    if (!project?.media) return null;
+    const path = assets?.playback_path ?? project.media.file_path;
+    if (!isTauri && !path.startsWith("http")) return null;
+    return mediaSrc(path);
   }, [project?.media, assets?.playback_path]);
   const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
 

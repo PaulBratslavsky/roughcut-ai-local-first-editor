@@ -223,6 +223,9 @@ export async function revealPath(path: string): Promise<void> {
 
 /** Resolve a local media file path to something a <video> tag can play. */
 export function mediaSrc(filePath: string): string | null {
+  // Browser harness: http sources play directly (lets Playwright exercise
+  // the REAL <video> engine paths the mock clock can't).
+  if (filePath.startsWith("http")) return filePath;
   if (!isTauri) return null;
   // A bare file name (no directory) can't be resolved by the asset protocol —
   // happens for projects imported in demo/browser flows. Show the placeholder.

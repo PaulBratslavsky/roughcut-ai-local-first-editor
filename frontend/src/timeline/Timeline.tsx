@@ -189,6 +189,7 @@ export function Timeline({ projectId }: { projectId: string }) {
   // --- pointer interactions ----------------------------------------------------
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
+    console.log('[scrub-debug] pointerdown', { hasCanvas: !!canvas, duration });
     if (!canvas || duration === 0) return;
     canvas.setPointerCapture(e.pointerId);
     const x = localX(e);

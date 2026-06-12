@@ -367,6 +367,11 @@ handler!(h_read_transcript, |e, a, _s| {
     })
 });
 
+handler!(h_attach_screen_media, |e, a, _s| {
+    e.attach_screen_media(arg_uuid(a, "project_id")?, arg_str(a, "file_path")?).await?;
+    Ok(serde_json::json!({ "attached": true }))
+});
+
 handler!(h_set_layout, |e, a, _s| {
     let pid = arg_uuid(a, "project_id")?;
     let mut layout = e.open_project(pid)?.layout;
@@ -733,6 +738,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
+    tool!("attach_screen_media", "Attach a dual-capture screen file to a project (probed; rides the same clock as the primary media). set_layout then controls compositing.",
+        || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
+        agent: false, meta: false, h_attach_screen_media),
     tool!("set_layout", "Presentation layout for dual-capture projects (screen_media): mode pip|camera|screen, shape rounded|round, corner tl|tr|bl|br, size 0.10-0.45 (camera width fraction). Composited at preview/export; source files untouched.",
         || obj(json!({"project_id": pid_schema(), "mode": {"type": "string"}, "shape": {"type": "string"}, "corner": {"type": "string"}, "size": {"type": "number"}}), &["project_id"]),
         agent: false, meta: false, h_set_layout),

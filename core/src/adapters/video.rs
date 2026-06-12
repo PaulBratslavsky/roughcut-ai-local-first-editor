@@ -42,20 +42,25 @@ pub struct ThumbnailRef {
 
 pub const PEAKS_PER_SECOND: u32 = 50;
 
+/// Everything one MP4 render needs. Grew from positional params — layout
+/// compositing (screen + camera bubble) made a struct overdue.
+pub struct RenderJob<'a> {
+    pub media: &'a Media,
+    pub timeline: &'a Timeline,
+    pub out_path: &'a str,
+    pub audio_offset_s: f64,
+    /// Dual-capture compositing: the synced screen file + how to frame it.
+    pub screen: Option<(&'a Media, &'a crate::model::Layout)>,
+}
+
 #[async_trait]
 pub trait VideoEngine: Send + Sync {
     /// Probe a local file's metadata (no decode).
     async fn probe(&self, file_path: &str) -> Result<Media>;
     /// Render the included clips of `timeline` to an MP4 at `out_path`,
     /// emitting `progress` events (task "export") as ffmpeg advances.
-    async fn render_mp4(
-        &self,
-        media: &Media,
-        timeline: &Timeline,
-        out_path: &str,
-        audio_offset_s: f64,
-        sink: &crate::events::SharedSink,
-    ) -> Result<()>;
+    async fn render_mp4(&self, job: &RenderJob<'_>, sink: &crate::events::SharedSink)
+        -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
     async fn extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()>;
     /// Waveform peaks + thumbnail filmstrip, generated once and cached in
@@ -192,19 +197,18 @@ impl VideoEngine for FfmpegCli {
         })
     }
 
-    async fn render_mp4(
-        &self,
-        media: &Media,
-        timeline: &Timeline,
-        out_path: &str,
-        audio_offset_s: f64,
-        sink: &crate::events::SharedSink,
-    ) -> Result<()> {
+    async fn render_mp4(&self, job: &RenderJob<'_>, sink: &crate::events::SharedSink) -> Result<()> {
+        let media = job.media;
+        let timeline = job.timeline;
+        let out_path = job.out_path;
+        let audio_offset_s = job.audio_offset_s;
         let clips: Vec<_> = timeline.included_clips().collect();
         if clips.is_empty() {
             return Err(CoreError::InvalidArg("timeline has no included clips".into()));
         }
         let total_us = (timeline.included_duration() * 1_000_000.0).max(1.0);
+        // Dual-capture compositing: bake the SAME layout the preview shows.
+        let compositing = job.screen.filter(|(_, l)| l.mode != "camera");
         // Build a trim/concat filtergraph over the single source. Each clip's
         // audio gets a 20ms fade at both edges so joins never click — video
         // stays a hard cut, timing is untouched.
@@ -226,11 +230,76 @@ impl VideoEngine for FfmpegCli {
         } else {
             "[0:a]"
         };
+        // Video source per clip: raw camera, or the composed frame.
+        let video_src: String = if let Some((screen, layout)) = compositing {
+            let w = (screen.width.max(2) / 2 * 2) as i64;
+            let h = (screen.height.max(2) / 2 * 2) as i64;
+            filter.push_str(&format!(
+                "[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,\
+                 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[scr];"
+            ));
+            if layout.mode == "screen" {
+                filter.push_str("[scr]null[comp];");
+            } else {
+                // The face bubble: scaled camera with a round / rounded-rect
+                // alpha mask (geq on the small pip only — cheap), overlaid at
+                // the chosen corner with a 3% inset.
+                let pw = ((layout.size.clamp(0.10, 0.45) * w as f64) as i64 / 2 * 2).max(64);
+                let scale_chain = if layout.shape == "round" {
+                    format!(
+                        "scale={pw}:{pw}:force_original_aspect_ratio=increase,\
+                         crop={pw}:{pw}"
+                    )
+                } else {
+                    format!("scale={pw}:-2")
+                };
+                let mask = if layout.shape == "round" {
+                    "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),(W/2)*(W/2)),255,0)".to_string()
+                } else {
+                    let r = (pw / 14).max(10);
+                    format!(
+                        "if(lte(pow(max(abs(X-W/2)-(W/2-{r}),0),2)+pow(max(abs(Y-H/2)-(H/2-{r}),0),2),{r}*{r}),255,0)"
+                    )
+                };
+                let inset_x = (w as f64 * 0.03) as i64;
+                let inset_y = (h as f64 * 0.03) as i64;
+                let x = if layout.corner.contains('l') {
+                    inset_x.to_string()
+                } else {
+                    format!("main_w-overlay_w-{inset_x}")
+                };
+                let y = if layout.corner.contains('t') {
+                    inset_y.to_string()
+                } else {
+                    format!("main_h-overlay_h-{inset_y}")
+                };
+                filter.push_str(&format!(
+                    "[0:v]{scale_chain},format=rgba,\
+                     geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{mask}'[cam];\
+                     [scr][cam]overlay={x}:{y}[comp];"
+                ));
+            }
+            // A labeled stream is consumed once — fan out per clip.
+            filter.push_str(&format!("[comp]split={}", clips.len()));
+            for i in 0..clips.len() {
+                filter.push_str(&format!("[cc{i}]"));
+            }
+            filter.push(';');
+            "cc".to_string()
+        } else {
+            String::new()
+        };
+
         for (i, c) in clips.iter().enumerate() {
             let dur = c.duration();
             let fade = (0.02_f64).min(dur / 4.0);
+            let vsrc = if video_src.is_empty() {
+                "[0:v]".to_string()
+            } else {
+                format!("[{video_src}{i}]")
+            };
             filter.push_str(&format!(
-                "[0:v]trim=start={in_}:end={out},setpts=PTS-STARTPTS[v{i}];\
+                "{vsrc}trim=start={in_}:end={out},setpts=PTS-STARTPTS[v{i}];\
                  {audio_src}atrim=start={in_}:end={out},asetpts=PTS-STARTPTS,\
                  afade=t=in:st=0:d={fade:.3},afade=t=out:st={fo:.3}:d={fade:.3}[a{i}];",
                 in_ = c.source_in,
@@ -244,10 +313,13 @@ impl VideoEngine for FfmpegCli {
         }
         filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
         let mut cmd = ffmpeg_cmd()?;
+        cmd.args(["-y", "-nostats", "-progress", "pipe:1", "-i", &media.file_path]);
+        if let Some((screen, _)) = compositing {
+            cmd.args(["-i", &screen.file_path]);
+        }
         cmd.args([
-            "-y", "-nostats", "-progress", "pipe:1",
-            "-i", &media.file_path, "-filter_complex", &filter, "-map", "[v]", "-map",
-            "[a]", "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", out_path,
+            "-filter_complex", &filter, "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", out_path,
         ]);
         // Stream ffmpeg's key=value progress lines into UI events.
         let mut child = cmd
@@ -539,14 +611,7 @@ impl VideoEngine for MockVideoEngine {
         })
     }
 
-    async fn render_mp4(
-        &self,
-        _m: &Media,
-        _t: &Timeline,
-        _o: &str,
-        _offset: f64,
-        _sink: &crate::events::SharedSink,
-    ) -> Result<()> {
+    async fn render_mp4(&self, _job: &RenderJob<'_>, _sink: &crate::events::SharedSink) -> Result<()> {
         Err(CoreError::Unavailable(
             "MP4 render needs ffmpeg on PATH (demo mode active). NLE XML/EDL/SRT export still works.".into(),
         ))
@@ -582,18 +647,11 @@ impl VideoEngine for AutoVideoEngine {
         }
     }
 
-    async fn render_mp4(
-        &self,
-        media: &Media,
-        timeline: &Timeline,
-        out_path: &str,
-        audio_offset_s: f64,
-        sink: &crate::events::SharedSink,
-    ) -> Result<()> {
+    async fn render_mp4(&self, job: &RenderJob<'_>, sink: &crate::events::SharedSink) -> Result<()> {
         if crate::capabilities::probe().media_ready() {
-            FfmpegCli.render_mp4(media, timeline, out_path, audio_offset_s, sink).await
+            FfmpegCli.render_mp4(job, sink).await
         } else {
-            MockVideoEngine.render_mp4(media, timeline, out_path, audio_offset_s, sink).await
+            MockVideoEngine.render_mp4(job, sink).await
         }
     }
 

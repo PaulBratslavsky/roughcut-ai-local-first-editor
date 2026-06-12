@@ -78,9 +78,14 @@ impl Editor {
         if target == "mp4" {
             let (project, _) = self.snapshot(project_id)?;
             let media = require_media(&project)?.clone();
-            self.video()
-                .render_mp4(&media, &project.timeline, out_path, project.audio_offset_s, &self.sink())
-                .await?;
+            let job = crate::adapters::video::RenderJob {
+                media: &media,
+                timeline: &project.timeline,
+                out_path,
+                audio_offset_s: project.audio_offset_s,
+                screen: project.screen_media.as_ref().map(|m| (m, &project.layout)),
+            };
+            self.video().render_mp4(&job, &self.sink()).await?;
             return Ok(out_path.to_string());
         }
         let (project, transcript) = self.snapshot(project_id)?;

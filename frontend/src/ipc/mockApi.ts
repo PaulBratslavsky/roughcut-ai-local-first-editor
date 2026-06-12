@@ -387,11 +387,44 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   create_project(args): Project {
     const now = new Date().toISOString();
+    // Browser-harness real-video mode: an http file_path becomes playable
+    // media with a known duration so engine paths run end to end.
+    const httpMedia = typeof args.file_path === "string" && args.file_path.startsWith("http");
     state.project = {
       id: "project-demo",
       name: typeof args.name === "string" && args.name ? args.name : "Untitled project",
-      media: null,
-      timeline: emptyTimeline(),
+      media: httpMedia
+        ? {
+            id: "media-http",
+            file_path: String(args.file_path),
+            duration: 30,
+            frame_rate: 30,
+            width: 640,
+            height: 360,
+            audio_sample_rate: 48000,
+            codec: "h264",
+            imported_at: now,
+          }
+        : null,
+      timeline: httpMedia
+        ? {
+            id: "timeline-http",
+            clips: [
+              {
+                id: "clip-http",
+                source_in: 0,
+                source_out: 30,
+                included: true,
+                origin: "rough_cut",
+                order: 0,
+                linked_segment_ids: [],
+              },
+            ],
+            global_padding: { start_s: 0, end_s: 0, linked: true },
+            cut_count: 0,
+            duration: 30,
+          }
+        : emptyTimeline(),
       created_at: now,
       updated_at: now,
       schema_version: 2,
@@ -777,6 +810,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       method: "heuristic",
       notes: "(browser mock) longest segments first",
     };
+  },
+
+  attach_screen_media(args): unknown {
+    requireProject(args.project_id);
+    return { attached: true };
   },
 
   set_layout(args): unknown {
