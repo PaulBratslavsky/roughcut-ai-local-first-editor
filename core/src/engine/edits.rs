@@ -355,42 +355,83 @@ impl Editor {
     /// snapshots make every landing exact.
     pub fn jump_to(&self, project_id: Uuid, target: Option<Uuid>) -> Result<Timeline> {
         self.ensure_loaded(project_id)?;
-        // Desired undo-stack length under a short lock; then step (each step
-        // takes its own lock — never hold across the loop).
-        let desired: usize = {
-            let state = self.inner.state.lock().unwrap();
-            let entry =
-                state.get(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
-            match target {
-                None => 0,
-                Some(id) => {
-                    if let Some(pos) = entry.undo.iter().position(|j| j.action.id == id) {
-                        pos + 1
-                    } else if let Some(rpos) = entry.redo.iter().position(|j| j.action.id == id) {
-                        // redo[rpos] sits at chronological future offset
-                        // (redo.len()-1 - rpos); +1 to include it as applied.
-                        entry.undo.len() + (entry.redo.len() - 1 - rpos) + 1
-                    } else {
-                        return Err(CoreError::NotFound(format!("history entry {id}")));
+        // TARGET-DRIVEN, not length-driven: re-derive the direction from the
+        // LIVE stacks each iteration so a concurrent edit between steps can't
+        // strand us (a frozen `desired` length could spin forever after a
+        // redo.clear, or land on the wrong entry after an eviction). Each step
+        // moves one entry between stacks; the iteration cap is a paranoia
+        // backstop (the journal is bounded by UNDO_CAP anyway).
+        enum Step {
+            Done,
+            Undo,
+            Redo,
+            Vanished,
+        }
+        let max_steps = 2 * UNDO_CAP + 8;
+        let mut stepped = false;
+        for _ in 0..max_steps {
+            let step = {
+                let state = self.inner.state.lock().unwrap();
+                let entry = state
+                    .get(&project_id)
+                    .ok_or_else(|| CoreError::NotFound("project".into()))?;
+                match target {
+                    None => {
+                        if entry.undo.is_empty() {
+                            Step::Done
+                        } else {
+                            Step::Undo
+                        }
+                    }
+                    Some(id) => {
+                        if entry.undo.last().map(|j| j.action.id) == Some(id) {
+                            Step::Done
+                        } else if entry.undo.iter().any(|j| j.action.id == id) {
+                            // Target is applied but below the top → undo the
+                            // newer entries until it's the newest.
+                            Step::Undo
+                        } else if entry.redo.iter().any(|j| j.action.id == id) {
+                            Step::Redo // target is in the future → redo toward it
+                        } else {
+                            Step::Vanished // a concurrent edit cleared/evicted it
+                        }
                     }
                 }
-            }
-        };
-        loop {
-            let len = {
-                let state = self.inner.state.lock().unwrap();
-                state.get(&project_id).map(|e| e.undo.len()).unwrap_or(0)
             };
-            if len == desired {
-                break;
-            }
-            if len > desired {
-                self.step_history(project_id, true)?;
-            } else {
-                self.step_history(project_id, false)?;
+            match step {
+                Step::Done => {
+                    // Rough-cut suggestions describe a specific timeline state;
+                    // after moving through time they no longer match. Drop them
+                    // (re-run the rough cut to regenerate for the new state).
+                    if stepped {
+                        let mut state = self.inner.state.lock().unwrap();
+                        if let Some(p) = state.get_mut(&project_id).and_then(|e| e.project.as_mut())
+                        {
+                            if !p.suggestions.is_empty() {
+                                p.suggestions.clear();
+                                let _ = self.inner.store.save_project(p);
+                            }
+                        }
+                    }
+                    return self.get_timeline(project_id);
+                }
+                Step::Undo => {
+                    self.step_history(project_id, true)?;
+                    stepped = true;
+                }
+                Step::Redo => {
+                    self.step_history(project_id, false)?;
+                    stepped = true;
+                }
+                Step::Vanished => {
+                    return Err(CoreError::NotFound(format!(
+                        "history entry {target:?} is no longer in the timeline (a newer edit \
+                         discarded it)"
+                    )))
+                }
             }
         }
-        self.get_timeline(project_id)
+        Err(CoreError::Other("jump_to did not converge".into()))
     }
 
     fn step_history(

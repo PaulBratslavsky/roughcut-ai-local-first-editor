@@ -27,8 +27,12 @@ export function HistoryPanel({ projectId }: { projectId: string }) {
 
   const entries = history?.entries ?? [];
   const current = history?.current_index ?? -1;
+  const hasFuture = entries.some((e) => !e.applied);
   const jumpTo = (id: string | null) =>
     jump.mutate({ project_id: projectId, action_id: id });
+  const jumpError = jump.isError
+    ? String((jump.error as { message?: string })?.message ?? jump.error)
+    : null;
 
   // Newest first for reading; remember each row's original chronological index
   // so we can compare against current_index.
@@ -38,8 +42,12 @@ export function HistoryPanel({ projectId }: { projectId: string }) {
     <div className="history-panel">
       <p className="history-note">
         Every edit, newest first. Click any point to jump back (or forward) in
-        time — nothing is lost, you can always jump again.
+        time.
+        {hasFuture
+          ? " Heads up: making a new edit from an earlier point discards the dimmed steps below it."
+          : ""}
       </p>
+      {jumpError && <p className="empty-error history-error">jump failed: {jumpError}</p>}
       <div className="history-list">
         {rows.map(({ e, i }) => {
           const isCurrent = i === current;

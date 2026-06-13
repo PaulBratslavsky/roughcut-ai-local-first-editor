@@ -2003,3 +2003,5 @@ input, select { font: inherit; }
   border-radius: 2px;
 }
 .history-row.original { border-top: 1px solid var(--line); margin-top: 4px; color: var(--fg-dim); }
+
+.history-error { padding: 0 12px 8px; margin: 0; }
