@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "roughcut-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "roughcut-core",
  "serde",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "roughcut-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "roughcut-mcp-shim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs 5.0.1",
  "reqwest 0.12.28",
