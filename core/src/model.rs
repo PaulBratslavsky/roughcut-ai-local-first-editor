@@ -622,6 +622,30 @@ pub struct Project {
     pub suggestions: Vec<CutSuggestion>,
 }
 
+/// One step in the edit history (a view over a journal entry's action).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryEntry {
+    pub id: Uuid,
+    pub kind: String,
+    pub source: ActionSource,
+    pub description: String,
+    pub timestamp: DateTime<Utc>,
+    /// Currently in effect (in the undo stack) vs. an undone future step.
+    pub applied: bool,
+}
+
+/// The edit history, oldest → newest. `current_index` is the newest applied
+/// entry (-1 = the original, before any edit).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct History {
+    pub entries: Vec<HistoryEntry>,
+    pub current_index: i64,
+}
+
 /// A proposed cut the rough-cut pass FLAGS rather than applies — the fuzzy,
 /// judgment-call tier (repeated takes, semantic repetition). The user accepts
 /// (applies it as a normal undoable cut) or dismisses it.

@@ -727,3 +727,56 @@ async fn stale_suggestions_clear_on_retranscribe() {
         "suggestions must clear on re-transcribe: {after}"
     );
 }
+
+#[tokio::test]
+async fn history_and_jump_in_time() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "hist", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    // Three edits.
+    let a1 = call(&editor, "cut_range", json!({ "project_id": pid, "start": 1.0, "end": 2.0 }))
+        .await["action"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": 3.0, "end": 4.0 })).await;
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": 5.0, "end": 6.0 })).await;
+
+    let h = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(h["entries"].as_array().unwrap().len(), 3);
+    assert_eq!(h["current_index"], 2);
+    let cuts_now =
+        call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"]
+            .as_u64()
+            .unwrap();
+
+    // Jump back to just after the first edit → 2 later cuts become "future".
+    call(&editor, "jump_to", json!({ "project_id": pid, "action_id": a1 })).await;
+    let h2 = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(h2["current_index"], 0, "{h2}");
+    let applied = h2["entries"].as_array().unwrap().iter().filter(|e| e["applied"] == true).count();
+    assert_eq!(applied, 1);
+    let cuts_back =
+        call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"]
+            .as_u64()
+            .unwrap();
+    assert!(cuts_back < cuts_now, "jumping back reduces cuts");
+
+    // Jump to the original (null) → no cuts, all 3 are future.
+    call(&editor, "jump_to", json!({ "project_id": pid, "action_id": null })).await;
+    let h3 = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(h3["current_index"], -1);
+    assert!(h3["entries"].as_array().unwrap().iter().all(|e| e["applied"] == false));
+
+    // Jump forward to the newest (redo all) restores everything.
+    let last = h["entries"][2]["id"].as_str().unwrap();
+    call(&editor, "jump_to", json!({ "project_id": pid, "action_id": last })).await;
+    assert_eq!(
+        call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"]
+            .as_u64()
+            .unwrap(),
+        cuts_now
+    );
+}

@@ -539,6 +539,54 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return clone(state.preferences);
   },
 
+  get_history(args): unknown {
+    requireProject(args.project_id);
+    const applied = state.undoStack.map(({ action: a }, i) => ({
+      id: a?.id ?? `u${i}`,
+      kind: a?.kind ?? "edit",
+      source: a?.source ?? "ui",
+      description: a?.description ?? "Edit",
+      timestamp: a?.timestamp ?? new Date().toISOString(),
+      applied: true,
+    }));
+    const future = [...state.redoStack].reverse().map(({ action: a }, i) => ({
+      id: a?.id ?? `r${i}`,
+      kind: a?.kind ?? "edit",
+      source: a?.source ?? "ui",
+      description: a?.description ?? "Edit",
+      timestamp: a?.timestamp ?? new Date().toISOString(),
+      applied: false,
+    }));
+    return { entries: [...applied, ...future], current_index: state.undoStack.length - 1 };
+  },
+
+  jump_to(args): unknown {
+    const p = requireProject(args.project_id);
+    // Chronological: undoStack ++ redoStack.reversed(). Desired undo length
+    // makes the target the newest applied (null = original = 0).
+    const chrono = [...state.undoStack, ...[...state.redoStack].reverse()];
+    let desired: number;
+    if (args.action_id == null) {
+      desired = 0;
+    } else {
+      const idx = chrono.findIndex((s) => s.action.id === args.action_id);
+      if (idx < 0) throw { code: "not_found", message: "history entry" };
+      desired = idx + 1;
+    }
+    while (state.undoStack.length > desired) {
+      const s = state.undoStack.pop()!;
+      state.redoStack.push(s);
+    }
+    while (state.undoStack.length < desired) {
+      const s = state.redoStack.pop()!;
+      state.undoStack.push(s);
+    }
+    if (desired > 0) p.timeline = clone(state.undoStack[desired - 1]!.timeline);
+    refreshTimeline(p);
+    emit("timeline-changed", { project_id: p.id });
+    return { timeline: clone(p.timeline) };
+  },
+
   undo_actions(args): unknown {
     const p = requireProject(args.project_id);
     const ids = (args.action_ids as string[]) ?? [];

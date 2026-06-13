@@ -112,6 +112,8 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `get_timeline { project_id } -> Timeline`
 - `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented)
 - `undo_actions { project_id, action_ids } -> { undone, timeline }` — undo a specific recent action set (a chat turn); errors if newer edits exist so it can never revert unrelated work
+- `get_history { project_id } -> { entries: [{id, kind, source, description, timestamp, applied}], current_index }` — full edit history oldest→newest (applied then undone/future); current_index = newest applied (-1 = original)
+- `jump_to { project_id, action_id? } -> { timeline }` — go back/forward to a history point (undo/redo until that action is newest applied); null action_id = the original
 - `undo { project_id } -> { action: EditAction|null, timeline }`
 - `redo { project_id } -> { action: EditAction|null, timeline }`
 - `get_preferences {} -> Preferences`

@@ -324,6 +324,75 @@ impl Editor {
         self.step_history(project_id, false)
     }
 
+    /// The full edit history, oldest → newest: every applied edit (the undo
+    /// stack) followed by every undone edit still available to redo (the
+    /// future). `current_index` is the newest APPLIED entry (-1 = at the
+    /// original, before any edit). The "go back in time" data source.
+    pub fn history(&self, project_id: Uuid) -> Result<crate::model::History> {
+        use crate::model::{History, HistoryEntry};
+        self.ensure_loaded(project_id)?;
+        let state = self.inner.state.lock().unwrap();
+        let entry =
+            state.get(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+        let to_entry = |j: &JournalEntry, applied: bool| HistoryEntry {
+            id: j.action.id,
+            kind: j.action.kind.clone(),
+            source: j.action.source,
+            description: j.action.description.clone(),
+            timestamp: j.action.timestamp,
+            applied,
+        };
+        let mut entries: Vec<HistoryEntry> =
+            entry.undo.iter().map(|j| to_entry(j, true)).collect();
+        // redo.last() is the next to re-apply (chronologically just after the
+        // current point), so reversed gives true chronological future order.
+        entries.extend(entry.redo.iter().rev().map(|j| to_entry(j, false)));
+        Ok(History { current_index: entry.undo.len() as i64 - 1, entries })
+    }
+
+    /// Jump to a point in history: undo/redo until `target` is the newest
+    /// applied edit. `None` = the original state (undo everything). The
+    /// snapshots make every landing exact.
+    pub fn jump_to(&self, project_id: Uuid, target: Option<Uuid>) -> Result<Timeline> {
+        self.ensure_loaded(project_id)?;
+        // Desired undo-stack length under a short lock; then step (each step
+        // takes its own lock — never hold across the loop).
+        let desired: usize = {
+            let state = self.inner.state.lock().unwrap();
+            let entry =
+                state.get(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            match target {
+                None => 0,
+                Some(id) => {
+                    if let Some(pos) = entry.undo.iter().position(|j| j.action.id == id) {
+                        pos + 1
+                    } else if let Some(rpos) = entry.redo.iter().position(|j| j.action.id == id) {
+                        // redo[rpos] sits at chronological future offset
+                        // (redo.len()-1 - rpos); +1 to include it as applied.
+                        entry.undo.len() + (entry.redo.len() - 1 - rpos) + 1
+                    } else {
+                        return Err(CoreError::NotFound(format!("history entry {id}")));
+                    }
+                }
+            }
+        };
+        loop {
+            let len = {
+                let state = self.inner.state.lock().unwrap();
+                state.get(&project_id).map(|e| e.undo.len()).unwrap_or(0)
+            };
+            if len == desired {
+                break;
+            }
+            if len > desired {
+                self.step_history(project_id, true)?;
+            } else {
+                self.step_history(project_id, false)?;
+            }
+        }
+        self.get_timeline(project_id)
+    }
+
     fn step_history(
         &self,
         project_id: Uuid,

@@ -104,6 +104,7 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
     // timeline-changed — refresh the review list so an agent/MCP-driven
     // change doesn't leave the panel showing already-applied suggestions.
     void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
+    void queryClient.invalidateQueries({ queryKey: ["history"] });
   });
   const offTranscript = onAppEvent("transcript-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["transcript"] });
@@ -138,7 +139,7 @@ export function useCoreEventInvalidation(): void {
 
 function useEditMutation<TArgs extends Record<string, unknown>, TResult>(
   toolName: string,
-  invalidate: ("timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions")[],
+  invalidate: ("timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions" | "history")[],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -240,6 +241,23 @@ export interface RoughCutArgs extends Record<string, unknown> {
 
 export function useGenerateRoughCut() {
   return useEditMutation<RoughCutArgs, RoughCutResult>("generate_rough_cut", ["timeline", "project", "suggestions"]);
+}
+
+import type { History } from "./generated/History";
+
+export function useHistory(projectId: string | null) {
+  return useQuery({
+    queryKey: ["history", projectId ?? "none"],
+    queryFn: () => callTool<History>("get_history", { project_id: projectId }),
+    enabled: projectId !== null,
+  });
+}
+
+export function useJumpTo() {
+  return useEditMutation<{ project_id: string; action_id: string | null }, unknown>(
+    "jump_to",
+    ["timeline", "project", "history", "suggestions"],
+  );
 }
 
 export function useSuggestions(projectId: string | null) {

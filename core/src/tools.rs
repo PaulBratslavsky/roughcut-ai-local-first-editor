@@ -857,6 +857,17 @@ handler!(h_redo, |e, a, _s| {
     Ok(json!({ "action": action, "timeline": timeline }))
 });
 
+handler!(h_get_history, |e, a, _s| {
+    Ok(serde_json::to_value(e.history(arg_uuid(a, "project_id")?)?)?)
+});
+
+handler!(h_jump_to, |e, a, _s| {
+    // null action_id = jump to the original (before any edit).
+    let target = arg_uuid_opt(a, "action_id")?;
+    let timeline = e.jump_to(arg_uuid(a, "project_id")?, target)?;
+    Ok(json!({ "timeline": timeline }))
+});
+
 handler!(h_get_preferences, |e, _a, _s| Ok(serde_json::to_value(e.get_preferences()?)?));
 
 handler!(h_set_preferences, |e, a, _s| {
@@ -1051,6 +1062,12 @@ static REGISTRY: &[ToolSpec] = &[
         agent: false, meta: false, mutating: true, h_undo),
     tool!("redo", "Redo the last undone edit.", || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, mutating: true, h_redo),
+    tool!("get_history", "The full edit history oldest→newest: every applied edit then every undone (future) edit, each {id, kind, source, description, timestamp, applied}, plus current_index (newest applied; -1 = original).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_get_history),
+    tool!("jump_to", "Go back (or forward) in time to a point in the edit history: undo/redo until the given action is the newest applied edit. null action_id = the original, before any edit.",
+        || obj(json!({"project_id": pid_schema(), "action_id": {"type": "string"}}), &["project_id"]),
+        agent: false, meta: false, mutating: true, h_jump_to),
     tool!("get_preferences", "Get user preferences.", || obj(json!({}), &[]),
         agent: false, meta: false, h_get_preferences),
     tool!("set_preferences", "Replace user preferences.",

@@ -22,6 +22,8 @@ export type { ExternalConnection } from "./generated/ExternalConnection";
 export type { MediaAssets } from "./generated/MediaAssets";
 export type { Layout } from "./generated/Layout";
 export type { CutSuggestion } from "./generated/CutSuggestion";
+export type { HistoryEntry } from "./generated/HistoryEntry";
+export type { History } from "./generated/History";
 export type { ThumbnailRef } from "./generated/ThumbnailRef";
 
 import type { Clip } from "./generated/Clip";
