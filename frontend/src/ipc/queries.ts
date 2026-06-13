@@ -100,6 +100,10 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
     void queryClient.invalidateQueries({ queryKey: ["timeline"] });
     void queryClient.invalidateQueries({ queryKey: ["project"] });
     void queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+    // Suggestion mutations (accept/dismiss/accept-all/rough cut) all emit
+    // timeline-changed — refresh the review list so an agent/MCP-driven
+    // change doesn't leave the panel showing already-applied suggestions.
+    void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
   });
   const offTranscript = onAppEvent("transcript-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["transcript"] });

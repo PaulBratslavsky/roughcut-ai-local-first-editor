@@ -223,39 +223,50 @@ impl Editor {
         suggestion_id: Uuid,
         source: ActionSource,
     ) -> Result<EditAction> {
-        let seg_ids = self.with_project(project_id, |p, _| {
-            p.suggestions
+        // Only cut segment ids that still exist — a transcript edit since the
+        // rough cut can leave a suggestion pointing at gone ids. Stale ones
+        // are dropped (the suggestion still drains), never erroring the cut.
+        let seg_ids = self.with_project(project_id, |p, t| {
+            let s = p
+                .suggestions
                 .iter()
                 .find(|s| s.id == suggestion_id)
-                .map(|s| s.segment_ids.clone())
-                .ok_or_else(|| CoreError::NotFound(format!("suggestion {suggestion_id}")))
+                .ok_or_else(|| CoreError::NotFound(format!("suggestion {suggestion_id}")))?;
+            Ok(live_segment_ids(&s.segment_ids, t))
         })?;
-        let outcome =
-            self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?;
+        let action = if seg_ids.is_empty() {
+            None
+        } else {
+            Some(self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?.action)
+        };
         self.remove_suggestions(project_id, &[suggestion_id])?;
-        Ok(outcome.action)
+        action.ok_or_else(|| {
+            CoreError::InvalidArg("that suggestion was stale (transcript changed) — cleared".into())
+        })
     }
 
-    /// Accept ALL pending suggestions in one undoable batch.
+    /// Accept ALL pending suggestions in one undoable batch. Stale ids are
+    /// filtered out so one gone segment can't abort the whole batch; every
+    /// listed suggestion is drained regardless.
     pub fn accept_all_suggestions(
         &self,
         project_id: Uuid,
         source: ActionSource,
     ) -> Result<(Option<EditAction>, u32)> {
-        let (ids, seg_ids): (Vec<Uuid>, Vec<Uuid>) = self.with_project(project_id, |p, _| {
-            Ok((
-                p.suggestions.iter().map(|s| s.id).collect(),
-                p.suggestions.iter().flat_map(|s| s.segment_ids.clone()).collect(),
-            ))
+        let (ids, seg_ids): (Vec<Uuid>, Vec<Uuid>) = self.with_project(project_id, |p, t| {
+            let ids: Vec<Uuid> = p.suggestions.iter().map(|s| s.id).collect();
+            let raw: Vec<Uuid> = p.suggestions.iter().flat_map(|s| s.segment_ids.clone()).collect();
+            Ok((ids, live_segment_ids(&raw, t)))
         })?;
-        if seg_ids.is_empty() {
-            return Ok((None, 0));
-        }
         let count = ids.len() as u32;
-        let outcome =
-            self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?;
+        let action = if seg_ids.is_empty() {
+            None
+        } else {
+            Some(self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?.action)
+        };
+        // Drain ALL listed suggestions even if some were stale.
         self.remove_suggestions(project_id, &ids)?;
-        Ok((Some(outcome.action), count))
+        Ok((action, count))
     }
 
     /// Dismiss a suggestion without cutting.
@@ -377,6 +388,15 @@ fn normalize_op(op: EditOp, fps: f64) -> EditOp {
             EditOp::SetGlobalPadding { start_s, end_s, linked }
         }
         other => other,
+    }
+}
+
+/// Keep only ids the current transcript still has (suggestion segment_ids
+/// can go stale after a transcript edit) — order/dedup preserved.
+fn live_segment_ids(ids: &[Uuid], transcript: Option<&Transcript>) -> Vec<Uuid> {
+    match transcript {
+        Some(t) => ids.iter().copied().filter(|id| t.segment(*id).is_some()).collect(),
+        None => vec![],
     }
 }
 

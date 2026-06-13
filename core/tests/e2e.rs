@@ -707,3 +707,23 @@ async fn rough_cut_tiers_cut_from_marked() {
         assert!(empty["suggestions"].as_array().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn stale_suggestions_clear_on_retranscribe() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "stale", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let rc = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    if rc["suggestions"].as_u64().unwrap() == 0 {
+        return; // fixture had none; nothing to assert
+    }
+    // Re-transcribe replaces segment ids → stale suggestions must be cleared.
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let after = call(&editor, "get_suggestions", json!({ "project_id": pid })).await;
+    assert!(
+        after["suggestions"].as_array().unwrap().is_empty(),
+        "suggestions must clear on re-transcribe: {after}"
+    );
+}

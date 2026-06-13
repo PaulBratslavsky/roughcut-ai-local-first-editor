@@ -47,6 +47,12 @@ fn system_prompt(project_id: Uuid) -> String {
          Do NOT use story_edit, plan_duration_cut, or generate_rough_cut for a \
          silence request — those re-edit the narrative or also strip filler \
          words and alternate takes, which the user did not ask for. \
+         ROUGH-CUT SUGGESTIONS: after a rough cut there may be pending \
+         SUGGESTIONS (repeated takes, repetition) the user can review. To act \
+         on them call get_suggestions, then accept_all_suggestions to apply \
+         them all, or accept_suggestion / dismiss_suggestion with a specific \
+         id. Do NOT re-cut suggested segments by hand with cut_by_transcript \
+         — that leaves the review list stale. \
          STORY EDITS: when the user wants a cohesive narrative pass that \
          RESTRUCTURES content — 'tighten this', 'make it flow', 'cut the \
          boring parts', 'edit this into a focused video' (NOT a bare 'cut the \

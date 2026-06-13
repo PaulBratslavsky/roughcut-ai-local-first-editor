@@ -67,6 +67,14 @@ impl Editor {
             let entry =
                 state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
             entry.transcript = Some(transcript.clone());
+            // Rough-cut suggestions reference the OLD segment ids — a fresh
+            // transcribe replaces every id, so the old flags are stale.
+            if let Some(p) = entry.project.as_mut() {
+                if !p.suggestions.is_empty() {
+                    p.suggestions.clear();
+                    let _ = self.inner.store.save_project(p);
+                }
+            }
         }
         self.inner.store.save_transcript(project_id, &transcript)?;
         send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 1.0, "done"));
