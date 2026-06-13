@@ -293,6 +293,12 @@ struct Boundary {
 /// (sentence sliced mid-thought, orphaned connectives) plus an LLM judgment
 /// of each boundary with its before/cut/after context.
 pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview> {
+    review_flow_mode(editor, project_id, true).await
+}
+
+/// `llm=false` runs ONLY the cheap deterministic boundary checks (no model
+/// call) — the lightweight advisory tier for lower-risk edits.
+pub async fn review_flow_mode(editor: &Editor, project_id: Uuid, llm: bool) -> Result<FlowReview> {
     let speech = speech_segments(editor, project_id)?;
     let included: Vec<bool> = editor.with_project(project_id, |p, _| {
         Ok(speech
@@ -376,7 +382,7 @@ pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview
     let inference = editor.inference()?;
     let mut method = "deterministic".to_string();
     const MAX_BOUNDARIES: usize = 40;
-    if !boundaries.is_empty() && inference.healthy().await {
+    if llm && !boundaries.is_empty() && inference.healthy().await {
         method = "llm".into();
         let prefs = editor.get_preferences()?;
         let listed: String = boundaries
@@ -568,44 +574,16 @@ pub async fn story_edit(
 
     // 0. Dead air first: hybrid-CONFIRMED silences are uncontroversial and
     // cutting them up front means beats are judged on their content, not
-    // their pauses. (transcript_only ranges are skipped — no audio proof.)
-    {
-        let (transcript, duration, media) = editor.with_project(project_id, |p, t| {
-            Ok((t.cloned(), p.timeline.duration, p.media.clone()))
-        })?;
-        if let (Some(t), Some(media)) = (transcript, media) {
-            if let Some(peaks) = crate::adapters::video::load_raw_peaks(&media).await {
-                let prefs = editor.get_preferences()?;
-                let min = prefs.silence_min_duration_s.max(0.6);
-                let cands = crate::detect::silence_candidates(&t, duration, (min * 0.6).max(0.3));
-                let confirmed: Vec<_> = crate::detect::refine_silences(
-                    &cands,
-                    Some(&peaks),
-                    crate::adapters::video::PEAKS_PER_SECOND,
-                    min,
-                )
-                .into_iter()
-                .filter(|r| r.source == "confirmed")
-                .collect();
-                if !confirmed.is_empty() {
-                    narrate(
-                        editor,
-                        project_id,
-                        0,
-                        format!("cutting {} audio-confirmed dead-air range(s) first", confirmed.len()),
-                    );
-                    for r in confirmed {
-                        if let Ok(outcome) = editor.apply_edit(
-                            project_id,
-                            EditOp::CutRange { start: r.start, end: r.end },
-                            source,
-                        ) {
-                            actions.push(outcome.action);
-                        }
-                    }
-                }
-            }
-        }
+    // their pauses. Shared with `remove_silences` — same code, can't drift.
+    let silence_actions = editor.cut_confirmed_silences(project_id, source).await?;
+    if !silence_actions.is_empty() {
+        narrate(
+            editor,
+            project_id,
+            0,
+            format!("cutting {} audio-confirmed dead-air range(s) first", silence_actions.len()),
+        );
+        actions.extend(silence_actions);
     }
 
     // 1. Outline.
@@ -793,72 +771,86 @@ pub async fn story_edit(
         }
     }
 
-    // 3. Review the result at every cut point.
-    narrate(editor, project_id, 4, "re-reading the edited transcript at every cut point…");
-    let review_snapshot_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")
-        .included_duration();
-    let review = or_partial!(review_flow(editor, project_id).await, "the flow review");
-    let mut issues_remaining = review.issues.len();
-    let mut coherent = review.coherent;
-
-    // 4. Repair: restore what the review says reads broken (one round).
-    // Bounded on two axes: only ids THIS run cut (review walks ALL cut
-    // boundaries, including the rough cut's — those are not ours to undo),
-    // and at most the first 2 segments of a run per issue (enough to finish
-    // a sliced sentence without silently re-adding a whole beat).
+    // 3+4. Review → repair → RE-REVIEW, bounded: a single pass used to leave
+    // coherent=false with issues outstanding. Loop until the flow is clean or
+    // a round makes no progress (restoring connective material can expose a
+    // NEW boundary, so re-review is required), capped so it always terminates.
+    const MAX_REVIEW_ROUNDS: usize = 3;
     let speech = speech_segments(editor, project_id)?;
-    let own_cuts: std::collections::HashSet<Uuid> = actions
-        .iter()
-        .filter_map(|a| match &a.op {
-            EditOp::CutSegments { segment_ids } => Some(segment_ids.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    let mut restore_ids: Vec<Uuid> = review
-        .issues
-        .iter()
-        .filter(|i| i.severity == "high")
-        .flat_map(|i| {
-            // Restore enough to FINISH the sliced sentence: up to 4 own-cut
-            // segments, stopping once one ends with terminal punctuation.
-            let mut taken = vec![];
-            for id in i.restore_segment_ids.iter().filter(|id| own_cuts.contains(id)) {
-                taken.push(*id);
-                if taken.len() >= 4 {
-                    break;
+    let mut coherent;
+    let mut issues_remaining;
+    let mut prev_issue_count = usize::MAX;
+    let mut round = 0;
+    loop {
+        let label = if round == 0 {
+            "re-reading the edited transcript at every cut point…".to_string()
+        } else {
+            format!("re-checking the flow (round {})…", round + 1)
+        };
+        narrate(editor, project_id, 4, label);
+        let snapshot_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")
+            .included_duration();
+        let review = or_partial!(review_flow(editor, project_id).await, "the flow review");
+        coherent = review.coherent;
+        issues_remaining = review.issues.len();
+
+        // Clean, or out of rounds, or not improving → stop.
+        if coherent
+            || round + 1 >= MAX_REVIEW_ROUNDS
+            || review.issues.len() >= prev_issue_count
+        {
+            break;
+        }
+        prev_issue_count = review.issues.len();
+
+        // Restore ONLY material THIS run cut (review walks every boundary,
+        // including the rough cut's — not ours to undo), enough to finish a
+        // sliced sentence (≤4 own-cut segments, stop at terminal punctuation).
+        let own_cuts: std::collections::HashSet<Uuid> = actions
+            .iter()
+            .filter_map(|a| match &a.op {
+                EditOp::CutSegments { segment_ids } => Some(segment_ids.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut restore_ids: Vec<Uuid> = review
+            .issues
+            .iter()
+            .filter(|i| i.severity == "high")
+            .flat_map(|i| {
+                let mut taken = vec![];
+                for id in i.restore_segment_ids.iter().filter(|id| own_cuts.contains(id)) {
+                    taken.push(*id);
+                    if taken.len() >= 4 {
+                        break;
+                    }
+                    let done = speech
+                        .iter()
+                        .find(|s| s.id == *id)
+                        .map(|s| s.text.trim_end().ends_with(['.', '!', '?', '…']))
+                        .unwrap_or(false);
+                    if done {
+                        break;
+                    }
                 }
-                let done = speech
-                    .iter()
-                    .find(|s| s.id == *id)
-                    .map(|s| s.text.trim_end().ends_with(['.', '!', '?', '…']))
-                    .unwrap_or(false);
-                if done {
-                    break;
-                }
-            }
-            taken
-        })
-        .collect();
-    restore_ids.sort_unstable();
-    restore_ids.dedup();
-    // If the timeline changed underneath us while the review's model call
-    // ran (user undo, another caller), the restore plan is stale — skip it
-    // rather than "repairing" a timeline that no longer exists.
-    let expected_after = or_partial!(editor.get_timeline(project_id), "reading the timeline")
-        .included_duration();
-    let timeline_moved = (expected_after - review_snapshot_s).abs() > 0.05;
-    if timeline_moved && !restore_ids.is_empty() {
-        narrate(
-            editor,
-            project_id,
-            5,
-            "the timeline changed during review — skipping auto-repair (run review_flow to re-check)",
-        );
-        restore_ids.clear();
-        coherent = false;
-    }
-    if !restore_ids.is_empty() {
+                taken
+            })
+            .collect();
+        restore_ids.sort_unstable();
+        restore_ids.dedup();
+        if restore_ids.is_empty() {
+            break; // issues remain but none are ours to repair
+        }
+        // If the timeline moved under us (user undo, another caller) the plan
+        // is stale — stop rather than "repairing" a timeline that's gone.
+        let now_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")
+            .included_duration();
+        if (now_s - snapshot_s).abs() > 0.05 {
+            narrate(editor, project_id, 5, "the timeline changed during review — stopping auto-repair");
+            coherent = false;
+            break;
+        }
         narrate(
             editor,
             project_id,
@@ -874,10 +866,7 @@ pub async fn story_edit(
             "restoring the flow-repair segments"
         );
         actions.push(outcome.action);
-        // Re-check for the final verdict.
-        let recheck = or_partial!(review_flow(editor, project_id).await, "the flow re-check");
-        coherent = recheck.coherent;
-        issues_remaining = recheck.issues.len();
+        round += 1;
     }
 
     let after_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")

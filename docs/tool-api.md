@@ -59,6 +59,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
 
 ### Analysis
+- `remove_silences { project_id, min_duration_s? } -> { applied, actions, note, cut_count, included_duration_s, source_duration_s }` — remove ONLY waveform-confirmed dead air, one undoable batch; never touches words, fillers, takes, or order
 - `detect_silences { project_id, min_duration_s? } -> { method: "hybrid"|"transcript", segments: [{start, end, source: "confirmed"|"transcript_only", confidence}] }` — word-gap candidates confirmed + boundary-snapped against audio energy (file-adaptive thresholds; honest fallback without audio)
 - `detect_fillers { project_id } -> { segment_ids: string[], word_ranges: [{start,end}] }` (persists `is_filler` flags; stoplist comes from preferences)
 - `detect_takes { project_id } -> { take_groups: [{ id, segment_ids, best_segment_id }] }` (persists take flags — same write path as the rough cut)

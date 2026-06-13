@@ -123,6 +123,49 @@ impl Editor {
         Ok(out)
     }
 
+    /// Cut ONLY the dead-air the audio waveform confirms — never words,
+    /// fillers, takes, or order. The single source of truth for silence
+    /// removal: both `remove_silences` and story_edit's pre-pass call this,
+    /// so the pure path and the narrative pre-pass can never drift.
+    /// `transcript_only` candidates are skipped (no audio proof). Returns the
+    /// applied actions (empty when there's no audio or no confirmed dead air).
+    pub async fn cut_confirmed_silences(
+        &self,
+        project_id: Uuid,
+        source: ActionSource,
+    ) -> Result<Vec<EditAction>> {
+        self.ensure_loaded(project_id)?;
+        // Read inputs, then decode peaks OUTSIDE the state lock (slow).
+        let (transcript, duration, media) = self.with_project(project_id, |p, t| {
+            Ok((t.cloned(), p.timeline.duration, p.media.clone()))
+        })?;
+        let (Some(t), Some(media)) = (transcript, media) else { return Ok(vec![]) };
+        let Some(peaks) = crate::adapters::video::load_raw_peaks(&media).await else {
+            return Ok(vec![]); // no audio energy to confirm against — refuse to guess
+        };
+        let prefs = self.inner.store.load_preferences()?;
+        let min = prefs.silence_min_duration_s.max(0.6);
+        let cands = detect::silence_candidates(&t, duration, (min * 0.6).max(0.3));
+        let confirmed: Vec<_> = detect::refine_silences(
+            &cands,
+            Some(&peaks),
+            crate::adapters::video::PEAKS_PER_SECOND,
+            min,
+        )
+        .into_iter()
+        .filter(|r| r.source == "confirmed")
+        .collect();
+        let mut actions = vec![];
+        for r in confirmed {
+            if let Ok(outcome) =
+                self.apply_edit(project_id, EditOp::CutRange { start: r.start, end: r.end }, source)
+            {
+                actions.push(outcome.action);
+            }
+        }
+        Ok(actions)
+    }
+
     pub async fn generate_rough_cut(
         &self,
         project_id: Uuid,

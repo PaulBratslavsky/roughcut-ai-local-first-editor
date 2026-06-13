@@ -326,6 +326,28 @@ handler!(h_detect_silences, |e, a, _s| {
     Ok(json!({ "method": method, "segments": refined }))
 });
 
+handler!(h_remove_silences, |e, a, s| {
+    // Pure dead-air removal: audio-confirmed gaps only, via the SHARED
+    // helper. Touches no words, fillers, takes, or order — the whole point
+    // versus generate_rough_cut.
+    let project_id = arg_uuid(a, "project_id")?;
+    let actions = e.cut_confirmed_silences(project_id, s).await?;
+    let tl = e.get_timeline(project_id)?;
+    let note = if actions.is_empty() {
+        "no audio-confirmed dead air found (or no audio to check against) — nothing removed"
+    } else {
+        "removed only waveform-confirmed silence; words, takes, and order untouched"
+    };
+    Ok(json!({
+        "applied": actions.len(),
+        "actions": actions,
+        "note": note,
+        "cut_count": tl.cut_count,
+        "included_duration_s": (tl.included_duration() * 10.0).round() / 10.0,
+        "source_duration_s": tl.duration,
+    }))
+});
+
 handler!(h_detect_fillers, |e, a, _s| {
     // Persists the flags — identical behavior to the rough-cut path.
     let (fillers, _) = e.annotate_transcript(arg_uuid(a, "project_id")?)?;
@@ -856,16 +878,19 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("transcribe", "Transcribe the project's media on-device into time-aligned text.",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),
-    tool!("detect_silences", "Find dead-air ranges: word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only.",
+    tool!("detect_silences", "PREVIEW dead-air ranges (read-only): word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only. To actually remove them, use remove_silences.",
         || obj(json!({"project_id": pid_schema(), "min_duration_s": {"type": "number"}}), &["project_id"]),
-        agent: false, meta: false, h_detect_silences),
+        agent: true, meta: false, h_detect_silences),
+    tool!("remove_silences", "Remove ONLY dead air: deletes non-speech gaps confirmed by the actual audio waveform, in one undoable batch. Changes NOTHING about the words, their order, or which topics are kept — never touches fillers or takes. This is the silence-only tool; for filler/take removal use generate_rough_cut, for narrative restructuring use story_edit.",
+        || obj(json!({"project_id": pid_schema(), "min_duration_s": {"type": "number"}}), &["project_id"]),
+        agent: true, meta: false, mutating: true, h_remove_silences),
     tool!("detect_fillers", "Flag filler words (um, uh, ...) in the transcript. Persists the flags.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_detect_fillers),
     tool!("detect_takes", "Group repeated takes of the same line and mark the best one. Persists the flags.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_detect_takes),
-    tool!("generate_rough_cut", "Run the full AI first pass: remove silences, fillers, and non-best takes. Returns the new timeline and cut count.",
+    tool!("generate_rough_cut", "Full AI first pass: removes silences AND fillers AND non-best takes together. For silence ONLY (no filler/take removal) use remove_silences instead. Returns the new timeline and cut count.",
         || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_generate_rough_cut),
     tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive.",

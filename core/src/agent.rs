@@ -39,9 +39,18 @@ fn system_prompt(project_id: Uuid) -> String {
          a single cut_by_transcript call with ALL the ids (its segment_ids field is \
          an array), or one apply_edits call for mixed operations. Never cut one \
          segment per call, and never search again after you have results. \
-         STORY EDITS: when the user wants a cohesive narrative pass — \
-         'tighten this', 'make it flow', 'cut the boring parts', 'edit this \
-         into a focused video' — call story_edit ONCE with their words (add \
+         REMOVING SILENCE / DEAD AIR / PAUSES: when the user asks to remove \
+         silences, cut the dead air, remove pauses, tighten the gaps, or get \
+         rid of empty space — and ONLY that — call remove_silences ONCE. It \
+         deletes only non-speech gaps confirmed by the actual waveform and \
+         changes NOTHING about the words, their order, or which topics stay. \
+         Do NOT use story_edit, plan_duration_cut, or generate_rough_cut for a \
+         silence request — those re-edit the narrative or also strip filler \
+         words and alternate takes, which the user did not ask for. \
+         STORY EDITS: when the user wants a cohesive narrative pass that \
+         RESTRUCTURES content — 'tighten this', 'make it flow', 'cut the \
+         boring parts', 'edit this into a focused video' (NOT a bare 'cut the \
+         silences') — call story_edit ONCE with their words (add \
          target_duration_s if they named a length). It outlines the story, \
          cuts whole beats, verifies every cut point still reads, and repairs \
          the flow. Do not attempt that pipeline yourself. \
@@ -231,6 +240,11 @@ pub async fn run_instruction_with(
     let mut steered = false;
 
     let mut last_turn_error: Option<String> = None;
+    // Did a chat-driven RAW cut land this turn? (cut_by_transcript / cut_range
+    // / apply_edits — NOT remove_silences, generate_rough_cut, or story_edit,
+    // which are silence-only or run their own coherence pass.) Drives the
+    // once-per-turn "does this still flow?" advisory after the model finishes.
+    let mut narrative_cut_this_turn = false;
     for step in 0..MAX_STEPS {
         step_text(
             editor,
@@ -284,6 +298,27 @@ pub async fn run_instruction_with(
             // claim success after errors. Append a deterministic receipt
             // built from what actually landed.
             let text = msg.content.clone().unwrap_or_else(|| "Done.".into());
+            // ALWAYS check afterward that a raw cut still reads as a narrative
+            // (REQ-2): one read-only flow pass when chat-driven cuts landed,
+            // surfaced honestly so incoherence can't hide behind a confident
+            // "Done." (story_edit/rough_cut/silence run their own or need none).
+            let flow_note = if narrative_cut_this_turn && !actions.is_empty() {
+                match crate::story::review_flow(editor, project_id).await {
+                    Ok(r) if r.boundaries_checked > 0 && !r.coherent => {
+                        let n = r.issues.iter().filter(|i| i.severity == "high").count();
+                        Some(format!(
+                            "\n\n[Flow check: {n} cut point(s) may read abruptly — \
+                             tell me to “restore” them or undo if it reads wrong.]"
+                        ))
+                    }
+                    Ok(r) if r.boundaries_checked > 0 => {
+                        Some("\n\n[Flow check: the cuts read cleanly.]".to_string())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             summary = if actions.is_empty() {
                 match &last_turn_error {
                     Some(err) => format!(
@@ -292,7 +327,11 @@ pub async fn run_instruction_with(
                     None => format!("{text}\n\n[No changes were applied.]"),
                 }
             } else {
-                format!("{text}\n\n[Applied {} change(s) — undoable.]", actions.len())
+                format!(
+                    "{text}\n\n[Applied {} change(s) — undoable.]{}",
+                    actions.len(),
+                    flow_note.unwrap_or_default()
+                )
             };
             step_text(editor, project_id, step, "final", summary.clone());
             break;
@@ -382,6 +421,10 @@ pub async fn run_instruction_with(
                         // Only successes advance the act/read accounting and
                         // enter the repeat cache as plain results.
                         round_mutated |= is_mutating(&name);
+                        if matches!(name.as_str(), "cut_by_transcript" | "cut_range" | "apply_edits")
+                        {
+                            narrative_cut_this_turn = true;
+                        }
                         seen_calls.insert(call_key, truncate_json(&v));
                         // story_edit is a COMPLETE pipeline: its summary is
                         // the turn's answer. Handing control back invites a
@@ -486,6 +529,22 @@ async fn run_instruction_offline(
         "Local model server not reachable — using the built-in offline editor (keyword search + cut).",
     );
     let lower = instruction.to_lowercase();
+    // Silence intent goes to the audio-confirmed path even offline — keyword
+    // search would otherwise cut a SPOKEN sentence for "remove the silences".
+    let wants_silence = ["silence", "silences", "dead air", "pause", "gap", "empty space"]
+        .iter()
+        .any(|k| lower.contains(k));
+    if wants_silence {
+        let actions = editor.cut_confirmed_silences(project_id, source).await?;
+        let summary = if actions.is_empty() {
+            "No audio-confirmed dead air found (or no audio to check against) — nothing removed."
+                .to_string()
+        } else {
+            format!("Removed {} audio-confirmed silence range(s); words and order untouched.", actions.len())
+        };
+        step_text(editor, project_id, 1, "final", summary.clone());
+        return Ok(InstructionOutcome { actions, summary });
+    }
     let wants_cut = ["cut", "remove", "delete", "trim out", "get rid"]
         .iter()
         .any(|k| lower.contains(k));

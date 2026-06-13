@@ -591,6 +591,18 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   // ---- Analysis -------------------------------------------------------------
 
+  remove_silences(args): unknown {
+    const p = requireProject(args.project_id);
+    return {
+      applied: 0,
+      actions: [],
+      note: "(browser mock) silence removal needs the desktop app's audio analysis",
+      cut_count: p.timeline.cut_count,
+      included_duration_s: p.timeline.duration,
+      source_duration_s: p.timeline.duration,
+    };
+  },
+
   detect_silences(args): unknown {
     requireProject(args.project_id);
     const gaps = (state.transcript?.segments ?? [])
