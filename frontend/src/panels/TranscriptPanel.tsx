@@ -71,6 +71,8 @@ function SegmentBlock({
   suggested,
   onAcceptSuggestion,
   onDismissSuggestion,
+  silenceAfter,
+  onRestoreRange,
 }: {
   seg: TranscriptSegment;
   cut: boolean;
@@ -84,6 +86,8 @@ function SegmentBlock({
   suggested?: CutSuggestion;
   onAcceptSuggestion: (id: string) => void;
   onDismissSuggestion: (id: string) => void;
+  silenceAfter?: { start: number; end: number; dur: number };
+  onRestoreRange: (start: number, end: number) => void;
 }) {
   // Word under the playhead — selector returns an index, so this block only
   // re-renders when the spoken word changes (and only while it's active).
@@ -170,6 +174,18 @@ function SegmentBlock({
           Restore
         </button>
       )}
+      {silenceAfter && (
+        <button
+          className="silence-removed"
+          title="A silent gap was removed here — click to restore it"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRestoreRange(silenceAfter.start, silenceAfter.end);
+          }}
+        >
+          ⏸ {silenceAfter.dur.toFixed(1)}s pause removed · restore
+        </button>
+      )}
     </div>
   );
 }
@@ -250,6 +266,28 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     [timeline],
   );
 
+  // Removed dead-air between segments: a gap (≥0.3s) with NO segment in it
+  // that the timeline excludes was a removed pause. Marked after the earlier
+  // segment, restorable — a breadcrumb shown even with "Show cuts" off.
+  // (Gaps whisper emitted as is_silence segments render their own chip, so
+  // iterating ALL segments in source order avoids double-marking.)
+  const silenceAfter = useMemo(() => {
+    const m = new Map<string, { start: number; end: number; dur: number }>();
+    const segs = [...(transcript?.segments ?? [])].sort((a, b) => a.start - b.start);
+    const clips = timeline?.clips ?? [];
+    const includedAt = (t: number) =>
+      clips.some((c) => c.included && c.source_in <= t && t < c.source_out);
+    for (let i = 0; i < segs.length - 1; i++) {
+      const a = segs[i]!;
+      const b = segs[i + 1]!;
+      const gap = b.start - a.end;
+      if (gap >= 0.3 && !includedAt((a.end + b.start) / 2)) {
+        m.set(a.id, { start: a.end, end: b.start, dur: gap });
+      }
+    }
+    return m;
+  }, [transcript, timeline]);
+
   const fillerSet = useMemo(() => {
     const s = new Set(["um", "uh"]);
     for (const w of prefs?.custom_filler_words ?? []) {
@@ -316,6 +354,9 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
 
   const onRestore = (id: string) => {
     restoreByTranscript.mutate({ project_id: projectId, segment_ids: [id] });
+  };
+  const onRestoreRange = (start: number, end: number) => {
+    restoreRange.mutate({ project_id: projectId, start, end });
   };
 
   // ---- right-click context menu: cut/restore the selected text's video ----
@@ -545,6 +586,8 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
                     suggested={suggestionBySeg.get(seg.id)}
                     onAcceptSuggestion={onAcceptSuggestion}
                     onDismissSuggestion={onDismissSuggestion}
+                    silenceAfter={silenceAfter.get(seg.id)}
+                    onRestoreRange={onRestoreRange}
                   />
                 </div>
               );
