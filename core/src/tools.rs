@@ -361,11 +361,40 @@ handler!(h_detect_takes, |e, a, _s| {
 
 handler!(h_generate_rough_cut, |e, a, s| {
     // `action` included so orchestrators (and the agent's undo accounting)
-    // see the rough cut as the edit it is.
-    let (action, timeline, cut_count) = e
+    // see the rough cut as the edit it is. Tier 1 (silence + fillers) is
+    // applied; `suggestions` counts the Tier-2 flags now awaiting review.
+    let (action, timeline, cut_count, suggestion_count) = e
         .generate_rough_cut(arg_uuid(a, "project_id")?, arg_aggressiveness(a), s)
         .await?;
-    Ok(json!({ "action": action, "timeline": timeline, "cut_count": cut_count }))
+    Ok(json!({
+        "action": action,
+        "timeline": timeline,
+        "cut_count": cut_count,
+        "suggestions": suggestion_count,
+    }))
+});
+
+handler!(h_get_suggestions, |e, a, _s| {
+    Ok(json!({ "suggestions": e.get_suggestions(arg_uuid(a, "project_id")?)? }))
+});
+
+handler!(h_accept_suggestion, |e, a, s| {
+    let action = e.accept_suggestion(
+        arg_uuid(a, "project_id")?,
+        arg_uuid(a, "suggestion_id")?,
+        s,
+    )?;
+    Ok(json!({ "action": action }))
+});
+
+handler!(h_accept_all_suggestions, |e, a, s| {
+    let (action, accepted) = e.accept_all_suggestions(arg_uuid(a, "project_id")?, s)?;
+    Ok(json!({ "action": action, "accepted": accepted }))
+});
+
+handler!(h_dismiss_suggestion, |e, a, _s| {
+    e.dismiss_suggestion(arg_uuid(a, "project_id")?, arg_uuid(a, "suggestion_id")?)?;
+    Ok(json!({ "dismissed": true }))
 });
 
 handler!(h_cut_range, |e, a, s| {
@@ -890,7 +919,19 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("detect_takes", "Group repeated takes of the same line and mark the best one. Persists the flags.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_detect_takes),
-    tool!("generate_rough_cut", "Full AI first pass: removes silences AND fillers AND non-best takes together. For silence ONLY (no filler/take removal) use remove_silences instead. Returns the new timeline and cut count.",
+    tool!("get_suggestions", "List the rough cut's pending Tier-2 SUGGESTIONS (repeated takes + repetitive passages) — flagged for review, not yet applied. Each: {id, segment_ids, start, end, reason, confidence, duplicate_of, preview}.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_get_suggestions),
+    tool!("accept_suggestion", "Apply ONE rough-cut suggestion as a normal undoable cut, then drop it from the list.",
+        || obj(json!({"project_id": pid_schema(), "suggestion_id": {"type": "string"}}), &["project_id", "suggestion_id"]),
+        agent: false, meta: false, mutating: true, h_accept_suggestion),
+    tool!("accept_all_suggestions", "Apply ALL pending rough-cut suggestions in one undoable batch (the 'accept all' action).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, mutating: true, h_accept_all_suggestions),
+    tool!("dismiss_suggestion", "Discard one rough-cut suggestion without cutting.",
+        || obj(json!({"project_id": pid_schema(), "suggestion_id": {"type": "string"}}), &["project_id", "suggestion_id"]),
+        agent: false, meta: false, h_dismiss_suggestion),
+    tool!("generate_rough_cut", "Full AI first pass: auto-cuts silences AND fillers (Tier 1), and FLAGS repeated takes + repetitive passages as suggestions for review (Tier 2 — see get_suggestions/accept_all_suggestions). Deterministic, no narrative restructuring. For silence ONLY use remove_silences. Returns timeline, cut_count, and suggestions (count).",
         || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_generate_rough_cut),
     tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive.",

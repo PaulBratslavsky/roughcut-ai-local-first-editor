@@ -6,12 +6,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useStore } from "@tanstack/react-store";
 import {
+  useAcceptAllSuggestions,
+  useAcceptSuggestion,
   useCutByTranscript,
   useCutRange,
+  useDismissSuggestion,
   useGenerateRoughCut,
   usePreferences,
   useRestoreByTranscript,
   useRestoreRange,
+  useSuggestions,
   useTimeline,
   useTranscript,
 } from "../ipc/queries";
@@ -22,7 +26,7 @@ import {
   viewStore,
 } from "../state/viewStore";
 import { callTool, onAppEvent } from "../ipc/api";
-import type { ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
+import type { CutSuggestion, ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
 
 const normalize = (w: string) => w.toLowerCase().replace(/[^a-z']/g, "");
 
@@ -64,6 +68,9 @@ function SegmentBlock({
   onRestore,
   excludedRanges,
   showCuts,
+  suggested,
+  onAcceptSuggestion,
+  onDismissSuggestion,
 }: {
   seg: TranscriptSegment;
   cut: boolean;
@@ -74,6 +81,9 @@ function SegmentBlock({
   onRestore: (id: string) => void;
   excludedRanges: Array<[number, number]>;
   showCuts: boolean;
+  suggested?: CutSuggestion;
+  onAcceptSuggestion: (id: string) => void;
+  onDismissSuggestion: (id: string) => void;
 }) {
   // Word under the playhead — selector returns an index, so this block only
   // re-renders when the spoken word changes (and only while it's active).
@@ -114,10 +124,24 @@ function SegmentBlock({
   const q = query.toLowerCase();
   return (
     <div
-      className={`segment${cut ? " cut" : ""}${selected ? " selected" : ""}${active ? " active" : ""}`}
+      className={`segment${cut ? " cut" : ""}${selected ? " selected" : ""}${active ? " active" : ""}${suggested ? " suggested" : ""}`}
       data-segid={seg.id}
       onClick={(e) => selectSegment(seg.id, e.metaKey || e.ctrlKey)}
     >
+      {suggested && !cut && (
+        <div className="suggest-ribbon" onClick={(e) => e.stopPropagation()}>
+          <span className="suggest-tag">
+            {suggested.reason === "repeated_take" ? "repeated take" : "repetitive"}
+          </span>
+          <span className="suggest-hint">suggested cut</span>
+          <button className="suggest-cut" onClick={() => onAcceptSuggestion(suggested.id)}>
+            ✂ cut
+          </button>
+          <button className="suggest-keep" onClick={() => onDismissSuggestion(suggested.id)}>
+            keep
+          </button>
+        </div>
+      )}
       <p className="segment-text">
         {seg.words.map((w, i) => {
           const mid = (w.start + w.end) / 2;
@@ -157,12 +181,26 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
   const cutByTranscript = useCutByTranscript();
   const restoreByTranscript = useRestoreByTranscript();
   const roughCut = useGenerateRoughCut();
+  const { data: suggestions } = useSuggestions(projectId);
+  const acceptSuggestion = useAcceptSuggestion();
+  const acceptAll = useAcceptAllSuggestions();
+  const dismissSuggestion = useDismissSuggestion();
+  // segment_id → suggestion, for inline highlighting.
+  const suggestionBySeg = useMemo(() => {
+    const m = new Map<string, CutSuggestion>();
+    for (const s of suggestions ?? []) for (const sid of s.segment_ids) m.set(sid, s);
+    return m;
+  }, [suggestions]);
+  const onAcceptSuggestion = (id: string) =>
+    acceptSuggestion.mutate({ project_id: projectId, suggestion_id: id });
+  const onDismissSuggestion = (id: string) =>
+    dismissSuggestion.mutate({ project_id: projectId, suggestion_id: id });
 
   const showCuts = useStore(viewStore, (s) => s.showCuts);
   const selectedIds = useStore(viewStore, (s) => s.selectedSegmentIds);
 
   const [query, setQuery] = useState("");
-  const [roughCutResult, setRoughCutResult] = useState<number | null>(null);
+  const [roughCutResult, setRoughCutResult] = useState<string | null>(null);
   const parentRef = useRef<HTMLDivElement | null>(null);
 
   // Visible transcription state: progress events from the core while whisper
@@ -383,7 +421,14 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     setRoughCutResult(null);
     roughCut.mutate(
       { project_id: projectId, aggressiveness: prefs?.cut_aggressiveness ?? "natural" },
-      { onSuccess: (res) => setRoughCutResult(res.cut_count) },
+      {
+        onSuccess: (res) =>
+          setRoughCutResult(
+            res.suggestions > 0
+              ? `${res.cut_count} cuts · ${res.suggestions} to review`
+              : `${res.cut_count} cuts made`,
+          ),
+      },
     );
   };
 
@@ -406,9 +451,25 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
           {roughCut.isPending ? "Cutting…" : "Rough cut"}
         </button>
         {roughCutResult !== null && (
-          <span className="rough-cut-result">{roughCutResult} cuts made</span>
+          <span className="rough-cut-result">{roughCutResult}</span>
         )}
       </div>
+
+      {(suggestions?.length ?? 0) > 0 && (
+        <div className="suggest-review">
+          <span className="suggest-review-label">
+            {suggestions!.length} suggested cut{suggestions!.length === 1 ? "" : "s"} — repeated
+            takes &amp; repetition, flagged for you (highlighted below)
+          </span>
+          <button
+            className="primary-btn"
+            disabled={acceptAll.isPending}
+            onClick={() => acceptAll.mutate({ project_id: projectId })}
+          >
+            {acceptAll.isPending ? "cutting…" : "Cut all"}
+          </button>
+        </div>
+      )}
 
       <div
         className="transcript-scroll"
@@ -481,6 +542,9 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
                     onRestore={onRestore}
                     excludedRanges={excludedRanges}
                     showCuts={showCuts}
+                    suggested={suggestionBySeg.get(seg.id)}
+                    onAcceptSuggestion={onAcceptSuggestion}
+                    onDismissSuggestion={onDismissSuggestion}
                   />
                 </div>
               );

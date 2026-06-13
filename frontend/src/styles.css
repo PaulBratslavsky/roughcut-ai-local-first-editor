@@ -1909,3 +1909,43 @@ input, select { font: inherit; }
 }
 .stage-chips input[type="range"] { width: 110px; }
 .icon-tab { display: inline-grid; place-items: center; padding: 6px 10px; }
+
+/* rough-cut Tier-2 suggestions (repeated takes / repetition) */
+.segment.suggested { border-left: 2px solid #d9a441; padding-left: 8px; }
+.suggest-ribbon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  margin-bottom: 2px;
+  color: var(--fg-dim);
+}
+.suggest-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #d9a441;
+  border: 1px solid #d9a441;
+  padding: 0 5px;
+  border-radius: 2px;
+}
+.suggest-hint { flex: 1; }
+.suggest-cut, .suggest-keep {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  padding: 1px 8px;
+  border-radius: 2px;
+}
+.suggest-cut:hover { background: #d9a441; color: #1a1a1a; border-color: #d9a441; }
+.suggest-keep:hover { background: var(--surface-hover, #2a2c33); }
+.suggest-review {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, #d9a441 8%, transparent);
+}
+.suggest-review-label { flex: 1; font-size: 12px; color: var(--fg-dim); }

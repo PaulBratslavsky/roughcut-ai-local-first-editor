@@ -226,7 +226,11 @@ pub fn generate_rough_cut(
         }
     }
 
-    let (fillers, takes) = annotate(transcript, custom_fillers);
+    // TIER 1 — auto-cut only the mechanical, high-confidence stuff: silence
+    // (above) + filler words. Repeated takes are NO LONGER auto-cut here;
+    // they're surfaced as reviewable suggestions (see `suggest_cuts`) — the
+    // judgment calls that silent auto-cutting made inconsistent.
+    let (fillers, _takes) = annotate(transcript, custom_fillers);
     for id in &fillers.segment_ids {
         if let Some(seg) = transcript.segment(*id) {
             timeline.cut_linked(seg.start, seg.end, &[*id], AiCut);
@@ -236,19 +240,95 @@ pub fn generate_rough_cut(
         timeline.set_range_included(r.start, r.end, false, AiCut);
     }
 
-    for group in &takes {
+    let cut_count = timeline.cut_count;
+    RoughCutOutcome { timeline, cut_count }
+}
+
+/// TIER 2 — the fuzzy, judgment-call cuts the rough cut MARKS rather than
+/// applies: repeated takes (a re-recording of a nearby line) and semantic
+/// repetition (a passage that says the same thing as an earlier one, via
+/// embedding similarity when an index exists). Returns suggestions only;
+/// nothing is mutated. `annotate` must have run first (sets filler flags).
+pub fn suggest_cuts(
+    transcript: &Transcript,
+    embeddings: Option<&std::collections::HashMap<Uuid, Vec<f32>>>,
+) -> Vec<crate::model::CutSuggestion> {
+    use crate::model::CutSuggestion;
+    let preview = |t: &str| -> String {
+        let p: String = t.trim().chars().take(80).collect();
+        if t.trim().chars().count() > 80 { format!("{p}…") } else { p }
+    };
+    let mut out: Vec<CutSuggestion> = vec![];
+    let mut flagged: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+    // Repeated takes: every non-best take in a group is a suggested cut.
+    let filler_ids: Vec<Uuid> =
+        transcript.segments.iter().filter(|s| s.is_filler).map(|s| s.id).collect();
+    for group in detect_takes(transcript, &filler_ids) {
         for sid in &group.segment_ids {
             if *sid == group.best_segment_id {
                 continue;
             }
-            if let Some(seg) = transcript.segment(*sid) {
-                timeline.cut_linked(seg.start, seg.end, &[*sid], AiCut);
+            let Some(seg) = transcript.segment(*sid) else { continue };
+            flagged.insert(*sid);
+            out.push(CutSuggestion {
+                id: Uuid::new_v4(),
+                segment_ids: vec![*sid],
+                start: seg.start,
+                end: seg.end,
+                reason: "repeated_take".into(),
+                confidence: 0.8,
+                duplicate_of: Some(group.best_segment_id),
+                preview: preview(&seg.text),
+            });
+        }
+    }
+
+    // Semantic repetition: non-adjacent segments that say nearly the same
+    // thing (high cosine). Keep the EARLIER, flag the later — never
+    // double-flag a segment already caught as a repeated take.
+    if let Some(emb) = embeddings {
+        let speech: Vec<&TranscriptSegment> = transcript
+            .segments
+            .iter()
+            .filter(|s| !s.is_silence && !s.is_filler && !s.text.is_empty())
+            .collect();
+        const REPEAT_SIM: f32 = 0.93;
+        for (j, later) in speech.iter().enumerate() {
+            if flagged.contains(&later.id) {
+                continue;
+            }
+            let Some(lv) = emb.get(&later.id) else { continue };
+            // Compare against earlier, non-adjacent segments; strongest hit.
+            let mut best: Option<(Uuid, f32)> = None;
+            for earlier in speech.iter().take(j.saturating_sub(1)) {
+                if flagged.contains(&earlier.id) {
+                    continue;
+                }
+                let Some(ev) = emb.get(&earlier.id) else { continue };
+                let sim = crate::adapters::embed::cosine(lv, ev);
+                if sim >= REPEAT_SIM && best.map(|(_, b)| sim > b).unwrap_or(true) {
+                    best = Some((earlier.id, sim));
+                }
+            }
+            if let Some((dup_of, sim)) = best {
+                flagged.insert(later.id);
+                out.push(CutSuggestion {
+                    id: Uuid::new_v4(),
+                    segment_ids: vec![later.id],
+                    start: later.start,
+                    end: later.end,
+                    reason: "repetition".into(),
+                    confidence: (sim as f64).min(0.99),
+                    duplicate_of: Some(dup_of),
+                    preview: preview(&later.text),
+                });
             }
         }
     }
 
-    let cut_count = timeline.cut_count;
-    RoughCutOutcome { timeline, cut_count }
+    out.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 const STOPWORDS: &[&str] = &[
@@ -343,20 +423,28 @@ mod tests {
         let out = generate_rough_cut(&mut t, media.duration, Aggressiveness::Natural, &[], 0.8, None, 50);
         assert!(out.cut_count >= 5, "expected several cuts, got {}", out.cut_count);
         assert!(out.timeline.included_duration() < media.duration);
-        // Best take survived, earlier take did not.
+        // TIER 2: repeated takes are now MARKED, not auto-cut. The best take
+        // stays on the timeline; the worse take is NOT cut by the rough pass
+        // but IS surfaced as a suggestion.
         let best = t.segments.iter().find(|s| s.is_best_take).unwrap();
         let worse = t
             .segments
             .iter()
             .find(|s| s.take_group_id.is_some() && !s.is_best_take)
             .unwrap();
+        let worse_id = worse.id;
         let mid_best = (best.start + best.end) / 2.0;
         let mid_worse = (worse.start + worse.end) / 2.0;
         let included_at = |tl: &Timeline, t: f64| {
             tl.clips.iter().any(|c| c.included && c.source_in <= t && t < c.source_out)
         };
         assert!(included_at(&out.timeline, mid_best));
-        assert!(!included_at(&out.timeline, mid_worse));
+        assert!(included_at(&out.timeline, mid_worse), "worse take is flagged, not auto-cut");
+        let suggestions = suggest_cuts(&t, None);
+        assert!(
+            suggestions.iter().any(|s| s.reason == "repeated_take" && s.segment_ids.contains(&worse_id)),
+            "the worse take should be a repeated_take suggestion: {suggestions:?}"
+        );
     }
 
     #[tokio::test]

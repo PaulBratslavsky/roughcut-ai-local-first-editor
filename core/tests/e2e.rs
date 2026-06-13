@@ -671,3 +671,39 @@ async fn chat_editing_stability_guards() {
     let out = call(&editor, "undo_actions", json!({ "project_id": pid, "action_ids": [a2] })).await;
     assert_eq!(out["undone"], 1);
 }
+
+#[tokio::test]
+async fn rough_cut_tiers_cut_from_marked() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "tiers", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // Rough cut: Tier 1 applied, Tier 2 flagged (the demo fixture has a
+    // repeated take, so suggestions should be > 0).
+    let rc = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    assert!(rc["cut_count"].as_u64().unwrap() >= 1, "tier 1 should cut: {rc}");
+    let suggested = rc["suggestions"].as_u64().unwrap();
+
+    let listed = call(&editor, "get_suggestions", json!({ "project_id": pid })).await;
+    let segs = listed["suggestions"].as_array().unwrap();
+    assert_eq!(segs.len() as u64, suggested, "list matches the count");
+
+    if let Some(first) = segs.first() {
+        // Accepting one applies a real cut and drops it from the list.
+        let before_cuts = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].as_u64().unwrap();
+        let sid = first["id"].as_str().unwrap();
+        call(&editor, "accept_suggestion", json!({ "project_id": pid, "suggestion_id": sid })).await;
+        let after = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].as_u64().unwrap();
+        assert!(after >= before_cuts, "accept applies a cut");
+        let relisted = call(&editor, "get_suggestions", json!({ "project_id": pid })).await;
+        assert_eq!(relisted["suggestions"].as_array().unwrap().len(), segs.len() - 1);
+
+        // Accept-all drains the rest in one batch.
+        let all = call(&editor, "accept_all_suggestions", json!({ "project_id": pid })).await;
+        assert_eq!(all["accepted"].as_u64().unwrap(), (segs.len() - 1) as u64);
+        let empty = call(&editor, "get_suggestions", json!({ "project_id": pid })).await;
+        assert!(empty["suggestions"].as_array().unwrap().is_empty());
+    }
+}

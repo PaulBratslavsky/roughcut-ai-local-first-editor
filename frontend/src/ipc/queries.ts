@@ -21,6 +21,7 @@ import type {
   Preferences,
   Project,
   RoughCutResult,
+  CutSuggestion,
   SplitResult,
   Timeline,
   Transcript,
@@ -133,7 +134,7 @@ export function useCoreEventInvalidation(): void {
 
 function useEditMutation<TArgs extends Record<string, unknown>, TResult>(
   toolName: string,
-  invalidate: ("timeline" | "transcript" | "project" | "projects" | "preferences")[],
+  invalidate: ("timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions")[],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -234,7 +235,37 @@ export interface RoughCutArgs extends Record<string, unknown> {
 }
 
 export function useGenerateRoughCut() {
-  return useEditMutation<RoughCutArgs, RoughCutResult>("generate_rough_cut", ["timeline", "project"]);
+  return useEditMutation<RoughCutArgs, RoughCutResult>("generate_rough_cut", ["timeline", "project", "suggestions"]);
+}
+
+export function useSuggestions(projectId: string | null) {
+  return useQuery({
+    queryKey: ["suggestions", projectId ?? "none"],
+    queryFn: () => callTool<{ suggestions: CutSuggestion[] }>("get_suggestions", { project_id: projectId }),
+    enabled: projectId !== null,
+    select: (r) => r.suggestions,
+  });
+}
+
+export function useAcceptSuggestion() {
+  return useEditMutation<{ project_id: string; suggestion_id: string }, unknown>(
+    "accept_suggestion",
+    ["timeline", "project", "suggestions"],
+  );
+}
+
+export function useAcceptAllSuggestions() {
+  return useEditMutation<{ project_id: string }, unknown>(
+    "accept_all_suggestions",
+    ["timeline", "project", "suggestions"],
+  );
+}
+
+export function useDismissSuggestion() {
+  return useEditMutation<{ project_id: string; suggestion_id: string }, unknown>(
+    "dismiss_suggestion",
+    ["project", "suggestions"],
+  );
 }
 
 export interface ApplyInstructionArgs extends Record<string, unknown> {

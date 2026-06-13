@@ -432,6 +432,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       audio_offset_s: 0,
       screen_media: null,
       layout: { mode: "pip", shape: "rounded", corner: "br", size: 0.25 },
+      suggestions: [],
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -479,6 +480,29 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   get_media_assets(args): { peaks_path: null; peaks_per_second: number; thumbnails: []; playback_path: null } {
     requireProject(args.project_id);
     return { peaks_path: null, peaks_per_second: 50, thumbnails: [], playback_path: null };
+  },
+
+  get_suggestions(args): unknown {
+    return { suggestions: requireProject(args.project_id).suggestions ?? [] };
+  },
+
+  accept_suggestion(args): unknown {
+    const p = requireProject(args.project_id);
+    p.suggestions = (p.suggestions ?? []).filter((s) => s.id !== args.suggestion_id);
+    return { action: null };
+  },
+
+  accept_all_suggestions(args): unknown {
+    const p = requireProject(args.project_id);
+    const n = (p.suggestions ?? []).length;
+    p.suggestions = [];
+    return { action: null, accepted: n };
+  },
+
+  dismiss_suggestion(args): unknown {
+    const p = requireProject(args.project_id);
+    p.suggestions = (p.suggestions ?? []).filter((s) => s.id !== args.suggestion_id);
+    return { dismissed: true };
   },
 
   get_timeline(args): Timeline {
@@ -641,7 +665,27 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       if (aggressiveness === "aggressive" && clip.source_out - clip.source_in < 3.5) clip.included = false;
     }
     refreshTimeline(p);
-    return { action, timeline: clone(p.timeline), cut_count: p.timeline.cut_count };
+    // Flag a couple of still-included speech segments as Tier-2 suggestions
+    // (repeated take + repetition) so the review UI is exercised in-browser.
+    const speech = (state.transcript?.segments ?? []).filter(
+      (s) => !s.is_silence && !s.is_filler && s.text,
+    );
+    p.suggestions = speech.slice(1, 3).map((s, i) => ({
+      id: `sugg-${i}`,
+      segment_ids: [s.id],
+      start: s.start,
+      end: s.end,
+      reason: i === 0 ? "repeated_take" : "repetition",
+      confidence: 0.85 - i * 0.05,
+      duplicate_of: speech[0]?.id ?? null,
+      preview: s.text.slice(0, 80),
+    }));
+    return {
+      action,
+      timeline: clone(p.timeline),
+      cut_count: p.timeline.cut_count,
+      suggestions: p.suggestions.length,
+    };
   },
 
   // ---- Editing ---------------------------------------------------------------

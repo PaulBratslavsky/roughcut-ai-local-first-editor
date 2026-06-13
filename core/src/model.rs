@@ -615,6 +615,34 @@ pub struct Project {
     /// How camera and screen compose (only meaningful with screen_media).
     #[serde(default)]
     pub layout: Layout,
+    /// Rough-cut Tier-2 suggestions: fuzzy calls (repeated takes, repetitive
+    /// passages) the user reviews — NOT auto-applied. Replaced each rough cut;
+    /// drained as the user accepts/dismisses.
+    #[serde(default)]
+    pub suggestions: Vec<CutSuggestion>,
+}
+
+/// A proposed cut the rough-cut pass FLAGS rather than applies — the fuzzy,
+/// judgment-call tier (repeated takes, semantic repetition). The user accepts
+/// (applies it as a normal undoable cut) or dismisses it.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CutSuggestion {
+    pub id: Uuid,
+    /// Speech segments this suggestion would remove.
+    pub segment_ids: Vec<Uuid>,
+    pub start: f64,
+    pub end: f64,
+    /// "repeated_take" (a re-recording of a nearby line) | "repetition"
+    /// (says the same thing as another passage).
+    pub reason: String,
+    /// 0..1 — how sure the detector is (drives sort order + display).
+    pub confidence: f64,
+    /// The segment this one duplicates (the take/passage being kept).
+    pub duplicate_of: Option<Uuid>,
+    /// First ~80 chars of the flagged text, for the review UI.
+    pub preview: String,
 }
 
 /// Presentation layout: which stream fills the frame and where the face
@@ -657,6 +685,7 @@ impl Project {
             audio_offset_s: 0.0,
             screen_media: None,
             layout: Layout::default(),
+            suggestions: vec![],
         }
     }
 

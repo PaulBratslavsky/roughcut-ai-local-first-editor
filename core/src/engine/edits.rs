@@ -171,7 +171,7 @@ impl Editor {
         project_id: Uuid,
         aggressiveness: Option<Aggressiveness>,
         source: ActionSource,
-    ) -> Result<(EditAction, Timeline, u32)> {
+    ) -> Result<(EditAction, Timeline, u32, u32)> {
         self.ensure_loaded(project_id)?;
         if self.get_transcript(project_id)?.is_none() {
             self.transcribe(project_id, None).await?;
@@ -187,7 +187,90 @@ impl Editor {
         }
         let outcome = self.apply_edit(project_id, EditOp::RoughCut { aggressiveness: aggr }, source)?;
         let cut_count = outcome.timeline.cut_count;
-        Ok((outcome.action, outcome.timeline, cut_count))
+        // TIER 2 — compute reviewable suggestions (repeated takes + semantic
+        // repetition) and stash them on the project. Not applied: the user
+        // accepts/dismisses. Embeddings are best-effort (no index → takes only).
+        let embeddings = self
+            .inner
+            .store
+            .load_embeddings(project_id)?
+            .map(|(_, v)| v.into_iter().collect::<std::collections::HashMap<_, _>>());
+        let suggestions = match self.get_transcript(project_id)? {
+            Some(t) => detect::suggest_cuts(&t, embeddings.as_ref()),
+            None => vec![],
+        };
+        let suggestion_count = suggestions.len() as u32;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if let Some(p) = state.get_mut(&project_id).and_then(|e| e.project.as_mut()) {
+                p.suggestions = suggestions;
+                self.inner.store.save_project(p)?;
+            }
+        }
+        Ok((outcome.action, outcome.timeline, cut_count, suggestion_count))
+    }
+
+    /// Read the pending rough-cut suggestions (Tier-2 flags).
+    pub fn get_suggestions(&self, project_id: Uuid) -> Result<Vec<crate::model::CutSuggestion>> {
+        self.with_project(project_id, |p, _| Ok(p.suggestions.clone()))
+    }
+
+    /// Accept one suggestion: apply it as a normal undoable cut, then drop it
+    /// from the list. Returns the edit action.
+    pub fn accept_suggestion(
+        &self,
+        project_id: Uuid,
+        suggestion_id: Uuid,
+        source: ActionSource,
+    ) -> Result<EditAction> {
+        let seg_ids = self.with_project(project_id, |p, _| {
+            p.suggestions
+                .iter()
+                .find(|s| s.id == suggestion_id)
+                .map(|s| s.segment_ids.clone())
+                .ok_or_else(|| CoreError::NotFound(format!("suggestion {suggestion_id}")))
+        })?;
+        let outcome =
+            self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?;
+        self.remove_suggestions(project_id, &[suggestion_id])?;
+        Ok(outcome.action)
+    }
+
+    /// Accept ALL pending suggestions in one undoable batch.
+    pub fn accept_all_suggestions(
+        &self,
+        project_id: Uuid,
+        source: ActionSource,
+    ) -> Result<(Option<EditAction>, u32)> {
+        let (ids, seg_ids): (Vec<Uuid>, Vec<Uuid>) = self.with_project(project_id, |p, _| {
+            Ok((
+                p.suggestions.iter().map(|s| s.id).collect(),
+                p.suggestions.iter().flat_map(|s| s.segment_ids.clone()).collect(),
+            ))
+        })?;
+        if seg_ids.is_empty() {
+            return Ok((None, 0));
+        }
+        let count = ids.len() as u32;
+        let outcome =
+            self.apply_edit(project_id, EditOp::CutSegments { segment_ids: seg_ids }, source)?;
+        self.remove_suggestions(project_id, &ids)?;
+        Ok((Some(outcome.action), count))
+    }
+
+    /// Dismiss a suggestion without cutting.
+    pub fn dismiss_suggestion(&self, project_id: Uuid, suggestion_id: Uuid) -> Result<()> {
+        self.remove_suggestions(project_id, &[suggestion_id])
+    }
+
+    fn remove_suggestions(&self, project_id: Uuid, ids: &[Uuid]) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        if let Some(p) = state.get_mut(&project_id).and_then(|e| e.project.as_mut()) {
+            p.suggestions.retain(|s| !ids.contains(&s.id));
+            self.inner.store.save_project(p)?;
+        }
+        send(&self.inner.sink, CoreEvent::TimelineChanged { project_id });
+        Ok(())
     }
 
     /// Undo a specific action set (one chat turn) — ONLY when they are

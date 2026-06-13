@@ -21,6 +21,7 @@ export type { Aggressiveness } from "./generated/Aggressiveness";
 export type { ExternalConnection } from "./generated/ExternalConnection";
 export type { MediaAssets } from "./generated/MediaAssets";
 export type { Layout } from "./generated/Layout";
+export type { CutSuggestion } from "./generated/CutSuggestion";
 export type { ThumbnailRef } from "./generated/ThumbnailRef";
 
 import type { Clip } from "./generated/Clip";
@@ -106,7 +107,7 @@ export interface DurationCutReceipt {
 export interface EditResult { action: EditAction; timeline: Timeline }
 export interface SplitResult { clips: [Clip, Clip]; timeline: Timeline }
 export interface UndoResult { action: EditAction | null; timeline: Timeline }
-export interface RoughCutResult { timeline: Timeline; cut_count: number }
+export interface RoughCutResult { timeline: Timeline; cut_count: number; suggestions: number }
 export interface InstructionResult { actions: EditAction[]; summary: string }
 export interface ExportResult { path: string }
 export interface ListProjectsResult { projects: ProjectSummary[]; trash: ProjectSummary[] }

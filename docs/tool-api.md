@@ -63,7 +63,11 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `detect_silences { project_id, min_duration_s? } -> { method: "hybrid"|"transcript", segments: [{start, end, source: "confirmed"|"transcript_only", confidence}] }` — word-gap candidates confirmed + boundary-snapped against audio energy (file-adaptive thresholds; honest fallback without audio)
 - `detect_fillers { project_id } -> { segment_ids: string[], word_ranges: [{start,end}] }` (persists `is_filler` flags; stoplist comes from preferences)
 - `detect_takes { project_id } -> { take_groups: [{ id, segment_ids, best_segment_id }] }` (persists take flags — same write path as the rough cut)
-- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { action: EditAction, timeline: Timeline, cut_count: number }`
+- `get_suggestions { project_id } -> { suggestions: [{id, segment_ids, start, end, reason, confidence, duplicate_of, preview}] }` — pending rough-cut Tier-2 flags (repeated takes + repetition), not yet applied
+- `accept_suggestion { project_id, suggestion_id } -> { action }` — apply one suggestion as an undoable cut
+- `accept_all_suggestions { project_id } -> { action, accepted }` — apply all pending suggestions in one undoable batch
+- `dismiss_suggestion { project_id, suggestion_id } -> { dismissed }` — discard one suggestion without cutting
+- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { action: EditAction, timeline: Timeline, cut_count: number, suggestions: number }`
 
 ### Editing
 - `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` (+ `requested`; on a mid-batch failure returns a PARTIAL receipt `{applied, requested, actions, failed_at, error, note}` — applied edits are journaled and undoable) — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
