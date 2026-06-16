@@ -25,6 +25,7 @@ pub mod llm_runtime;
 pub mod mcp;
 pub mod model;
 pub mod progress;
+pub mod pty;
 pub mod resolve;
 pub mod setup;
 pub mod story;

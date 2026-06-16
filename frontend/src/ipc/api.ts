@@ -221,6 +221,34 @@ export async function revealPath(path: string): Promise<void> {
   return invoke("reveal_path", { path });
 }
 
+// ---- In-app terminal (desktop only) ----
+
+/** Open a PTY session bound to `id`. Output arrives via `terminal-output`
+ *  events; the shell exiting emits `terminal-exit`. Desktop-only — there is no
+ *  PTY in the browser harness. */
+export async function ptySpawn(id: string, cols: number, rows: number): Promise<void> {
+  if (!isTauri) return;
+  return invoke("pty_spawn", { id, cols, rows });
+}
+
+/** Forward keystrokes (xterm `onData`) to the shell. */
+export async function ptyWrite(id: string, data: string): Promise<void> {
+  if (!isTauri) return;
+  return invoke("pty_write", { id, data });
+}
+
+/** Tell the PTY the new grid size (cols/rows, not pixels). */
+export async function ptyResize(id: string, cols: number, rows: number): Promise<void> {
+  if (!isTauri) return;
+  return invoke("pty_resize", { id, cols, rows });
+}
+
+/** Kill the session's shell (also happens automatically on app exit). */
+export async function ptyKill(id: string): Promise<void> {
+  if (!isTauri) return;
+  return invoke("pty_kill", { id });
+}
+
 /** Resolve a local media file path to something a <video> tag can play. */
 export function mediaSrc(filePath: string): string | null {
   // Browser harness: http sources play directly (lets Playwright exercise

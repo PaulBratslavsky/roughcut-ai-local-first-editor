@@ -248,6 +248,29 @@ fn delete_recording(path: String) -> Result<(), Value> {
     roughcut_core::adapters::record::delete_recording(&path).map_err(|e| e.to_json())
 }
 
+/// Open an in-app terminal session. The MCP endpoint (when up) is injected
+/// into the shell env so a one-click connect can wire Claude Code to it.
+#[tauri::command]
+fn pty_spawn(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), Value> {
+    let mcp = state.mcp.lock().unwrap().clone().map(|i| (i.url, i.token));
+    roughcut_core::pty::spawn(state.editor.sink(), id, cols, rows, mcp).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+fn pty_write(id: String, data: String) -> Result<(), Value> {
+    roughcut_core::pty::write(&id, data.as_bytes()).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+fn pty_resize(id: String, cols: u16, rows: u16) -> Result<(), Value> {
+    roughcut_core::pty::resize(&id, cols, rows).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+fn pty_kill(id: String) -> Result<(), Value> {
+    roughcut_core::pty::kill(&id).map_err(|e| e.to_json())
+}
+
 #[tauri::command]
 async fn download_whisper_model(
     state: State<'_, AppState>,
@@ -299,6 +322,10 @@ pub fn run() {
             download_gguf,
             start_managed_llm,
             download_whisper_model,
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_kill,
             install_resolve_plugin,
             resolve_status,
             send_to_resolve,
@@ -322,6 +349,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 roughcut_core::llm_runtime::stop_managed();
                 roughcut_core::adapters::record::abort_on_exit();
+                roughcut_core::pty::kill_all();
             }
         });
 }

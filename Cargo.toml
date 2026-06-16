@@ -23,6 +23,8 @@ rand = "0.8"
 dirs = "5"
 async-trait = "0.1"
 sha2 = "0.10"
+portable-pty = "0.9"
+base64 = "0.22"
 
 [profile.release]
 lto = true
