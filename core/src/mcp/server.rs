@@ -107,7 +107,7 @@ async fn handle(
                 "protocolVersion": requested,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "roughcut", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Local-first AI video editor. YOU are the orchestrator: list_projects to find work, read_transcript (paged) or find_segments (semantic search) to understand the footage, then apply_edits to land a batch of cuts/trims/padding in one call. Everything is non-destructive and undoable; export hands off to an NLE."
+                "instructions": "Local-first AI video editor. YOU are the orchestrator: list_projects to find work, then read_transcript (paged) to understand the footage — read it yourself rather than calling outline_transcript, which runs the slow on-device model and is meant for the in-app local agent. To LOCATE a moment, use find_segments (hybrid BM25 + local-embedding search) — don't export the transcript and index it yourself. To CUT cleanly, pass snap=\"word\"|\"sentence\" to cut_range/apply_edits so cuts land on word/sentence boundaries — don't parse word timestamps yourself. Land cuts/trims/padding with apply_edits in one batch, then ALWAYS call review_flow to catch seams that read broken (mid-sentence cuts, orphaned connectives) and restore what it flags. Everything is non-destructive and undoable; export hands off to an NLE."
             }))
         }
         "ping" => Ok(json!({})),
