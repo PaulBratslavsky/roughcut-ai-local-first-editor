@@ -897,6 +897,25 @@ handler!(h_get_history, |e, a, _s| {
     Ok(serde_json::to_value(e.history(arg_uuid(a, "project_id")?)?)?)
 });
 
+handler!(h_create_checkpoint, |e, a, _s| {
+    let cp = e.create_checkpoint(arg_uuid(a, "project_id")?, arg_str(a, "name")?, false)?;
+    Ok(json!({ "checkpoint": cp }))
+});
+
+handler!(h_get_checkpoints, |e, a, _s| {
+    Ok(json!({ "checkpoints": e.get_checkpoints(arg_uuid(a, "project_id")?)? }))
+});
+
+handler!(h_restore_checkpoint, |e, a, s| {
+    let action = e.restore_checkpoint(arg_uuid(a, "project_id")?, arg_uuid(a, "checkpoint_id")?, s)?;
+    Ok(json!({ "action": action }))
+});
+
+handler!(h_delete_checkpoint, |e, a, _s| {
+    e.delete_checkpoint(arg_uuid(a, "project_id")?, arg_uuid(a, "checkpoint_id")?)?;
+    Ok(json!({ "deleted": true }))
+});
+
 handler!(h_jump_to, |e, a, _s| {
     // null action_id = jump to the original (before any edit).
     let target = arg_uuid_opt(a, "action_id")?;
@@ -1104,6 +1123,18 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("jump_to", "Go back (or forward) in time to a point in the edit history: undo/redo until the given action is the newest applied edit. null action_id = the original, before any edit.",
         || obj(json!({"project_id": pid_schema(), "action_id": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, mutating: true, h_jump_to),
+    tool!("create_checkpoint", "Save the current timeline as a named checkpoint — a full snapshot you can return to later regardless of undo/redo state. The safety net before trying something bold.",
+        || obj(json!({"project_id": pid_schema(), "name": {"type": "string"}}), &["project_id", "name"]),
+        agent: false, meta: false, h_create_checkpoint),
+    tool!("get_checkpoints", "List saved checkpoints (newest first): {id, name, created_at, cut_count, auto}.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_get_checkpoints),
+    tool!("restore_checkpoint", "Restore a saved checkpoint as an undoable edit (the restore itself goes into the history).",
+        || obj(json!({"project_id": pid_schema(), "checkpoint_id": {"type": "string"}}), &["project_id", "checkpoint_id"]),
+        agent: false, meta: false, mutating: true, h_restore_checkpoint),
+    tool!("delete_checkpoint", "Delete a saved checkpoint.",
+        || obj(json!({"project_id": pid_schema(), "checkpoint_id": {"type": "string"}}), &["project_id", "checkpoint_id"]),
+        agent: false, meta: false, h_delete_checkpoint),
     tool!("get_preferences", "Get user preferences.", || obj(json!({}), &[]),
         agent: false, meta: false, h_get_preferences),
     tool!("set_preferences", "Replace user preferences.",

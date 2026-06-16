@@ -620,6 +620,51 @@ pub struct Project {
     /// drained as the user accepts/dismisses.
     #[serde(default)]
     pub suggestions: Vec<CutSuggestion>,
+    /// Named save points (and auto-snapshots before destructive ops).
+    #[serde(default)]
+    pub checkpoints: Vec<Checkpoint>,
+}
+
+/// A named, self-contained snapshot of the timeline — a "save point" the
+/// user can return to regardless of undo/redo state (it stores the full clip
+/// state, not a fragile journal pointer). The safety net: keep a good
+/// version, try something bold, restore by name.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub clips: Vec<Clip>,
+    pub global_padding: Padding,
+    pub cut_count: u32,
+    /// Auto-created before a destructive op (e.g. a rough cut) vs. user-named.
+    pub auto: bool,
+}
+
+/// The lean checkpoint view for listings (no clip dump).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub cut_count: u32,
+    pub auto: bool,
+}
+
+impl Checkpoint {
+    pub fn summary(&self) -> CheckpointSummary {
+        CheckpointSummary {
+            id: self.id,
+            name: self.name.clone(),
+            created_at: self.created_at,
+            cut_count: self.cut_count,
+            auto: self.auto,
+        }
+    }
 }
 
 /// One step in the edit history (a view over a journal entry's action).
@@ -710,6 +755,7 @@ impl Project {
             screen_media: None,
             layout: Layout::default(),
             suggestions: vec![],
+            checkpoints: vec![],
         }
     }
 

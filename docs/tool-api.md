@@ -112,6 +112,10 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `get_timeline { project_id } -> Timeline`
 - `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented). Words are `{ text, start, end, confidence }` — the word key is `text`, not `word`. To cut on a clean boundary use `snap` on `cut_range`/`apply_edits` rather than parsing these.
 - `undo_actions { project_id, action_ids } -> { undone, timeline }` — undo a specific recent action set (a chat turn); errors if newer edits exist so it can never revert unrelated work
+- `create_checkpoint { project_id, name } -> { checkpoint }` — save the current timeline as a named snapshot (returnable regardless of undo state)
+- `get_checkpoints { project_id } -> { checkpoints: [{id, name, created_at, cut_count, auto}] }` — saved checkpoints, newest first
+- `restore_checkpoint { project_id, checkpoint_id } -> { action }` — restore a checkpoint as an undoable edit
+- `delete_checkpoint { project_id, checkpoint_id } -> { deleted }` — delete a checkpoint
 - `get_history { project_id } -> { entries: [{id, kind, source, description, timestamp, applied}], current_index }` — full edit history oldest→newest (applied then undone/future); current_index = newest applied (-1 = original)
 - `jump_to { project_id, action_id? } -> { timeline }` — go back/forward to a history point (undo/redo until that action is newest applied); null action_id = the original
 - `undo { project_id } -> { action: EditAction|null, timeline }`

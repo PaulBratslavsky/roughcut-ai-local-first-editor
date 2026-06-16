@@ -433,6 +433,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       screen_media: null,
       layout: { mode: "pip", shape: "rounded", corner: "br", size: 0.25 },
       suggestions: [],
+      checkpoints: [],
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -537,6 +538,45 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     const incoming = (args.preferences ?? {}) as Partial<Preferences>;
     state.preferences = { ...state.preferences, ...clone(incoming) };
     return clone(state.preferences);
+  },
+
+  create_checkpoint(args): unknown {
+    const p = requireProject(args.project_id);
+    const cp = {
+      id: `cp-${(p.checkpoints?.length ?? 0)}-${Math.floor(Date.now() / 1000)}`,
+      name: String(args.name ?? "Checkpoint"),
+      created_at: new Date().toISOString(),
+      clips: clone(p.timeline.clips),
+      global_padding: clone(p.timeline.global_padding),
+      cut_count: p.timeline.cut_count,
+      auto: false,
+    };
+    p.checkpoints = [...(p.checkpoints ?? []), cp];
+    return { checkpoint: { id: cp.id, name: cp.name, created_at: cp.created_at, cut_count: cp.cut_count, auto: cp.auto } };
+  },
+
+  get_checkpoints(args): unknown {
+    const p = requireProject(args.project_id);
+    return {
+      checkpoints: [...(p.checkpoints ?? [])].reverse().map((c: any) => ({
+        id: c.id, name: c.name, created_at: c.created_at, cut_count: c.cut_count, auto: c.auto,
+      })),
+    };
+  },
+
+  restore_checkpoint(args): unknown {
+    const p = requireProject(args.project_id);
+    const cp = (p.checkpoints ?? []).find((c: any) => c.id === args.checkpoint_id);
+    if (cp) { p.timeline.clips = clone(cp.clips); p.timeline.global_padding = clone(cp.global_padding); refreshTimeline(p); }
+    const action = recordEdit(p, "set_clips", `Restored checkpoint “${cp?.name ?? ""}”`);
+    emit("timeline-changed", { project_id: p.id });
+    return { action };
+  },
+
+  delete_checkpoint(args): unknown {
+    const p = requireProject(args.project_id);
+    p.checkpoints = (p.checkpoints ?? []).filter((c: any) => c.id !== args.checkpoint_id);
+    return { deleted: true };
   },
 
   get_history(args): unknown {
