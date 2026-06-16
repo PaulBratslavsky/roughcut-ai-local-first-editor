@@ -26,6 +26,19 @@ impl Editor {
         op: EditOp,
         source: ActionSource,
     ) -> Result<EditOutcome> {
+        self.apply_edit_labeled(project_id, op, source, None)
+    }
+
+    /// `label` overrides the auto-derived history description (e.g. "Restored
+    /// checkpoint 'before aggressive cut'" instead of "Restore previous cut
+    /// state").
+    pub fn apply_edit_labeled(
+        &self,
+        project_id: Uuid,
+        op: EditOp,
+        source: ActionSource,
+        label: Option<String>,
+    ) -> Result<EditOutcome> {
         self.ensure_loaded(project_id)?;
         let prefs = self.inner.store.load_preferences()?;
         let outcome = {
@@ -62,7 +75,10 @@ impl Editor {
             )?;
             project.timeline.normalize();
             project.updated_at = Utc::now();
-            let action = EditAction::new(source, op);
+            let mut action = EditAction::new(source, op);
+            if let Some(l) = label {
+                action.description = l;
+            }
             undo.push(JournalEntry {
                 action: action.clone(),
                 inverse: EditOp::SetClips { clips: before_clips, global_padding: before_padding },
@@ -178,6 +194,9 @@ impl Editor {
         }
         let prefs = self.inner.store.load_preferences()?;
         let aggr = aggressiveness.unwrap_or(prefs.cut_aggressiveness);
+        // Auto-snapshot before the most destructive single action, so the
+        // pre-rough-cut state is always one click away.
+        let _ = self.create_checkpoint(project_id, "Before rough cut", true);
         // Hybrid silences: stage raw audio peaks for the RoughCut apply
         // (best effort — no ffmpeg means transcript-only detection).
         let media = self.with_project(project_id, |p, _| Ok(p.media.clone()))?;
@@ -322,6 +341,90 @@ impl Editor {
 
     pub fn redo(&self, project_id: Uuid) -> Result<(Option<EditAction>, Timeline)> {
         self.step_history(project_id, false)
+    }
+
+    /// Maximum saved checkpoints; oldest AUTO snapshot is evicted first so a
+    /// user's named save points survive.
+    const CHECKPOINT_CAP: usize = 40;
+
+    /// Save the current timeline as a named checkpoint (a full snapshot, not a
+    /// journal pointer — it survives any later undo/redo/jump).
+    pub fn create_checkpoint(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        auto: bool,
+    ) -> Result<crate::model::CheckpointSummary> {
+        use crate::model::Checkpoint;
+        self.ensure_loaded(project_id)?;
+        let mut state = self.inner.state.lock().unwrap();
+        let p = state
+            .get_mut(&project_id)
+            .and_then(|e| e.project.as_mut())
+            .ok_or_else(|| CoreError::NotFound("project".into()))?;
+        let cp = Checkpoint {
+            id: Uuid::new_v4(),
+            name: if name.trim().is_empty() { "Checkpoint".into() } else { name.trim().into() },
+            created_at: Utc::now(),
+            clips: p.timeline.clips.clone(),
+            global_padding: p.timeline.global_padding,
+            cut_count: p.timeline.cut_count,
+            auto,
+        };
+        let summary = cp.summary();
+        p.checkpoints.push(cp);
+        while p.checkpoints.len() > Self::CHECKPOINT_CAP {
+            // Evict the oldest AUTO checkpoint; if none, the oldest overall.
+            let idx = p
+                .checkpoints
+                .iter()
+                .position(|c| c.auto)
+                .unwrap_or(0);
+            p.checkpoints.remove(idx);
+        }
+        self.inner.store.save_project(p)?;
+        Ok(summary)
+    }
+
+    /// Lean checkpoint list (no clip dumps).
+    pub fn get_checkpoints(&self, project_id: Uuid) -> Result<Vec<crate::model::CheckpointSummary>> {
+        self.with_project(project_id, |p, _| {
+            Ok(p.checkpoints.iter().rev().map(|c| c.summary()).collect())
+        })
+    }
+
+    /// Restore a checkpoint as a normal undoable edit (so the restore itself
+    /// is in the history and can be undone).
+    pub fn restore_checkpoint(
+        &self,
+        project_id: Uuid,
+        checkpoint_id: Uuid,
+        source: ActionSource,
+    ) -> Result<EditAction> {
+        let (clips, padding, name) = self.with_project(project_id, |p, _| {
+            let c = p
+                .checkpoints
+                .iter()
+                .find(|c| c.id == checkpoint_id)
+                .ok_or_else(|| CoreError::NotFound(format!("checkpoint {checkpoint_id}")))?;
+            Ok((c.clips.clone(), c.global_padding, c.name.clone()))
+        })?;
+        let outcome = self.apply_edit_labeled(
+            project_id,
+            EditOp::SetClips { clips, global_padding: padding },
+            source,
+            Some(format!("Restored checkpoint “{name}”")),
+        )?;
+        Ok(outcome.action)
+    }
+
+    pub fn delete_checkpoint(&self, project_id: Uuid, checkpoint_id: Uuid) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        if let Some(p) = state.get_mut(&project_id).and_then(|e| e.project.as_mut()) {
+            p.checkpoints.retain(|c| c.id != checkpoint_id);
+            self.inner.store.save_project(p)?;
+        }
+        Ok(())
     }
 
     /// The full edit history, oldest → newest: every applied edit (the undo
