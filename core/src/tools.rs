@@ -398,12 +398,15 @@ handler!(h_dismiss_suggestion, |e, a, _s| {
 });
 
 handler!(h_cut_range, |e, a, s| {
-    edit(
+    let pid = arg_uuid(a, "project_id")?;
+    let (start, end) = crate::story::snap_cut_range(
         e,
-        arg_uuid(a, "project_id")?,
-        EditOp::CutRange { start: arg_f64(a, "start")?, end: arg_f64(a, "end")? },
-        s,
-    )
+        pid,
+        arg_f64(a, "start")?,
+        arg_f64(a, "end")?,
+        a["snap"].as_str().unwrap_or("none"),
+    )?;
+    edit(e, pid, EditOp::CutRange { start, end }, s)
 });
 
 handler!(h_restore_range, |e, a, s| {
@@ -571,7 +574,16 @@ handler!(h_outline_transcript, |e, a, _s| {
 });
 
 handler!(h_review_flow, |e, a, _s| {
-    let review = crate::story::review_flow(e, arg_uuid(a, "project_id")?).await?;
+    // Default to the instant deterministic pass (no model calls) so a frontier
+    // orchestrator can verify seams without risking the local-model timeout —
+    // it has the context to judge semantics itself. `llm=true` opts into the
+    // slower on-device boundary-by-boundary read.
+    let review = crate::story::review_flow_mode(
+        e,
+        arg_uuid(a, "project_id")?,
+        a["llm"].as_bool().unwrap_or(false),
+    )
+    .await?;
     Ok(serde_json::to_value(review)?)
 });
 
@@ -666,7 +678,31 @@ handler!(h_find_segments, |e, a, _s| {
 
 handler!(h_apply_edits, |e, a, s| {
     let project_id = arg_uuid(a, "project_id")?;
-    let ops: Vec<EditOp> = serde_json::from_value(a["edits"].clone())
+    // Snap-to-boundary pre-pass: a cut_range edit may carry a "snap" hint
+    // ("word"|"sentence"). Resolve it to concrete times here and strip the key
+    // so the op deserializes cleanly — snap is an input convenience, not a
+    // journaled field. Saves orchestrators from parsing word timings themselves.
+    let mut edits_json = a["edits"].clone();
+    if let Some(arr) = edits_json.as_array_mut() {
+        for ed in arr.iter_mut() {
+            let snap = ed.get("snap").and_then(|v| v.as_str()).unwrap_or("none").to_string();
+            if ed.get("type").and_then(|v| v.as_str()) == Some("cut_range")
+                && (snap == "word" || snap == "sentence")
+            {
+                if let (Some(start), Some(end)) =
+                    (ed.get("start").and_then(|v| v.as_f64()), ed.get("end").and_then(|v| v.as_f64()))
+                {
+                    let (s2, e2) = crate::story::snap_cut_range(e, project_id, start, end, &snap)?;
+                    ed["start"] = serde_json::json!(s2);
+                    ed["end"] = serde_json::json!(e2);
+                }
+            }
+            if let Some(obj) = ed.as_object_mut() {
+                obj.remove("snap");
+            }
+        }
+    }
+    let ops: Vec<EditOp> = serde_json::from_value(edits_json)
         .map_err(|err| CoreError::InvalidArg(format!(
             "edits: {err}. Each edit is {{\"type\": one of cut_range|restore_range|cut_segments|\
              restore_segments|trim_clip|split_clip|reorder_clip|set_global_padding, ...fields}}"
@@ -945,8 +981,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("generate_rough_cut", "Full AI first pass: auto-cuts silences AND fillers (Tier 1), and FLAGS repeated takes + repetitive passages as suggestions for review (Tier 2 — see get_suggestions/accept_all_suggestions). Deterministic, no narrative restructuring. For silence ONLY use remove_silences. Returns timeline, cut_count, and suggestions (count).",
         || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_generate_rough_cut),
-    tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive.",
-        || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
+    tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive. Pass snap=\"word\" or \"sentence\" to land the cut on clean word/sentence boundaries using the transcript's word timings, so it never clips mid-word — use this instead of parsing word timestamps yourself.",
+        || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap the cut to clean boundaries (default none)"}}), &["project_id", "start", "end"]),
         agent: true, meta: false, mutating: true, h_cut_range),
     tool!("restore_range", "Re-include a previously cut source time range.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
@@ -981,11 +1017,11 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Re-run transcribe afterwards to caption the appended span.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
         agent: false, meta: false, mutating: true, h_append_media),
-    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate). The narrative map to plan cohesive edits against.",
+    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one on-device model pass per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the on-device beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
-    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. Run after a batch of cuts; restore what reads broken.",
-        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower on-device semantic pass per seam.",
+        || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "on-device semantic pass per seam (slower); default false runs only the instant deterministic checks"}}), &["project_id"]),
         agent: true, meta: false, h_review_flow),
     tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several local-model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
@@ -996,12 +1032,12 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
         || obj(json!({"project_id": pid_schema(), "query": {"type": "string"}, "limit": {"type": "integer", "description": "max 50, default 8"}}), &["project_id", "query"]),
         agent: true, meta: false, h_find_segments),
-    tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). Use offset/limit for long videos instead of get_transcript.",
+    tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). With include_words each segment carries words: [{text, start, end, confidence}] (key is `text`). Use offset/limit for long videos instead of get_transcript.",
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_read_transcript),
-    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
+    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds, optional snap=\"word\"|\"sentence\" to land on clean boundaries; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
         || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"oneOf": [
-            {"type": "object", "properties": {"type": {"const": "cut_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
+            {"type": "object", "properties": {"type": {"const": "cut_range"}, "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap to clean word/sentence boundaries (default none)"}}, "required": ["type", "start", "end"]},
             {"type": "object", "properties": {"type": {"const": "restore_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
             {"type": "object", "properties": {"type": {"const": "cut_segments"}, "segment_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "segment_ids"]},
             {"type": "object", "properties": {"type": {"const": "restore_segments"}, "segment_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "segment_ids"]},
@@ -1052,7 +1088,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("get_timeline", "Get the current timeline (clips, padding, cut count).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_get_timeline),
-    tool!("get_transcript", "Get the FULL transcript including word-level timestamps — large for long videos; prefer read_transcript (paged) or find_segments (semantic search).",
+    tool!("get_transcript", "Get the FULL transcript including word-level timestamps — large for long videos; prefer read_transcript (paged) or find_segments (semantic search). Each segment has words: [{text, start, end, confidence}] (the word key is `text`, not `word`). To cut on a clean word/sentence boundary you do NOT need to parse these — pass snap to cut_range/apply_edits instead.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_get_transcript),
     tool!("undo_actions", "Undo a SPECIFIC set of recent actions (e.g. everything one chat turn applied). Succeeds only while those actions are still the newest journal entries; otherwise errors so unrelated newer edits are never reverted.",

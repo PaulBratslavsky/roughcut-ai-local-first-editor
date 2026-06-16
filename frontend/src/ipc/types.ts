@@ -63,9 +63,15 @@ export interface TranscriptChangedEvent { project_id: string }
 
 export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
-  | "projects-changed" | "media-assets-changed" | "confirm-request";
+  | "projects-changed" | "media-assets-changed" | "confirm-request"
+  | "terminal-output" | "terminal-exit";
 
 export interface ConfirmRequestEvent { id: string; summary: string }
+
+/** A chunk of PTY output: `data` is base64-encoded raw bytes (write to xterm
+ *  as a Uint8Array — never as a string, to survive multibyte boundaries). */
+export interface TerminalOutputEvent { id: string; data: string }
+export interface TerminalExitEvent { id: string; code: number | null }
 
 // ---------------------------------------------------------------------------
 // Common tool result envelopes

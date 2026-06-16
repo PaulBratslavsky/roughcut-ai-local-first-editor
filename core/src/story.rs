@@ -292,6 +292,56 @@ struct Boundary {
 /// Walk the cut boundaries of the CURRENT timeline: deterministic checks
 /// (sentence sliced mid-thought, orphaned connectives) plus an LLM judgment
 /// of each boundary with its before/cut/after context.
+/// Snap a cut range [start, end] to clean WORD or SENTENCE boundaries using
+/// the transcript's word-level timings, so a cut never clips mid-word. The
+/// kept content BEFORE the cut ends at a word/sentence end (we snap `start`),
+/// and the kept content AFTER resumes at a word/sentence start (we snap `end`).
+/// `mode`: "word" | "sentence" | "none". Falls back to the original range if
+/// snapping would invert/collapse it or there are no word timings — this is the
+/// deterministic boundary math an orchestrator would otherwise hand-roll.
+pub fn snap_cut_range(
+    editor: &Editor,
+    project_id: Uuid,
+    start: f64,
+    end: f64,
+    mode: &str,
+) -> Result<(f64, f64)> {
+    if !matches!(mode, "word" | "sentence") {
+        return Ok((start, end)); // "none"/unknown: leave the range as given
+    }
+    let speech = speech_segments(editor, project_id)?;
+    let sentence = mode == "sentence";
+    let ends_sentence = |t: &str| t.trim_end().ends_with(['.', '!', '?', '…']);
+
+    // `start` lands on a word END (clean end of kept-before); `end` lands on a
+    // word START (clean start of kept-after). In sentence mode, restrict the
+    // candidates to sentence edges.
+    let mut start_cands: Vec<f64> = vec![];
+    let mut end_cands: Vec<f64> = vec![];
+    let mut prev_ended = true; // the first word begins a "sentence"
+    for seg in &speech {
+        for w in &seg.words {
+            if !sentence || ends_sentence(&w.text) {
+                start_cands.push(w.end);
+            }
+            if !sentence || prev_ended {
+                end_cands.push(w.start);
+            }
+            prev_ended = ends_sentence(&w.text);
+        }
+    }
+
+    let nearest = |cands: &[f64], t: f64| -> Option<f64> {
+        cands.iter().copied().min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
+    };
+    let s = nearest(&start_cands, start).unwrap_or(start);
+    let e = nearest(&end_cands, end).unwrap_or(end);
+    if s >= e {
+        return Ok((start, end)); // snapping collapsed/inverted — keep original
+    }
+    Ok((s, e))
+}
+
 pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview> {
     review_flow_mode(editor, project_id, true).await
 }

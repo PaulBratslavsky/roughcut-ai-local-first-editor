@@ -71,7 +71,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Editing
 - `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` (+ `requested`; on a mid-batch failure returns a PARTIAL receipt `{applied, requested, actions, failed_at, error, note}` — applied edits are journaled and undoable) — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
-- `cut_range { project_id, start, end } -> { action: EditAction, timeline: Timeline }`
+- `cut_range { project_id, start, end, snap? } -> { action: EditAction, timeline: Timeline }` — `snap: "word"|"sentence"` lands the cut on clean boundaries from word timings (default `none`); also accepted per-edit on `cut_range` ops inside `apply_edits`
 - `restore_range { project_id, start, end } -> { action, timeline }`
 - `cut_by_transcript { project_id, segment_ids: string[] } -> { action, timeline }`
 - `restore_by_transcript { project_id, segment_ids } -> { action, timeline }`
@@ -85,7 +85,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Semantic / LLM
 - `outline_transcript { project_id, refresh? } -> { beats: [{title, summary, role, cut_priority, segment_ids, start, end}], method: "llm"|"heuristic" }` — the FULL transcript split into story beats (chunked map for long videos; cached per transcript hash; pause-boundary sections without a model)
-- `review_flow { project_id } -> { coherent, boundaries_checked, issues: [{kind, severity, at_segment, description, restore_segment_ids}], method }` — re-reads the edited transcript at every cut point: deterministic checks (mid-sentence cuts, orphaned connectives) + LLM judgment per boundary
+- `review_flow { project_id, llm? } -> { coherent, boundaries_checked, issues: [{kind, severity, at_segment, description, restore_segment_ids}], method }` — re-reads the edited transcript at every cut point. Default `llm=false` runs only the instant deterministic checks (mid-sentence cuts, orphaned connectives — no model calls, safe for long videos); `llm=true` adds on-device semantic judgment per boundary. Run after every batch of cuts and restore what it flags.
 - `story_edit { project_id, instruction, target_duration_s? } -> { actions, summary, before_s, after_s, coherent, issues_remaining }` — the cohesive pipeline in one call: outline → cut whole beats against the instruction → review every cut point → restore what reads broken → summarize. Long-running; frontier orchestrators may prefer composing the granular tools
 - `plan_duration_cut { project_id, target_duration_s, apply? } -> plan | receipt` — ranks still-included segments by embedding centrality (tangents first, intro/outro protected). `apply: true` (recommended for orchestrators) plans AND cuts in one undoable step, returning `{ applied, action, before_s, included_duration_s, target_s, method, notes }`; without it, returns the full `{ segment_ids, projected_after_s, … }` plan for review
 - `find_segments { project_id, query, limit? } -> { segments: [LeanSegment & {score}], method: "hybrid"|"bm25" }` — BM25 + local embeddings (Ollama `nomic-embed-text`) fused by reciprocal rank; BM25 alone when no index
@@ -110,7 +110,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `save_project { project_id } -> Project`
 - `list_projects {} -> { projects: [ProjectSummary], trash: [ProjectSummary] }`
 - `get_timeline { project_id } -> Timeline`
-- `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented)
+- `get_transcript { project_id } -> Transcript | null` (full fidelity incl. word timestamps — large; UI-oriented). Words are `{ text, start, end, confidence }` — the word key is `text`, not `word`. To cut on a clean boundary use `snap` on `cut_range`/`apply_edits` rather than parsing these.
 - `undo_actions { project_id, action_ids } -> { undone, timeline }` — undo a specific recent action set (a chat turn); errors if newer edits exist so it can never revert unrelated work
 - `get_history { project_id } -> { entries: [{id, kind, source, description, timestamp, applied}], current_index }` — full edit history oldest→newest (applied then undone/future); current_index = newest applied (-1 = original)
 - `jump_to { project_id, action_id? } -> { timeline }` — go back/forward to a history point (undo/redo until that action is newest applied); null action_id = the original
@@ -154,7 +154,7 @@ interface Timeline { id: string; clips: Clip[]; global_padding: Padding;
 // Edits are DATA: a serializable op plus exact snapshot inverse/redo
 // (see docs/adr/0002). The journal persists, so undo survives restarts.
 type EditOp =
-  | { type: "cut_range"; start: number; end: number }
+  | { type: "cut_range"; start: number; end: number; snap?: "none" | "word" | "sentence" }
   | { type: "restore_range"; start: number; end: number }
   | { type: "cut_segments"; segment_ids: string[] }
   | { type: "restore_segments"; segment_ids: string[] }

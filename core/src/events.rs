@@ -74,6 +74,20 @@ pub enum CoreEvent {
         id: Uuid,
         summary: String,
     },
+    /// A chunk of PTY output for an in-app terminal session. `data` is base64
+    /// (raw bytes — a multibyte char can split across reads, so we never decode
+    /// to a String on this side; the frontend writes the bytes to xterm).
+    TerminalOutput {
+        id: String,
+        data: String,
+    },
+    /// A terminal session's shell exited. The panel shows a restart affordance;
+    /// crucially the app keeps running (unlike a bare `process::exit`).
+    TerminalExit {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<i64>,
+    },
 }
 
 impl CoreEvent {
@@ -84,6 +98,19 @@ impl CoreEvent {
         message: impl Into<String>,
     ) -> Self {
         CoreEvent::Progress { task, project_id, fraction, message: message.into() }
+    }
+
+    /// PTY output, raw bytes base64-encoded (see [`CoreEvent::TerminalOutput`]).
+    pub fn terminal_output(id: impl Into<String>, bytes: &[u8]) -> Self {
+        use base64::Engine;
+        CoreEvent::TerminalOutput {
+            id: id.into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    pub fn terminal_exit(id: impl Into<String>, code: Option<i64>) -> Self {
+        CoreEvent::TerminalExit { id: id.into(), code }
     }
 
     /// The wire name the frontend listens on.
@@ -97,6 +124,8 @@ impl CoreEvent {
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
             CoreEvent::ConfirmRequest { .. } => "confirm-request",
+            CoreEvent::TerminalOutput { .. } => "terminal-output",
+            CoreEvent::TerminalExit { .. } => "terminal-exit",
         }
     }
 
