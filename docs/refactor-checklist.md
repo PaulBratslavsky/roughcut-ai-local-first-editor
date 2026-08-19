@@ -139,6 +139,43 @@ suggestion lifecycle) are inferred from field-presence rather than made explicit
 - **Done when:** "what is an `Editor`" and "how does undo work" are each answerable
   from one place; the state machines are types, not field-presence guesses.
 
+## 7. Media asset cache — no lifecycle, grows without bound
+**Problem:** `<data dir>/cache/<asset_cache_key>/` is written by
+`adapters/video.rs` (peaks, `peaks_raw.bin`, thumbnail filmstrip, `play.mp4`) and
+**never** read back for size, age, or ownership — there is no eviction, no budget,
+no "this project is gone, drop its assets". Nothing in `core/` or `app/` prunes it.
+Two compounding effects:
+- `ensure_playable_copy` (video.rs:446) is a **lossless remux** (`-c:v copy`,
+  `+faststart`), not a downscaled proxy — by design, but it means every source
+  needing faststart or a >2ch audio downmix leaves a **full-size second copy** of
+  the video on disk. Observed: 4.0 GB of `play.mp4` across 4 imports, one of them
+  2.4 GB (1920x1080, 8 Mbps, 43 min).
+- `asset_cache_key` (video.rs:540) intentionally invalidates when the file
+  changes — but the superseded directory is **orphaned, not removed**, so
+  re-encoding a source doubles its cache footprint.
+
+Note this is a *lifecycle* gap, not a depth one: the write path is fine, the
+missing concept is the cache as an owned, bounded thing. `Journal` and
+`Checkpoint` already model exactly this (cap + eviction policy, `edits.rs:346`) —
+follow that precedent rather than inventing a new one.
+- [ ] Name the concept (`AssetCache`?) and give it one home; today `data_dir()
+      .join("cache").join(asset_cache_key(..))` is recomputed at 4+ call sites.
+- [ ] Put size/age accounting behind it: total bytes, per-key bytes, last-used.
+- [ ] Add eviction with a user-visible budget (default cap, LRU by last-used),
+      mirroring the checkpoint eviction policy rather than a new scheme.
+- [ ] Drop a media key's directory when its last owning project is deleted, and
+      drop orphaned keys (no project references them) on startup.
+- [ ] Surface it in Setup: cache size + a "clear cache" action, alongside the
+      existing model management.
+- [ ] Decide whether `play.mp4` should stay lossless or become a real downscaled
+      proxy for playback only (export already re-reads the source). Record it as
+      an ADR either way — "the playable copy is intentionally lossless" is a
+      decision worth pinning, not rediscovering.
+- [ ] Tests: eviction picks the right victim; project deletion removes its keys;
+      orphan sweep is idempotent and never touches a live key.
+- **Done when:** cache size is bounded, observable, and clearable, and no disk is
+  held by media no project references.
+
 ## Deferred (revisit only if friction bites)
 - **`Store` trait (20+ methods):** an intentional SQLite facade — already a **deep**
   seam (the deletion test exonerates it: deleting it scatters SQL/persistence across
