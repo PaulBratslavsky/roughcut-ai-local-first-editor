@@ -6,6 +6,10 @@ Working checklist for the architecture-deepening pass on `core/src`. Goal: turn
 each item by **locality** (change/bugs/knowledge land in one place) and
 **leverage** (callers get more from less).
 
+> **2026-09 audit:** a full pass over every tier is in
+> [`architecture-audit.md`](architecture-audit.md). Its corrections to items
+> 1–7 are folded in below (marked *audit*), and item 8 came out of it.
+
 ## How to use this
 - Work top-down; each item is independently shippable as its own PR.
 - Apply the **deletion test** before/after: if deleting the module would make
@@ -42,11 +46,15 @@ A terse canonical glossary of domain nouns — distinct from the narrative in
 `kind()` (`model.rs`), plus `apply_op` **and** `frame_snap` (`engine/edits.rs`) —
 then again as a handler + schema + registry row in `tools.rs` and a parity arm in
 `mockApi.ts`. No single place tells you what `CutRange` *is*.
-**Nuance (verified):** the three Rust matches are **exhaustive** — the compiler
-*does* catch a missing arm, so there's no "compiles-but-panics" risk in core. The
-**un-guarded** edges are the `tools.rs` registry/schema and the `mockApi.ts`
-parity: miss one and you get a runtime/contract gap, not a compile error. So this
-is mostly a **locality** win, with a real correctness win on the tools/mock edges.
+**Nuance (*audit* — corrects the earlier "all matches are exhaustive" claim):**
+`kind()`, `describe()` and `apply_op` are exhaustive, but the two places that
+enforce invariants are NOT: `normalize_op` (what this list called `frame_snap`)
+ends in `other => other` (`edits.rs:603`) and the range-bounds check is an
+`if let` (`edits.rs:59`). A new op silently skips frame-snapping and bounds
+checks. Real touch-count is ~11 for `TrimClip` / ~14 for `CutRange` (add
+`describe()`, the bounds check, `apply_edits`' blacklist + hand-written `oneOf`,
+`story.rs:862`). So this is a **correctness** win, not only locality — and
+`ReorderClip` is already a journaled no-op (`normalize()` re-sorts it away).
 - [ ] Inventory every `EditOp` variant and its touch-points (enum, `kind`,
       `apply_op`, `frame_snap`, `tools.rs` handler/schema/registry, `mockApi` parity).
 - [ ] Choose the co-location shape (per-op module, or a trait each op implements
@@ -60,15 +68,18 @@ is mostly a **locality** win, with a real correctness win on the tools/mock edge
 - **Done when:** a new op = one local block + a registry line; apply logic tested.
 
 ## 2. `tools.rs` — kill the 40×-copied handler boilerplate
-**Problem:** ~90% of each of 45 handlers is identical arg-unmarshalling; adding a
-tool means editing handler + registry row + visibility rules in disjoint spots;
-reading one handler teaches nothing about the next. ~600/1169 lines are plumbing.
+**Problem:** each tool's JSON schema and its handler's arg parsing are two
+independent descriptions of one interface, and they drift (*audit*):
+`remove_silences` advertises `min_duration_s` and ignores it; `set_global_padding`
+marks `end_s` required but defaults it; `reorder_clip` `unwrap_or(0)`s a required
+field. 58 handlers (not 45); `arg_uuid(a,"project_id")?` ×52, 26 raw `a["x"]`
+reads. Visibility is no longer disjoint — see item 8.
 - [ ] Catalogue the arg-parsing patterns (`arg_uuid`/`arg_f64`/`arg_str`/raw
       `a["x"]`) and the handler→engine-method shapes.
 - [ ] Design a declarative tool definition co-locating name + schema +
       arg-extraction + impl (grill the interface; keep dispatch a table lookup).
 - [ ] Collapse duplicated schemas (e.g. `cut_range`/`restore_range` drift risk).
-- [ ] Migrate handlers in batches; keep `mcp_defs`/`agent_defs` visibility intact.
+- [ ] Migrate handlers in batches; keep the `Caller` policy (item 8) intact.
 - [ ] Keep provisioning out of the registry (ADR-0004).
 - [ ] Verify `tools.rs` shrinks materially and a new tool is one local block.
 - **Done when:** the deletion test passes hard — boilerplate vanishes, real
@@ -87,14 +98,18 @@ reading one handler teaches nothing about the next. ~600/1169 lines are plumbing
 
 ## 4. `detect.rs` — split the 5-algorithm grab-bag
 **Problem:** silence / filler / takes / suggestion-composition / search share one
-662-line file; `suggest_cuts` (the Tier-2 pipeline) is untested because it mutates
-in place and is buried.
+662-line file. (*audit* — corrects the earlier claim: `suggest_cuts` already
+returns a value and has a unit test; only its embedding branch is untested. The
+mutation lives in `engine/edits.rs:222-228`. `detect_silences` has no callers —
+delete it. The real duplication is the candidates→refine pipeline copied three
+times with three different min-duration rules: `detect.rs:216`, `edits.rs:163`,
+`tools.rs:318`. Filler/take flags only ever accumulate.)
 - [ ] Separate detectors into cohesive homes (silence, filler, takes).
-- [ ] Make `suggest_cuts` return a value instead of mutating the project, so it's
-      unit-testable; add tests.
+- [x] ~~Make `suggest_cuts` return a value~~ — already does (*audit*); add a
+      test for its embedding-repetition branch instead.
 - [ ] Fold the search half into item 3 (don't leave it here).
-- [ ] Resolve the three overlapping silence paths (`detect_silences`,
-      `silence_candidates`, `refine_silences`) into one clear entry point.
+- [ ] Resolve the three copies of candidates→refine (one min-duration rule),
+      delete dead `detect_silences`, and clear stale flags on re-detect.
 - **Done when:** each detector has a home; `suggest_cuts` has tests.
 
 ## 5. `story.rs` — move snapping out, split the subsystems
@@ -104,8 +119,12 @@ boundary math but lives here, forcing `tools.rs` to depend on `story` just to cu
       story.rs` dependency for a plain cut). Add `Boundary` to `CONTEXT.md`.
 - [ ] Split narrative outlining / flow-review / story-edit pipeline so each is
       reusable and testable on its own.
-- [ ] Unify the duplicated LLM-vs-heuristic fallback fork (3 copies today).
-- [ ] Add tests for the heuristic paths (no live model needed).
+- [ ] Unify the duplicated LLM-vs-heuristic fallback fork (*audit*: 7 copies —
+      `story.rs:88, 435, 593`, `agent.rs:178, 660, 727, 779`; `llm::ask_json`,
+      extracted for this, has 0 callers).
+- [ ] Add tests for the heuristic paths (no live model needed). The 2 existing
+      `story.rs` tests exercise a *copy* of the guard, not `story.rs:712`.
+- [ ] Fix the `llm_outline` clamp panic on overlapping beats (`story.rs:187-188`).
 - **Done when:** snapping is independent; outline/flow testable without an LLM.
 
 ---
@@ -175,6 +194,27 @@ follow that precedent rather than inventing a new one.
       orphan sweep is idempotent and never touches a live key.
 - **Done when:** cache size is bounded, observable, and clearable, and no disk is
   held by media no project references.
+
+## 8. Caller policy — one home for "who may call what"  ✅ done ([#3](https://github.com/PaulBratslavsky/roughcut-ai-local-first-editor/issues/3))
+**Problem:** visibility was filtered at *listing* (`mcp_defs`, `agent_defs`)
+but not at *dispatch*; `dispatch` accepted every row and `dispatch_basic` only
+excluded `meta`. MCP clients could call the hidden meta tools; the agent loop
+could call `export` / `delete_project` / `set_preferences` unconfirmed;
+`set_preferences` could point inference off-machine from MCP and was broken
+from the UI (full-struct replace vs the Inspector's partial).
+- [x] `tools::Caller` (`Ui | Mcp | Agent { attribute_to }`) decides visibility,
+      arg validation and attribution; one `dispatch(…, caller)` + `defs(caller)`.
+- [x] `set_preferences` is a merge patch; unknown keys rejected; non-UI callers
+      can't set a non-loopback `inference_endpoint`.
+- [x] Tests: every caller × tool agrees between listing and dispatch; meta tools
+      refused over MCP HTTP; preferences patch/egress; loopback + merge units.
+- [ ] Follow-up: move the confirmation guards (`export`, `delete_project`) and
+      the egress guard onto `ToolSpec` (e.g. `guard: ConfirmExternal`), and add
+      `delete_checkpoint` to the confirmed set.
+- [ ] Follow-up: schema-check `Ui` calls too, once the frontend has a typed tool
+      client (audit §3.1).
+- [ ] Follow-up: emit a `preferences-changed` event so MCP-driven changes reach
+      the UI.
 
 ## Deferred (revisit only if friction bites)
 - **`Store` trait (20+ methods):** an intentional SQLite facade — already a **deep**

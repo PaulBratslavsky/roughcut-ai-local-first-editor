@@ -24,7 +24,7 @@ fn tool_api_doc_names_match_the_registry() {
         })
         .collect();
     let registry: std::collections::HashSet<String> =
-        tools::all_defs().into_iter().map(|d| d.name).collect();
+        tools::defs(tools::Caller::Ui).into_iter().map(|d| d.name).collect();
 
     let undocumented: Vec<_> = registry.difference(&documented).collect();
     let ghosts: Vec<_> = documented.difference(&registry).collect();

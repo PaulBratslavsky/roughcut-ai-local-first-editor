@@ -13,10 +13,13 @@ Keep entries short. When a refactor names a new module, add the term here.
   + metadata (`checkpoints`, `suggestions`, preferences). Persisted whole via the
   `Store`. Has a lifecycle: Draft → Exported → Trashed (today inferred, not an enum
   — see state machines).
-- **Media** (`model.rs`) — the source video: path, duration, frame rate. Immutable;
-  edits never touch it.
+- **Media** (`model.rs`) — the source video: path, duration, frame rate. Edits
+  never touch the file. ⚠ The `Media` record is replaced by `append_media`
+  (stitched source) outside the journal — see audit B4.
 - **Transcript** (`model.rs`) — the spoken content: an ordered list of
-  `TranscriptSegment`. Immutable input data (edits flip clip inclusion, not text).
+  `TranscriptSegment`. Edits flip clip inclusion, not text — but it is NOT
+  immutable: LLM cleanup rewrites `segment.text` (`media.rs::update_segment_texts`)
+  and detectors set `is_filler` / take flags in place (audit B13).
 - **Word** (`model.rs`) — one token: `{ text, start, end, confidence }`. The word
   key is `text`, not `word`. Sub-segment timing; the unit `snap` aligns cuts to.
 - **TranscriptSegment** (`model.rs`) — a phrase: `{ id, start, end, text, words,
@@ -28,8 +31,9 @@ Keep entries short. When a refactor names a new module, add the term here.
   [0, duration]** over the source, plus `global_padding` and derived `cut_count`.
   Invariant: clips sorted, non-overlapping, gap-free — restored by `normalize()`
   after every edit. `cut_count` = merged excluded regions, kept in sync by normalize.
-- **Clip** (`model.rs`) — a source span `[source_in, source_out]` (seconds,
-  **frame-snapped**) with `included: bool`, `order`, `origin`. Non-destructive: a
+- **Clip** (`model.rs`) — a source span `[source_in, source_out]` (seconds;
+  frame-snapped by range ops only — ⚠ transcript/rough-cut/padding ops write
+  raw times, audit B10) with `included: bool`, `order`, `origin`. Non-destructive: a
   "cut" flips `included`, never deletes source. Invariant: `source_in < source_out`
   (else duration clamps to 0).
 - **Padding** (`model.rs`) — `{ start_s, end_s, linked }`. The pad *currently
@@ -46,7 +50,7 @@ Keep entries short. When a refactor names a new module, add the term here.
   `{ id, kind, source, timestamp, description, op }`. The op is normalized
   (frame-snapped). Exact inverse/redo snapshots live in the **journal**, NOT here
   (they'd bloat every tool response — ADR-0002).
-- **Journal** (`engine/edits.rs`) — the undo/redo history: per entry an applied
+- **Journal** (`JournalEntry` in `engine/mod.rs`; logic in `engine/edits.rs`) — the undo/redo history: per entry an applied
   `EditAction` + a snapshot `inverse` + `redo` (both `SetClips`). Capped at 100.
   Undo/redo replays a snapshot; the replay is itself journaled.
 - **Checkpoint** (`model.rs`) — a named, self-contained timeline snapshot (full
@@ -68,6 +72,24 @@ Keep entries short. When a refactor names a new module, add the term here.
   abrupt_start | flow), severity, at_segment, description, restore_segment_ids }`.
 - **Boundary** (`story.rs`, → move to time/boundary module per item 5) — a
   word/sentence edge derived from `Word` timings; what `snap` aligns cuts to.
+
+## Tool registry (the one surface every caller uses)
+
+- **ToolSpec** (`tools.rs`) — one registry row: name, description, JSON schema,
+  handler, and flags `agent` (shown to agent loops), `meta` (starts an agent
+  loop / opts in to a frontier provider — UI only), `mutating` (lands
+  `EditAction`s).
+- **Caller** (`tools.rs`) — who invokes the registry: `Ui | Mcp | Agent {
+  attribute_to }`. The single home of per-caller policy: which rows are visible
+  AND callable (`defs(caller)` ≡ what `dispatch(…, caller)` accepts), whether
+  args are schema-checked (not for `Ui`), and the `ActionSource` stamped on
+  edits. Visibility ≠ attribution: frontier escalation runs as `Agent` but
+  credits edits to `McpClient`.
+- **ActionSource** (`model.rs`) — the attribution tag on an `EditAction`
+  (`ui` / `local_ai` / `mcp_client`); derived from the `Caller`. Visibility is
+  decided by `Caller` alone; handlers still key their confirmation prompts
+  (`export`, `delete_project`) and the preferences egress guard on the source
+  (moving those guards onto `ToolSpec` is refactor item 8's follow-up).
 
 ## Seams (adapters — swappable behind traits)
 

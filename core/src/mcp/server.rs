@@ -1,6 +1,5 @@
 use crate::engine::Editor;
 use crate::error::Result;
-use crate::model::ActionSource;
 use crate::tools;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -113,8 +112,8 @@ async fn handle(
         "ping" => Ok(json!({})),
         "tools/list" => {
             // External clients are orchestrators themselves: granular tools +
-            // the apply_edits batch, no meta-tools (see tools::mcp_defs).
-            let defs: Vec<Value> = tools::mcp_defs()
+            // the apply_edits batch, no meta-tools (see tools::Caller::Mcp).
+            let defs: Vec<Value> = tools::defs(tools::Caller::Mcp)
                 .into_iter()
                 .map(|d| {
                     json!({ "name": d.name, "description": d.description, "inputSchema": d.input_schema })
@@ -125,7 +124,7 @@ async fn handle(
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or_default().to_string();
             let args = req["params"]["arguments"].clone();
-            match tools::dispatch(&state.editor, &name, &args, ActionSource::McpClient).await {
+            match tools::dispatch(&state.editor, &name, &args, tools::Caller::Mcp).await {
                 Ok(v) => Ok(json!({
                     "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }],
                     "isError": false

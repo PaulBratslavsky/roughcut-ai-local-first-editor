@@ -10,7 +10,7 @@ fn browser_mock_covers_every_registry_tool() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../frontend/src/ipc/mockApi.ts");
     let src = std::fs::read_to_string(&path).expect("read frontend/src/ipc/mockApi.ts");
-    let missing: Vec<String> = tools::all_defs()
+    let missing: Vec<String> = tools::defs(tools::Caller::Ui)
         .into_iter()
         .map(|d| d.name)
         .filter(|name| {

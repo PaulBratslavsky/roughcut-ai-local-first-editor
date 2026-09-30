@@ -9,7 +9,6 @@
 
 use roughcut_core::adapters::{MockTranscriber, MockVideoEngine};
 use roughcut_core::events::EventSink;
-use roughcut_core::model::ActionSource;
 use roughcut_core::store::SqliteStore;
 use roughcut_core::{tools, Editor};
 use serde_json::{json, Value};
@@ -39,15 +38,15 @@ async fn main() {
         &editor,
         "create_project",
         &json!({ "name": "agent-live", "file_path": "/demo/footage.mp4" }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap();
     let pid = project["id"].as_str().unwrap().to_string();
-    tools::dispatch(&editor, "transcribe", &json!({ "project_id": pid }), ActionSource::Ui)
+    tools::dispatch(&editor, "transcribe", &json!({ "project_id": pid }), tools::Caller::Ui)
         .await
         .unwrap();
-    let before = tools::dispatch(&editor, "get_timeline", &json!({ "project_id": pid }), ActionSource::Ui)
+    let before = tools::dispatch(&editor, "get_timeline", &json!({ "project_id": pid }), tools::Caller::Ui)
         .await
         .unwrap();
     println!("cuts before: {}", before["cut_count"]);
@@ -58,19 +57,19 @@ async fn main() {
         &editor,
         "apply_instruction",
         &json!({ "project_id": pid, "instruction": instruction }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap();
     println!("--- done ---\nsummary: {}", outcome["summary"]);
 
-    let after = tools::dispatch(&editor, "get_timeline", &json!({ "project_id": pid }), ActionSource::Ui)
+    let after = tools::dispatch(&editor, "get_timeline", &json!({ "project_id": pid }), tools::Caller::Ui)
         .await
         .unwrap();
     println!("cuts after: {}", after["cut_count"]);
 
     // Show whether the hiking sentence is now excluded.
-    let transcript = tools::dispatch(&editor, "get_transcript", &json!({ "project_id": pid }), ActionSource::Ui)
+    let transcript = tools::dispatch(&editor, "get_transcript", &json!({ "project_id": pid }), tools::Caller::Ui)
         .await
         .unwrap();
     let seg = transcript["segments"]

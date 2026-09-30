@@ -4,7 +4,6 @@
 
 use roughcut_core::events::EventSink;
 use roughcut_core::mcp::server::EndpointInfo;
-use roughcut_core::model::ActionSource;
 use roughcut_core::{tools, Editor};
 use serde_json::Value;
 use std::sync::Mutex;
@@ -29,14 +28,14 @@ async fn call_tool(
     name: String,
     args: Value,
 ) -> Result<Value, Value> {
-    tools::dispatch(&state.editor, &name, &args, ActionSource::Ui)
+    tools::dispatch(&state.editor, &name, &args, tools::Caller::Ui)
         .await
         .map_err(|e| e.to_json())
 }
 
 #[tauri::command]
 fn list_tools() -> Vec<tools::ToolDef> {
-    tools::all_defs()
+    tools::defs(tools::Caller::Ui)
 }
 
 #[tauri::command]

@@ -3,12 +3,12 @@
 //! adapters, fully offline.
 
 use roughcut_core::model::ActionSource;
-use roughcut_core::tools;
+use roughcut_core::tools::{self, Caller};
 use roughcut_core::Editor;
 use serde_json::{json, Value};
 
 async fn call(editor: &Editor, name: &str, args: Value) -> Value {
-    tools::dispatch(editor, name, &args, ActionSource::Ui)
+    tools::dispatch(editor, name, &args, tools::Caller::Ui)
         .await
         .unwrap_or_else(|e| panic!("tool {name} failed: {e}"))
 }
@@ -179,6 +179,9 @@ async fn mcp_server_drives_an_edit_over_http() {
     let tools = resp["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|t| t["name"] == "cut_by_transcript"));
     assert!(tools.iter().any(|t| t["name"] == "export"));
+    for meta in ["apply_instruction", "connect_external", "escalate_to_frontier"] {
+        assert!(!tools.iter().any(|t| t["name"] == meta), "{meta} must not be listed over MCP");
+    }
 
     let resp: Value = client
         .post(&info.url)
@@ -217,6 +220,23 @@ async fn mcp_server_drives_an_edit_over_http() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let rough: Value = serde_json::from_str(text).unwrap();
     assert!(rough["cut_count"].as_u64().unwrap() > 0);
+
+    // Hidden is not just unlisted: meta tools are refused over the wire too.
+    for (id, meta) in [(5, "apply_instruction"), (6, "connect_external"), (7, "escalate_to_frontier")] {
+        let resp: Value = client
+            .post(&info.url)
+            .bearer_auth(&info.token)
+            .json(&rpc("tools/call", json!({ "name": meta, "arguments": {} }), id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true, "{meta} must be refused over MCP");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not available to MCP clients"), "{meta}: {text}");
+    }
 }
 
 #[tokio::test]
@@ -375,7 +395,7 @@ async fn external_destructive_ops_require_confirmation() {
         &editor,
         "delete_project",
         &json!({ "project_id": pid }),
-        ActionSource::McpClient,
+        tools::Caller::Mcp,
     )
     .await;
     assert!(denied.is_err(), "external delete must require approval");
@@ -387,7 +407,7 @@ async fn external_destructive_ops_require_confirmation() {
         &editor,
         "delete_project",
         &json!({ "project_id": pid }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await;
     assert!(ok.is_ok());
@@ -565,7 +585,7 @@ async fn story_tools_degrade_honestly_without_a_model() {
         &editor,
         "story_edit",
         &json!({ "project_id": pid, "instruction": "tighten this" }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await;
     assert!(err.is_err(), "story_edit should refuse without a model server");
@@ -599,7 +619,7 @@ async fn chat_editing_stability_guards() {
         &editor,
         "cut_range",
         &json!({ "project_id": pid, "start": "five", "end": 10.0 }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap_err()
@@ -611,7 +631,7 @@ async fn chat_editing_stability_guards() {
         &editor,
         "cut_range",
         &json!({ "project_id": pid, "start": 30.0, "end": 10.0 }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap_err()
@@ -625,7 +645,7 @@ async fn chat_editing_stability_guards() {
         &json!({ "project_id": pid, "edits": [
             { "type": "set_clips", "clips": [], "global_padding": { "start_s": 0, "end_s": 0, "linked": true } }
         ]}),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap_err()
@@ -661,7 +681,7 @@ async fn chat_editing_stability_guards() {
         &editor,
         "undo_actions",
         &json!({ "project_id": pid, "action_ids": [a1] }),
-        ActionSource::Ui,
+        tools::Caller::Ui,
     )
     .await
     .unwrap_err()
@@ -779,4 +799,113 @@ async fn history_and_jump_in_time() {
             .unwrap(),
         cuts_now
     );
+}
+
+#[tokio::test]
+async fn every_caller_can_call_exactly_what_it_is_shown() {
+    let editor = Editor::test_instance();
+    let every: Vec<String> = tools::defs(Caller::Ui).into_iter().map(|d| d.name).collect();
+    for caller in [Caller::Ui, Caller::Mcp, Caller::Agent { attribute_to: ActionSource::LocalAi }] {
+        let shown: std::collections::HashSet<String> =
+            tools::defs(caller).into_iter().map(|d| d.name).collect();
+        for name in &every {
+            // Empty args: a shown tool fails on its arguments (or runs a
+            // harmless read); a hidden one is refused before its handler runs.
+            let refused = match tools::dispatch(&editor, name, &json!({}), caller).await {
+                Err(e) => e.to_string().contains("not available to"),
+                Ok(_) => false,
+            };
+            assert_eq!(
+                refused,
+                !shown.contains(name),
+                "{caller:?} × {name}: listing and dispatch disagree"
+            );
+        }
+    }
+
+    // The agent's repair hint lists only what it can actually call.
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let err = tools::dispatch(&editor, "export", &json!({}), agent).await.unwrap_err().to_string();
+    let available = err.split("available: ").nth(1).unwrap_or_default();
+    assert!(available.contains("cut_range"), "got: {err}");
+    for hidden in ["export", "delete_project", "set_preferences", "apply_instruction"] {
+        assert!(!available.split(", ").any(|n| n == hidden), "{hidden} advertised: {err}");
+    }
+}
+
+#[tokio::test]
+async fn set_preferences_patches_and_guards_egress() {
+    let editor = Editor::test_instance();
+    let before = call(&editor, "get_preferences", json!({})).await;
+
+    // The Inspector sends ONE key; every other preference must survive.
+    let after = call(
+        &editor,
+        "set_preferences",
+        json!({ "preferences": { "cut_aggressiveness": "aggressive" } }),
+    )
+    .await;
+    assert_eq!(after["cut_aggressiveness"], "aggressive");
+    for (k, v) in before.as_object().unwrap() {
+        if k != "cut_aggressiveness" {
+            assert_eq!(&after[k], v, "{k} changed");
+        }
+    }
+    // Nested objects merge rather than replace.
+    let after = call(
+        &editor,
+        "set_preferences",
+        json!({ "preferences": { "default_padding": { "end_s": 0.4 } } }),
+    )
+    .await;
+    assert_eq!(after["default_padding"]["end_s"], 0.4);
+    assert_eq!(after["default_padding"]["start_s"], before["default_padding"]["start_s"]);
+    // Persisted, not just echoed.
+    let stored = call(&editor, "get_preferences", json!({})).await;
+    assert_eq!(stored["cut_aggressiveness"], "aggressive");
+
+    // A typo is rejected, not silently dropped.
+    let err = tools::dispatch(
+        &editor,
+        "set_preferences",
+        &json!({ "preferences": { "cut_agressiveness": "natural" } }),
+        Caller::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown preference(s): cut_agressiveness"), "got: {err}");
+
+    // Zero egress: an external client can't point inference off-machine…
+    let remote = json!({ "preferences": { "inference_endpoint": "https://llm.example.com/v1" } });
+    let err = tools::dispatch(&editor, "set_preferences", &remote, Caller::Mcp)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not on this machine"), "got: {err}");
+    // …and the agent loop isn't even shown the tool.
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let err = tools::dispatch(&editor, "set_preferences", &remote, agent).await.unwrap_err().to_string();
+    assert!(err.contains("not available to the agent loop"), "got: {err}");
+    let stored = call(&editor, "get_preferences", json!({})).await;
+    assert_eq!(stored["inference_endpoint"], before["inference_endpoint"]);
+
+    // Another LOCAL server is fine from an external client.
+    let local = json!({ "preferences": { "inference_endpoint": "http://127.0.0.1:47861/v1" } });
+    let out = tools::dispatch(&editor, "set_preferences", &local, Caller::Mcp).await.unwrap();
+    assert_eq!(out["inference_endpoint"], "http://127.0.0.1:47861/v1");
+
+    // The user can choose a remote endpoint deliberately, and external
+    // clients can still change OTHER preferences afterwards.
+    call(&editor, "set_preferences", remote.clone()).await;
+    let out = tools::dispatch(
+        &editor,
+        "set_preferences",
+        &json!({ "preferences": { "silence_min_duration_s": 1.2 } }),
+        Caller::Mcp,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["inference_endpoint"], "https://llm.example.com/v1");
+    assert_eq!(out["silence_min_duration_s"], 1.2);
 }

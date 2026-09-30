@@ -210,7 +210,8 @@ pub async fn run_instruction_with(
              handing it to the local model"
         ),
     );
-    let tool_schemas: Vec<Value> = tools::agent_defs()
+    let caller = tools::Caller::Agent { attribute_to: source };
+    let tool_schemas: Vec<Value> = tools::defs(caller)
         .into_iter()
         .map(|d| {
             json!({
@@ -367,7 +368,7 @@ pub async fn run_instruction_with(
                         }),
                         Err(e) => format!("arguments were not valid JSON: {e}"),
                     };
-                    let schema = tools::agent_defs()
+                    let schema = tools::defs(caller)
                         .into_iter()
                         .find(|d| d.name == name)
                         .map(|d| d.input_schema)
@@ -401,7 +402,7 @@ pub async fn run_instruction_with(
                     "result": cached,
                 })
             } else {
-                match tools::dispatch_basic(editor, &name, &args, source).await {
+                match tools::dispatch(editor, &name, &args, caller).await {
                     Ok(mut v) => {
                         harvest_actions(&v, &mut actions);
                         // Partial apply_edits receipts carry their own error.

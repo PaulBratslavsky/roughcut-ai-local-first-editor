@@ -245,9 +245,10 @@ word-count check before applying anything.
 
 ## 4. The tool registry (`core/src/tools.rs`)
 
-This is the architectural centerpiece. All 32 tools are declared in
-`all_defs()` (`tools.rs:39`) as name + description + JSON schema, and executed
-by one async dispatcher. The same definitions are served to:
+This is the architectural centerpiece. Every tool is one `ToolSpec` row in
+`REGISTRY` — name, description, JSON schema, handler, and the `agent` / `meta` /
+`mutating` flags — executed by one async dispatcher. The same definitions are
+served to:
 
 1. the **UI** — via the Tauri `call_tool` command
 2. the **local agent** — formatted as OpenAI function-calling schemas
@@ -272,24 +273,26 @@ Exact parameter and result shapes for every tool are in
 [`tool-api.md`](tool-api.md); edit tools uniformly return
 `{ action: EditAction, timeline: Timeline }`.
 
-Two dispatch layers (`tools.rs:171` and `tools.rs:360`):
+One dispatcher, one policy: `tools::dispatch(editor, name, args, caller)` and
+`tools::defs(caller)`, where `Caller` is `Ui | Mcp | Agent { attribute_to }`.
+The caller decides which rows are visible *and* callable (so listing and
+dispatch can never disagree), whether arguments are schema-checked, and which
+`ActionSource` the resulting edits carry:
 
-- `dispatch_basic()` — every tool *except* `apply_instruction` and
-  `escalate_to_frontier`. This is what the agent loop calls, which is how
-  recursion is prevented structurally rather than by prompt engineering.
-- `dispatch()` — the full set; the entry point for the UI and MCP. It routes
-  the two meta-tools to `agent.rs` / `mcp/client.rs` and delegates the rest.
-
-The agent additionally sees only a curated 12-tool subset — `AGENT_TOOLS`
-(`tools.rs:106`): search/read tools, the edit tools, `generate_rough_cut`, and
-`generate_chapters`. Deliberately excluded: project lifecycle (the agent works
-within the open project), `export` (handing off is a user decision), and the
-frontier tools (opt-in means a human clicks).
+- `Ui` — every tool, including the meta tools (`apply_instruction`,
+  `connect_external`, `escalate_to_frontier`).
+- `Mcp` — everything except meta tools; arguments schema-checked.
+- `Agent` — only `agent`-flagged rows, never meta tools, so recursion is
+  prevented structurally rather than by prompt engineering. Deliberately
+  excluded: project lifecycle (the agent works within the open project),
+  `export` (handing off is a user decision), preferences, and the frontier
+  tools (opt-in means a human clicks). Frontier escalation runs this same loop
+  with `attribute_to: McpClient`.
 
 **To add a feature to RoughCut, you almost always add a tool**: implement the
-operation on `Editor`, add a `def(...)` entry, add a `dispatch_basic` match
-arm — and it is instantly available to the UI, scriptable from Claude Desktop,
-and (if you add it to `AGENT_TOOLS`) usable by the local agent.
+operation on `Editor`, add a handler and a `tool!(…)` row to `REGISTRY` — and
+it is instantly available to the UI, scriptable from Claude Desktop, and (if
+you flag it `agent: true`) usable by the local agent.
 
 ---
 
@@ -355,7 +358,7 @@ local model:
    summary; make the requested change and nothing more.*
 2. **Loop** (`run_instruction_with`, `agent.rs:118`): up to 12 iterations of
    chat-completion (temperature 0.1) with the 12 agent tools. Each tool call
-   is dispatched through `dispatch_basic`, its result appended as a `tool`
+   is dispatched through `dispatch(…, Caller::Agent)`, its result appended as a `tool`
    message, and an `agent-step` event emitted (`thinking` / `tool_call` /
    `tool_result` / `final`) so the chat panel can stream progress live.
    `EditAction`s are harvested from results into the final
@@ -637,8 +640,8 @@ does the full JSON-RPC dance against a live MCP server.
 
 | You want to… | Do this |
 |---|---|
-| Add an operation/feature | Add an `Editor` method → `def(...)` in `tools.rs` → `dispatch_basic` arm → (optional) mutation hook in `queries.ts` + UI. It's automatically available over MCP. |
-| Let the agent use it | Add the name to `AGENT_TOOLS` (`tools.rs:106`). Mind the budget: more tools = worse small-model tool selection. |
+| Add an operation/feature | Add an `Editor` method → handler + `tool!(…)` row in `tools.rs` → (optional) mutation hook in `queries.ts` + UI. It's automatically available over MCP. |
+| Let the agent use it | Flag its row `agent: true`. Mind the budget: more tools = worse small-model tool selection. |
 | Swap the transcriber (e.g. whisper-rs, Parakeet) | Implement `Transcriber` (`adapters/transcribe.rs:13`), select it in `Editor::bootstrap_with_store`. Contract: segments + word-level timestamps. |
 | Use a different LLM/server | No code: set `INFERENCE_ENDPOINT`/`INFERENCE_MODEL` (anything OpenAI-compatible). New protocol: implement `InferenceClient`. |
 | Add an export format | New writer in `core/src/export/`, register it in `render_text_target` (`export/mod.rs:31`), add the target string to the `export` tool def and `ExportMenu`. |

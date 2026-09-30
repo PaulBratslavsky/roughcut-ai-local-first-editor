@@ -44,8 +44,20 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 Same tools exposed over a localhost HTTP JSON-RPC endpoint guarded by a per-install
 token; `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop. Exception:
 the orchestration meta-tools (`apply_instruction`, `connect_external`,
-`escalate_to_frontier`) are not advertised over MCP — an external client IS an
-orchestrator and should compose the granular tools / `apply_edits` itself.
+`escalate_to_frontier`) are neither advertised nor callable over MCP — an
+external client IS an orchestrator and should compose the granular tools /
+`apply_edits` itself. MCP arguments are schema-checked (required fields and
+primitive types) before a handler runs.
+
+### Who can call what
+One `tools::Caller` decides visibility, argument checks and edit attribution,
+so `tools/list` and `tools/call` can never disagree:
+
+| Caller | Sees and may call | Args checked | Edits attributed to |
+|---|---|---|---|
+| `Ui` | every tool | no (typed frontend) | `ui` |
+| `Mcp` | everything except meta tools | yes | `mcp_client` |
+| `Agent` | only `agent`-flagged tools | yes | `local_ai` (or `mcp_client` for frontier escalation) |
 
 ## Tools
 
@@ -121,7 +133,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `undo { project_id } -> { action: EditAction|null, timeline }`
 - `redo { project_id } -> { action: EditAction|null, timeline }`
 - `get_preferences {} -> Preferences`
-- `set_preferences { preferences } -> Preferences`
+- `set_preferences { preferences } -> Preferences` — a partial update: only the keys given change (nested objects like `default_padding` merge); unknown keys are rejected. Non-UI callers cannot point `inference_endpoint` at a non-loopback host (zero egress).
 
 ### MCP client (opt-in; never auto-invoked)
 - `connect_external { provider, api_key } -> ExternalConnection`

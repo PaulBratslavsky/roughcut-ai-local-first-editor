@@ -20,8 +20,8 @@ Provisioning and shell commands deliberately do NOT join the registry.
 
 The registry has three callers by design (docs/tool-api.md): the UI, the
 local agent loop, and external MCP clients. Anything in it is therefore
-reachable by a model — the local Gemma picks from `agent_defs()`, and MCP
-clients see `mcp_defs()`. Provisioning is a different trust category:
+reachable by a model — the local Gemma picks from `defs(Caller::Agent)`, and
+MCP clients see `defs(Caller::Mcp)`. Provisioning is a different trust category:
 
 - **Downloads are the app's only deliberate egress.** Zero-egress
   verification (docs/zero-egress-verification.md) rests on model downloads

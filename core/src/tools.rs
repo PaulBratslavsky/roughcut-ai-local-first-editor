@@ -3,15 +3,16 @@
 //!
 //! Each tool is ONE [`ToolSpec`] row: name, description, JSON schema,
 //! agent-visibility, and handler live together, and everything else
-//! (`all_defs`, `agent_defs`, dispatch) derives from the table. Adding a tool
-//! is adding a row + a handler — nothing to keep in sync by hand.
+//! (`defs`, `dispatch`) derives from the table. Adding a tool is adding a
+//! row + a handler — nothing to keep in sync by hand. Per-caller policy
+//! (who can see and call what) lives in [`Caller`], nowhere else.
 
 use crate::agent;
 use crate::detect;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::export;
-use crate::model::{ActionSource, Aggressiveness, EditOp, Preferences};
+use crate::model::{ActionSource, Aggressiveness, EditOp};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
@@ -26,8 +27,9 @@ pub struct ToolSpec {
     pub schema: fn() -> Value,
     /// Exposed to the LOCAL agent loop (meta tools and project lifecycle are not).
     pub agent: bool,
-    /// Dispatches into the agent loop / external escalation — excluded from
-    /// `dispatch_basic` so the loop can never recurse into itself.
+    /// Dispatches into the agent loop / external escalation / provider opt-in —
+    /// callable from the UI only (see [`Caller`]), so a loop can never recurse
+    /// into itself and an external client can't opt the user into egress.
     pub meta: bool,
     /// Lands undoable EditActions (drives the agent loop's act/read
     /// accounting — the registry owns this, not a parallel hand list).
@@ -51,9 +53,66 @@ pub fn registry() -> &'static [ToolSpec] {
     REGISTRY
 }
 
-pub fn all_defs() -> Vec<ToolDef> {
+/// Who is invoking the registry — the ONE place per-caller policy lives.
+/// It decides which tools a caller can see *and* call (so `defs` and
+/// `dispatch` can never disagree), whether its arguments are schema-checked,
+/// and which [`ActionSource`] the edits it lands are attributed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    /// The app's own UI — the user. Every tool, including the meta tools that
+    /// start agent loops or opt in to a frontier provider.
+    Ui,
+    /// An external MCP client (Claude Desktop/Code via the shim, the Resolve
+    /// scripts). Everything except meta tools: an external model IS an
+    /// orchestrator — handing it apply_instruction would route editing through
+    /// the weaker on-device model, and it must never opt the user into egress.
+    Mcp,
+    /// An agent loop: the on-device model, or a frontier model the user
+    /// escalated to. Only the `agent` rows it is shown — never meta tools (so a
+    /// loop can't recurse) nor project lifecycle / export / preferences.
+    /// `attribute_to` is who its edits are credited to (`LocalAi`, or
+    /// `McpClient` for frontier escalation) — distinct from what it may call.
+    Agent { attribute_to: ActionSource },
+}
+
+impl Caller {
+    pub fn source(self) -> ActionSource {
+        match self {
+            Caller::Ui => ActionSource::Ui,
+            Caller::Mcp => ActionSource::McpClient,
+            Caller::Agent { attribute_to } => attribute_to,
+        }
+    }
+
+    fn can_use(self, spec: &ToolSpec) -> bool {
+        match self {
+            Caller::Ui => true,
+            Caller::Mcp => !spec.meta,
+            Caller::Agent { .. } => spec.agent && !spec.meta,
+        }
+    }
+
+    /// Untrusted callers get strict schema checks (and small models repair
+    /// best from them). The UI is typed against the generated models; checking
+    /// it too waits on a typed frontend tool client.
+    fn validates_args(self) -> bool {
+        !matches!(self, Caller::Ui)
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Caller::Ui => "the app",
+            Caller::Mcp => "MCP clients",
+            Caller::Agent { .. } => "the agent loop",
+        }
+    }
+}
+
+/// The tools `caller` can see — exactly the ones [`dispatch`] lets it call.
+pub fn defs(caller: Caller) -> Vec<ToolDef> {
     REGISTRY
         .iter()
+        .filter(|s| caller.can_use(s))
         .map(|s| ToolDef {
             name: s.name.into(),
             description: s.description.into(),
@@ -62,65 +121,31 @@ pub fn all_defs() -> Vec<ToolDef> {
         .collect()
 }
 
-/// What external MCP clients see: everything EXCEPT the orchestration
-/// meta-tools — an external frontier model IS an orchestrator; handing it
-/// apply_instruction would route editing through the weaker on-device model
-/// (and long sync calls time out MCP clients).
-pub fn mcp_defs() -> Vec<ToolDef> {
-    REGISTRY
-        .iter()
-        .filter(|s| !s.meta)
-        .map(|s| ToolDef {
-            name: s.name.into(),
-            description: s.description.into(),
-            input_schema: (s.schema)(),
-        })
-        .collect()
-}
-
-pub fn agent_defs() -> Vec<ToolDef> {
-    REGISTRY
-        .iter()
-        .filter(|s| s.agent)
-        .map(|s| ToolDef {
-            name: s.name.into(),
-            description: s.description.into(),
-            input_schema: (s.schema)(),
-        })
-        .collect()
-}
-
-/// Full dispatch — UI and MCP callers come in here.
-pub async fn dispatch(
-    editor: &Editor,
-    name: &str,
-    args: &Value,
-    source: ActionSource,
-) -> Result<Value> {
+/// The single dispatch entry point for every caller.
+pub async fn dispatch(editor: &Editor, name: &str, args: &Value, caller: Caller) -> Result<Value> {
     let spec = REGISTRY
         .iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| CoreError::NotFound(format!("unknown tool {name}")))?;
-    (spec.handler)(editor, args, source).await
-}
-
-/// Dispatch WITHOUT the meta tools — what the agent loop itself uses, which
-/// makes recursion impossible by construction.
-pub async fn dispatch_basic(
-    editor: &Editor,
-    name: &str,
-    args: &Value,
-    source: ActionSource,
-) -> Result<Value> {
-    let spec = REGISTRY
-        .iter()
-        .find(|s| s.name == name && !s.meta)
+        .find(|s| s.name == name && caller.can_use(s))
         .ok_or_else(|| {
-            let known: Vec<&str> = REGISTRY.iter().filter(|s| !s.meta).map(|s| s.name).collect();
-            CoreError::NotFound(format!("unknown tool {name}; available: {}", known.join(", ")))
+            let why = if REGISTRY.iter().any(|s| s.name == name) {
+                format!("tool {name} is not available to {}", caller.describe())
+            } else {
+                format!("unknown tool {name}")
+            };
+            match caller {
+                // The agent repairs from the error: tell it what it CAN call.
+                Caller::Agent { .. } => {
+                    let known: Vec<&str> =
+                        REGISTRY.iter().filter(|s| caller.can_use(s)).map(|s| s.name).collect();
+                    CoreError::NotFound(format!("{why}; available: {}", known.join(", ")))
+                }
+                _ => CoreError::NotFound(why),
+            }
         })?;
-    validate_args(spec, args)?;
-    (spec.handler)(editor, args, source).await
+    if caller.validates_args() {
+        validate_args(spec, args)?;
+    }
+    (spec.handler)(editor, args, caller.source()).await
 }
 
 /// Required-fields + primitive-type check against the declared schema —
@@ -925,9 +950,8 @@ handler!(h_jump_to, |e, a, _s| {
 
 handler!(h_get_preferences, |e, _a, _s| Ok(serde_json::to_value(e.get_preferences()?)?));
 
-handler!(h_set_preferences, |e, a, _s| {
-    let prefs: Preferences = serde_json::from_value(a["preferences"].clone())?;
-    Ok(serde_json::to_value(e.set_preferences(prefs)?)?)
+handler!(h_set_preferences, |e, a, s| {
+    Ok(serde_json::to_value(e.update_preferences(&a["preferences"], s)?)?)
 });
 
 handler!(h_connect_external, |e, a, _s| {
@@ -1137,7 +1161,7 @@ static REGISTRY: &[ToolSpec] = &[
         agent: false, meta: false, h_delete_checkpoint),
     tool!("get_preferences", "Get user preferences.", || obj(json!({}), &[]),
         agent: false, meta: false, h_get_preferences),
-    tool!("set_preferences", "Replace user preferences.",
+    tool!("set_preferences", "Update user preferences: pass only the keys to change (merged into the current preferences; unknown keys are rejected). Only the user, in the app, can point inference_endpoint off this machine.",
         || obj(json!({"preferences": {"type": "object"}}), &["preferences"]),
         agent: false, meta: false, h_set_preferences),
     tool!("connect_external", "Opt in to an external frontier provider (stores key in OS keychain).",
@@ -1163,7 +1187,19 @@ mod tests {
             assert!(!(spec.agent && spec.meta), "{} cannot be both agent-visible and meta", spec.name);
             assert!(!(spec.mutating && spec.meta), "{} cannot be both mutating and meta", spec.name);
         }
-        // The agent subset is exactly the flagged rows.
-        assert_eq!(agent_defs().len(), REGISTRY.iter().filter(|s| s.agent).count());
+        // Each caller sees exactly its policy's rows.
+        let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+        assert_eq!(defs(Caller::Ui).len(), REGISTRY.len());
+        assert_eq!(defs(Caller::Mcp).len(), REGISTRY.iter().filter(|s| !s.meta).count());
+        assert_eq!(defs(agent).len(), REGISTRY.iter().filter(|s| s.agent).count());
+    }
+
+    #[test]
+    fn edits_are_attributed_to_the_caller() {
+        assert_eq!(Caller::Ui.source(), ActionSource::Ui);
+        assert_eq!(Caller::Mcp.source(), ActionSource::McpClient);
+        // Frontier escalation runs the agent loop but credits the external client.
+        let frontier = Caller::Agent { attribute_to: ActionSource::McpClient };
+        assert_eq!(frontier.source(), ActionSource::McpClient);
     }
 }

@@ -187,6 +187,49 @@ impl Editor {
         Ok(prefs)
     }
 
+    /// Apply a PARTIAL preferences update: only the keys given change, nested
+    /// objects (`default_padding`) merge, unknown keys are rejected rather than
+    /// silently dropped. Zero egress: only the user may point inference at a
+    /// host off this machine — post-transcribe cleanup and the embedding index
+    /// send transcript text wherever `inference_endpoint` names.
+    pub fn update_preferences(
+        &self,
+        patch: &serde_json::Value,
+        source: ActionSource,
+    ) -> Result<Preferences> {
+        let patch = patch
+            .as_object()
+            .ok_or_else(|| CoreError::InvalidArg("preferences must be an object".into()))?;
+        let current = self.get_preferences()?;
+        let serde_json::Value::Object(mut merged) = serde_json::to_value(&current)? else {
+            return Err(CoreError::Other("preferences did not serialize to an object".into()));
+        };
+        let unknown: Vec<&str> =
+            patch.keys().filter(|k| !merged.contains_key(*k)).map(String::as_str).collect();
+        if !unknown.is_empty() {
+            let mut known: Vec<&str> = merged.keys().map(String::as_str).collect();
+            known.sort_unstable();
+            return Err(CoreError::InvalidArg(format!(
+                "unknown preference(s): {}; known: {}",
+                unknown.join(", "),
+                known.join(", ")
+            )));
+        }
+        merge_into(&mut merged, patch);
+        let next: Preferences = serde_json::from_value(serde_json::Value::Object(merged))?;
+        if source != ActionSource::Ui
+            && next.inference_endpoint != current.inference_endpoint
+            && !is_loopback_url(&next.inference_endpoint)
+        {
+            return Err(CoreError::InvalidArg(format!(
+                "inference_endpoint {} is not on this machine; only the user can send \
+                 transcripts off-device (change it in the app's Setup screen)",
+                next.inference_endpoint
+            )));
+        }
+        self.set_preferences(next)
+    }
+
     /// Presentation layout — project metadata, persisted, not journaled.
     pub fn set_layout(&self, project_id: uuid::Uuid, layout: crate::model::Layout) -> crate::error::Result<()> {
         self.ensure_loaded(project_id)?;
@@ -215,5 +258,80 @@ impl Editor {
         entry.audio_offset_s = offset_s;
         self.inner.store.save_project(entry)?;
         Ok(())
+    }
+}
+
+/// JSON merge: nested objects merge key by key; anything else replaces.
+fn merge_into(
+    base: &mut serde_json::Map<String, serde_json::Value>,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) {
+    for (k, v) in patch {
+        match (base.get_mut(k), v) {
+            (Some(serde_json::Value::Object(b)), serde_json::Value::Object(p)) => merge_into(b, p),
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+/// Is `url` served from this machine (localhost, 127.0.0.0/8, ::1)?
+fn is_loopback_url(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_urls() {
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:47861/v1",
+            "http://127.1.2.3/v1",
+            "http://[::1]:8080/v1",
+            "http://LOCALHOST/v1",
+            "http://llm.localhost/v1",
+        ] {
+            assert!(is_loopback_url(local), "{local} should be local");
+        }
+        for remote in [
+            "https://api.example.com/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://0.0.0.0:11434/v1",
+            "http://localhost.example.com/v1",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_loopback_url(remote), "{remote} should not be local");
+        }
+    }
+
+    #[test]
+    fn merge_is_deep_for_objects_and_replaces_otherwise() {
+        let mut base = serde_json::json!({
+            "a": 1,
+            "pad": { "start_s": 0.1, "end_s": 0.2, "linked": true },
+            "words": ["um"]
+        });
+        let patch = serde_json::json!({ "pad": { "end_s": 0.5 }, "words": ["uh"] });
+        merge_into(base.as_object_mut().unwrap(), patch.as_object().unwrap());
+        assert_eq!(
+            base,
+            serde_json::json!({
+                "a": 1,
+                "pad": { "start_s": 0.1, "end_s": 0.5, "linked": true },
+                "words": ["uh"]
+            })
+        );
     }
 }

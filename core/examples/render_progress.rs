@@ -1,6 +1,5 @@
 //! Verify ffmpeg render progress events stream during an MP4 export.
 use roughcut_core::{tools, Editor};
-use roughcut_core::model::ActionSource;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -24,7 +23,7 @@ async fn main() {
     editor.require_confirmations_for_tests(false);
     let call = |n: &'static str, a: Value| {
         let e = editor.clone();
-        async move { tools::dispatch(&e, n, &a, ActionSource::Ui).await.unwrap() }
+        async move { tools::dispatch(&e, n, &a, tools::Caller::Ui).await.unwrap() }
     };
     let p = call("create_project", json!({"name":"prog","file_path":"/tmp/nle-test-source.mp4"})).await;
     let pid = p["id"].as_str().unwrap().to_string();
