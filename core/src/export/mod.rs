@@ -1,10 +1,12 @@
 //! Export / hand-off: NLE interchange (Premiere/Resolve via FCP7 xmeml,
-//! Final Cut via fcpxml, CMX3600 EDL, OTIO JSON), SRT captions, MP4 render.
+//! Final Cut via fcpxml, CMX3600 EDL, OTIO JSON), SRT captions, plain-text
+//! transcript, MP4 render.
 
 pub mod edl;
 pub mod fcpxml;
 pub mod otio;
 pub mod srt;
+pub mod txt;
 pub mod xmeml;
 
 use crate::engine::Editor;
@@ -45,6 +47,11 @@ pub fn render_text_target(
                 .ok_or_else(|| CoreError::InvalidArg("no transcript; transcribe first".into()))?;
             Ok(srt::write(project, t))
         }
+        "txt" => {
+            let t = transcript
+                .ok_or_else(|| CoreError::InvalidArg("no transcript; transcribe first".into()))?;
+            Ok(txt::write(project, t))
+        }
         other => Err(CoreError::InvalidArg(format!("unknown export target {other}"))),
     }
 }
@@ -55,6 +62,7 @@ pub fn default_extension(target: &str) -> &'static str {
         "edl" => "edl",
         "otio" => "otio",
         "srt" => "srt",
+        "txt" => "txt",
         "mp4" => "mp4",
         _ => "txt",
     }

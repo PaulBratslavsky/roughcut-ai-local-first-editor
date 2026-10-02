@@ -1102,7 +1102,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("generate_captions", "Produce SRT captions for the current cut.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_generate_captions),
-    tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt.",
+    tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",

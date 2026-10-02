@@ -16,6 +16,7 @@ const TARGETS: { target: ExportTarget; label: string; ext: string }[] = [
   { target: "otio", label: "OTIO", ext: "otio" },
   { target: "mp4", label: "MP4", ext: "mp4" },
   { target: "srt", label: "SRT captions", ext: "srt" },
+  { target: "txt", label: "Transcript (.txt)", ext: "txt" },
 ];
 
 export function ExportMenu({

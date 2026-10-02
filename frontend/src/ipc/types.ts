@@ -78,7 +78,7 @@ export interface TerminalExitEvent { id: string; code: number | null }
 // ---------------------------------------------------------------------------
 
 export type ExportTarget =
-  | "premiere_xml" | "fcp_xml" | "resolve_xml" | "edl" | "otio" | "mp4" | "srt";
+  | "premiere_xml" | "fcp_xml" | "resolve_xml" | "edl" | "otio" | "mp4" | "srt" | "txt";
 
 // Shell-command status shapes are GENERATED (same regime as the model
 // types — ADR-0003 extended to the provisioning surface).

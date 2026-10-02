@@ -106,6 +106,7 @@ async fn poc_loop_through_the_tool_registry() {
         ("edl", "edl", "TITLE:"),
         ("otio", "otio", "OTIO_SCHEMA"),
         ("srt", "srt", "-->"),
+        ("txt", "txt", " "),
     ] {
         let out = dir.join(format!("export.{ext}"));
         let r = call(
