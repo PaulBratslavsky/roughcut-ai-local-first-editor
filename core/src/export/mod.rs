@@ -82,10 +82,36 @@ fn expand_tilde(path: &str) -> String {
 impl Editor {
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
+        let (project, transcript) = self.snapshot(project_id)?;
+        self.write_export(&project, transcript.as_ref(), target, out_path).await
+    }
+
+    /// Export one short: the same writers, run over the short's timeline. The
+    /// NLE sequence is named after the short.
+    pub async fn export_short(
+        &self,
+        project_id: Uuid,
+        short_id: Uuid,
+        target: &str,
+        out_path: &str,
+    ) -> Result<String> {
+        let short = self.get_short(project_id, short_id)?;
+        let (mut project, transcript) = self.snapshot(project_id)?;
+        project.name = format!("{} — {}", project.name, short.title);
+        project.timeline = short.timeline;
+        self.write_export(&project, transcript.as_ref(), target, out_path).await
+    }
+
+    async fn write_export(
+        &self,
+        project: &Project,
+        transcript: Option<&Transcript>,
+        target: &str,
+        out_path: &str,
+    ) -> Result<String> {
         let out_path = &expand_tilde(out_path);
         if target == "mp4" {
-            let (project, _) = self.snapshot(project_id)?;
-            let media = require_media(&project)?.clone();
+            let media = require_media(project)?.clone();
             let job = crate::adapters::video::RenderJob {
                 media: &media,
                 timeline: &project.timeline,
@@ -96,8 +122,7 @@ impl Editor {
             self.video().render_mp4(&job, &self.sink()).await?;
             return Ok(out_path.to_string());
         }
-        let (project, transcript) = self.snapshot(project_id)?;
-        let content = render_text_target(&project, transcript.as_ref(), target)?;
+        let content = render_text_target(project, transcript, target)?;
         if let Some(parent) = std::path::Path::new(out_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;

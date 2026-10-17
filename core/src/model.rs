@@ -402,6 +402,31 @@ impl Timeline {
         self.included_clips().map(|c| c.duration()).sum()
     }
 
+    /// Playable seconds inside the source range `[start, end]`.
+    pub fn included_within(&self, start: f64, end: f64) -> f64 {
+        self.included_clips()
+            .map(|c| (c.source_out.min(end) - c.source_in.max(start)).max(0.0))
+            .sum()
+    }
+
+    /// A copy of this edit restricted to `[start, end]`: everything outside
+    /// the range excluded, the cuts inside it kept. Fresh ids, so the copy
+    /// can be edited without aliasing this timeline's clips.
+    pub fn restricted_to(&self, start: f64, end: f64) -> Timeline {
+        let mut tl = self.clone();
+        tl.id = Uuid::new_v4();
+        for c in &mut tl.clips {
+            c.id = Uuid::new_v4();
+        }
+        if start > EPS {
+            tl.set_range_included(0.0, start, false, ClipOrigin::Manual);
+        }
+        if end < tl.duration - EPS {
+            tl.set_range_included(end, tl.duration, false, ClipOrigin::Manual);
+        }
+        tl
+    }
+
     /// Map a source time to output (record) time, skipping excluded regions.
     pub fn source_to_output(&self, t: f64) -> f64 {
         let mut out = 0.0;
@@ -623,6 +648,92 @@ pub struct Project {
     /// Named save points (and auto-snapshots before destructive ops).
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
+    /// Short-form clips cut from this video — each its own timeline over the
+    /// same source media.
+    #[serde(default)]
+    pub shorts: Vec<Short>,
+    /// The latest `find_shorts` suggestions, best first. Reviewable, not
+    /// shorts until the user creates one; replaced on each run.
+    #[serde(default)]
+    pub short_candidates: Vec<ShortCandidate>,
+}
+
+/// A short-form clip (Reels/Shorts/TikTok) cut from the long-form video.
+/// Its timeline is the main edit's clips inside `[start, end]` with
+/// everything outside excluded — so the main cut's silence/filler removal
+/// carries over. Snapshotted at creation (and when the range changes):
+/// later edits to the main cut don't move a short underneath you.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Short {
+    pub id: Uuid,
+    pub title: String,
+    /// Source range the short covers, seconds, frame-snapped.
+    pub start: f64,
+    pub end: f64,
+    pub timeline: Timeline,
+    /// 0..100 when it came from `find_shorts`; null for a hand-picked range.
+    pub score: Option<f64>,
+    /// Why it was picked (empty for a hand-picked range).
+    pub reason: String,
+    /// The opening line — what has to stop the scroll.
+    pub hook: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The lean short view for listings (no clip dump).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct ShortSummary {
+    pub id: Uuid,
+    pub title: String,
+    pub start: f64,
+    pub end: f64,
+    /// Playable seconds (cuts inside the range don't count).
+    pub duration: f64,
+    pub score: Option<f64>,
+    pub reason: String,
+    pub hook: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Short {
+    pub fn summary(&self) -> ShortSummary {
+        ShortSummary {
+            id: self.id,
+            title: self.title.clone(),
+            start: self.start,
+            end: self.end,
+            duration: self.timeline.included_duration(),
+            score: self.score,
+            reason: self.reason.clone(),
+            hook: self.hook.clone(),
+            created_at: self.created_at,
+        }
+    }
+}
+
+/// A suggested short from `find_shorts`: a sentence-aligned range of the
+/// current cut, scored for short-form potential (hook, stands alone, payoff).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortCandidate {
+    pub id: Uuid,
+    pub start: f64,
+    pub end: f64,
+    /// Playable seconds (cuts inside the range don't count).
+    pub duration: f64,
+    pub title: String,
+    pub hook: String,
+    pub reason: String,
+    /// 0..100, higher = stronger short.
+    pub score: f64,
+    pub segment_ids: Vec<Uuid>,
+    /// "llm" (scored by the model) | "heuristic" (no model reachable).
+    pub method: String,
 }
 
 /// A named, self-contained snapshot of the timeline — a "save point" the
@@ -756,6 +867,8 @@ impl Project {
             layout: Layout::default(),
             suggestions: vec![],
             checkpoints: vec![],
+            shorts: vec![],
+            short_candidates: vec![],
         }
     }
 
@@ -806,6 +919,21 @@ mod tests {
         t.set_range_included(10.0, 20.0, true, ClipOrigin::Manual);
         assert_eq!(t.cut_count, 0);
         assert_eq!(t.clips.len(), 1);
+    }
+
+    #[test]
+    fn restricted_to_keeps_inner_cuts_and_excludes_the_outside() {
+        let mut t = Timeline::new(100.0);
+        t.set_range_included(30.0, 35.0, false, ClipOrigin::AiCut);
+        let s = t.restricted_to(20.0, 50.0);
+        assert!((s.included_duration() - 25.0).abs() < 1e-6, "30s range minus a 5s cut");
+        assert!((t.included_within(20.0, 50.0) - 25.0).abs() < 1e-6);
+        // The source of truth is untouched and the copy shares no clip ids.
+        assert!((t.included_duration() - 95.0).abs() < 1e-6);
+        assert!(s.clips.iter().all(|c| t.clip(c.id).is_none()));
+        assert_ne!(s.id, t.id);
+        // Output time starts at the range start.
+        assert!(s.source_to_output(20.0).abs() < 1e-6);
     }
 
     #[test]

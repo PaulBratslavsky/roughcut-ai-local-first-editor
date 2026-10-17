@@ -28,6 +28,7 @@ pub mod progress;
 pub mod pty;
 pub mod resolve;
 pub mod setup;
+pub mod shorts;
 pub mod story;
 pub mod store;
 pub mod time;

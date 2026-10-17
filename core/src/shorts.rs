@@ -1,0 +1,703 @@
+//! Shorts: find the moments of a long-form video that work as standalone
+//! short-form clips (Shorts / Reels / TikTok) and rank them.
+//!
+//! Same design rule as `story.rs`: deterministic scaffolding with the model
+//! embedded in ONE step. Candidates are generated without a model
+//! (sentence-aligned windows of the current cut, kept inside one story
+//! beat), pre-ranked by a cheap heuristic, and only the best few are scored
+//! by the model, in small batches, by index (small models mangle uuids). No
+//! model reachable → the heuristic ranking stands.
+
+use crate::adapters::InferenceClient;
+use crate::engine::Editor;
+use crate::error::{CoreError, Result};
+use crate::model::{ShortCandidate, Timeline, TranscriptSegment};
+use crate::story::Beat;
+use serde::Deserialize;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy)]
+pub struct FindOptions {
+    /// How many candidates to return.
+    pub count: usize,
+    /// Playable length bounds, seconds.
+    pub min_s: f64,
+    pub max_s: f64,
+}
+
+impl Default for FindOptions {
+    fn default() -> Self {
+        Self { count: 8, min_s: 15.0, max_s: 60.0 }
+    }
+}
+
+/// A sentence-aligned stretch of speech: segments `first..=last`.
+#[derive(Debug, Clone)]
+struct Window {
+    first: usize,
+    last: usize,
+    start: f64,
+    end: f64,
+    /// Playable seconds in the current cut.
+    duration: f64,
+    score: f64,
+    signals: Vec<&'static str>,
+    title: Option<String>,
+    reason: Option<String>,
+    /// The model scored it. In a model run, anything it skipped ranks after
+    /// everything it judged — heuristic and model scores aren't one scale.
+    judged: bool,
+}
+
+/// The candidate pool the model sees — enough to find the good ones without
+/// a long chain of slow local-model calls.
+const POOL_MAX: usize = 24;
+/// Candidates per model call.
+const BATCH: usize = 6;
+/// Two candidates sharing more than this fraction of the SHORTER one are the
+/// same moment; keep the better one. (Over the union is too lenient: two 30s
+/// clips sharing 13s read as the same short but score only 0.24.)
+const MAX_OVERLAP: f64 = 0.3;
+
+/// Find, rank, and persist short candidates for the project's current cut.
+pub async fn find_shorts(
+    editor: &Editor,
+    project_id: Uuid,
+    opts: FindOptions,
+) -> Result<Vec<ShortCandidate>> {
+    let opts = FindOptions {
+        count: opts.count.clamp(1, 20),
+        min_s: opts.min_s.max(3.0),
+        max_s: opts.max_s.max(opts.min_s.max(3.0) + 1.0),
+    };
+    let (main, speech) = editor.with_project(project_id, |p, t| {
+        let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript; transcribe first".into()))?;
+        let speech: Vec<TranscriptSegment> =
+            t.segments.iter().filter(|s| !s.is_silence && !s.text.trim().is_empty()).cloned().collect();
+        Ok((p.timeline.clone(), speech))
+    })?;
+    if speech.is_empty() {
+        return Err(CoreError::InvalidArg("transcript has no speech".into()));
+    }
+
+    // Beats keep a short on one topic. Cached after the first LLM outline;
+    // instant pause-based sections without a model.
+    progress(editor, project_id, 0.05, "outlining the video…");
+    let outline = crate::story::outline(editor, project_id).await?;
+    let beat_of = beat_index(&speech, &outline.beats);
+
+    let mut windows = candidate_windows(&speech, Some(&beat_of), &main, &opts);
+    if windows.is_empty() {
+        // Beats shorter than min_s (choppy pause-based sections): let a
+        // window span them rather than return nothing.
+        windows = candidate_windows(&speech, None, &main, &opts);
+    }
+    if windows.is_empty() {
+        return Err(CoreError::InvalidArg(format!(
+            "no {:.0}-{:.0}s stretch of speech in the current cut — widen the length range or restore cut material",
+            opts.min_s, opts.max_s
+        )));
+    }
+    for w in &mut windows {
+        let (score, signals) = heuristic_score(&speech, w, &outline.beats, &beat_of, &opts);
+        w.score = score;
+        w.signals = signals;
+    }
+    let pool = diversify(windows, POOL_MAX.max(opts.count));
+
+    let inference = editor.inference()?;
+    let (ranked, method) = if inference.healthy().await {
+        let model = editor.get_preferences()?.inference_model;
+        let on_batch = |done: usize, total: usize| {
+            progress(
+                editor,
+                project_id,
+                0.3 + 0.65 * done as f64 / total.max(1) as f64,
+                format!("scoring candidates on-device — {done}/{total}"),
+            )
+        };
+        match llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), on_batch).await {
+            Ok(scored) => (scored, "llm"),
+            Err(_) => (pool, "heuristic"),
+        }
+    } else {
+        (pool, "heuristic")
+    };
+    let picked = diversify(ranked, opts.count);
+    progress(editor, project_id, 1.0, format!("found {} short candidates", picked.len()));
+    let candidates: Vec<ShortCandidate> =
+        picked.iter().map(|w| to_candidate(&speech, w, method)).collect();
+    editor.set_short_candidates(project_id, candidates.clone())?;
+    Ok(candidates)
+}
+
+fn progress(editor: &Editor, project_id: Uuid, fraction: f64, message: impl Into<String>) {
+    crate::events::send(
+        &editor.sink(),
+        crate::events::CoreEvent::progress(
+            crate::events::ProgressTask::Shorts,
+            Some(project_id),
+            fraction,
+            message,
+        ),
+    );
+}
+
+/// Which beat each speech segment belongs to (a segment no beat claims
+/// inherits its predecessor's, so boundaries stay monotonic).
+fn beat_index(speech: &[TranscriptSegment], beats: &[Beat]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(speech.len());
+    let mut last = 0;
+    for seg in speech {
+        if let Some(b) = beats.iter().position(|b| b.segment_ids.contains(&seg.id)) {
+            last = b;
+        }
+        out.push(last);
+    }
+    out
+}
+
+/// Is a segment kept in the current cut? (Its midpoint decides, the same
+/// rule the SRT export uses.)
+fn kept(main: &Timeline, seg: &TranscriptSegment) -> bool {
+    let mid = (seg.start + seg.end) / 2.0;
+    main.clips.iter().any(|c| c.included && c.source_in <= mid && mid < c.source_out)
+}
+
+/// Every sentence-aligned window whose playable length fits the bounds.
+/// A window starts and ends on a kept, non-filler segment, and (when `beat_of`
+/// is given) never crosses a beat boundary.
+fn candidate_windows(
+    speech: &[TranscriptSegment],
+    beat_of: Option<&[usize]>,
+    main: &Timeline,
+    opts: &FindOptions,
+) -> Vec<Window> {
+    let usable: Vec<bool> =
+        speech.iter().map(|s| !s.is_filler && !is_throwaway(&s.text) && kept(main, s)).collect();
+    let mut out = vec![];
+    for first in 0..speech.len() {
+        if !usable[first] {
+            continue;
+        }
+        for last in first..speech.len() {
+            if let Some(beats) = beat_of {
+                if beats[last] != beats[first] {
+                    break;
+                }
+            }
+            let (start, end) = (speech[first].start, speech[last].end);
+            let duration = main.included_within(start, end);
+            if duration > opts.max_s {
+                break;
+            }
+            if usable[last] && duration >= opts.min_s {
+                out.push(Window {
+                    first,
+                    last,
+                    start,
+                    end,
+                    duration,
+                    score: 0.0,
+                    signals: vec![],
+                    title: None,
+                    reason: None,
+                    judged: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Acknowledgements and tag questions ("Right?", "Okay.", "So yeah.") —
+/// fine mid-clip, never the first or last thing a viewer hears.
+const THROWAWAY: &[&str] = &[
+    "right", "okay", "ok", "yeah", "yes", "so", "alright", "anyway", "well", "cool", "sure",
+    "um", "uh", "and", "but",
+];
+
+fn is_throwaway(text: &str) -> bool {
+    let words: Vec<String> = text.split_whitespace().map(first_word).collect();
+    !words.is_empty() && words.len() <= 2 && words.iter().all(|w| THROWAWAY.contains(&w.as_str()))
+}
+
+/// Openers that need the previous sentence to make sense.
+const DANGLING: &[&str] = &[
+    "and", "but", "so", "because", "which", "also", "anyway", "then", "or", "plus", "though",
+];
+/// Pronouns with no antecedent when the clip starts cold.
+const COLD_REFERENCE: &[&str] = &["it", "that", "they", "these", "those", "he", "she"];
+const BACKREF: &[&str] = &[
+    "as i said", "like i said", "as i mentioned", "i mentioned", "earlier", "going back to",
+    "back to the",
+];
+const HOOK_OPENERS: &[&str] = &[
+    "here's", "here is", "the problem", "the key", "the secret", "the truth", "the biggest",
+    "the best", "the worst", "stop", "never", "most people", "if you", "what if", "why", "how",
+    "nobody", "everyone", "you", "imagine", "today",
+];
+
+/// Hesitations that can lead a whisper segment ("Um, this is…").
+const OPENING_FILLERS: &[&str] = &["um", "uh", "er", "erm", "ah", "hmm", "mm"];
+
+/// The line with leading hesitations removed and re-capitalised — what a
+/// viewer actually hears once the filler is cut, and what a title should say.
+fn strip_leading_fillers(text: &str) -> String {
+    let mut rest = text.trim();
+    loop {
+        let word = first_word(rest);
+        if word.is_empty() || !OPENING_FILLERS.contains(&word.as_str()) {
+            break;
+        }
+        let after = rest.split_once(char::is_whitespace).map(|(_, r)| r).unwrap_or("");
+        rest = after.trim_start_matches([',', '.', ' ', '…', '-']).trim_start();
+    }
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn first_word(text: &str) -> String {
+    text.split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+        .to_lowercase()
+}
+
+/// 0..100 short-form potential without a model, plus the signals behind it
+/// (they become the human-readable reason).
+fn heuristic_score(
+    speech: &[TranscriptSegment],
+    w: &Window,
+    beats: &[Beat],
+    beat_of: &[usize],
+    opts: &FindOptions,
+) -> (f64, Vec<&'static str>) {
+    let mut score: f64 = 50.0;
+    let mut signals = vec![];
+    let raw_open = speech[w.first].text.trim();
+    if OPENING_FILLERS.contains(&first_word(raw_open).as_str()) {
+        score -= 10.0;
+        signals.push("opens on a filler");
+    }
+    let open_owned = strip_leading_fillers(raw_open);
+    let open = open_owned.as_str();
+    let open_lc = open.to_lowercase();
+    let close = speech[w.last].text.trim();
+
+    let opener = first_word(open);
+    if DANGLING.contains(&opener.as_str()) {
+        score -= 20.0;
+        signals.push("opens mid-thought");
+    } else if COLD_REFERENCE.contains(&opener.as_str()) {
+        score -= 8.0;
+        signals.push("opens on an unexplained reference");
+    }
+    if BACKREF.iter().any(|p| open_lc.contains(p)) {
+        score -= 15.0;
+        signals.push("refers back to earlier");
+    }
+    if open.contains('?') && open.split_whitespace().count() >= 4 {
+        score += 12.0;
+        signals.push("opens with a question");
+    } else if HOOK_OPENERS.iter().any(|h| open_lc.starts_with(h)) {
+        score += 10.0;
+        signals.push("strong opener");
+    }
+    if open.chars().any(|c| c.is_ascii_digit()) {
+        score += 4.0;
+    }
+    if close.ends_with(['.', '!', '?']) {
+        score += 8.0;
+        signals.push("ends on a complete thought");
+    } else {
+        score -= 8.0;
+        signals.push("trails off");
+    }
+
+    if let Some(beat) = beats.get(beat_of[w.first]) {
+        score += match beat.role.as_str() {
+            "hook" => 12.0,
+            "point" | "example" => 8.0,
+            "recap" | "section" => 4.0,
+            "setup" => 2.0,
+            "tangent" => -4.0,
+            "outro" => -12.0,
+            _ => 0.0,
+        };
+        if beat.role == "hook" {
+            signals.push("from the video's hook");
+        }
+        score += (3.0 - f64::from(beat.cut_priority)) * 3.0;
+    }
+
+    // Sweet spot: ~25-45s holds attention and leaves room for a payoff.
+    let ideal_lo = 25.0_f64.clamp(opts.min_s, opts.max_s);
+    let ideal_hi = 45.0_f64.clamp(opts.min_s, opts.max_s);
+    let off = if w.duration < ideal_lo {
+        ideal_lo - w.duration
+    } else if w.duration > ideal_hi {
+        w.duration - ideal_hi
+    } else {
+        0.0
+    };
+    score += 10.0 - (off / 3.0).min(10.0);
+
+    let segs = &speech[w.first..=w.last];
+    let fillers = segs.iter().filter(|s| s.is_filler).count();
+    score -= 15.0 * fillers as f64 / segs.len() as f64;
+
+    (score.clamp(0.0, 100.0), signals)
+}
+
+fn overlap(a: &Window, b: &Window) -> f64 {
+    let inter = (a.end.min(b.end) - a.start.max(b.start)).max(0.0);
+    let shorter = (a.end - a.start).min(b.end - b.start);
+    if shorter <= 0.0 { 0.0 } else { inter / shorter }
+}
+
+/// Best-first, dropping anything that is substantially the same moment as a
+/// better pick.
+fn diversify(mut windows: Vec<Window>, k: usize) -> Vec<Window> {
+    windows.sort_by(|a, b| {
+        b.judged
+            .cmp(&a.judged)
+            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+            // Ties: the earlier moment first (stable, readable order).
+            .then(a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let mut picked: Vec<Window> = vec![];
+    for w in windows {
+        if picked.len() >= k {
+            break;
+        }
+        if picked.iter().all(|p| overlap(p, &w) <= MAX_OVERLAP) {
+            picked.push(w);
+        }
+    }
+    picked
+}
+
+fn window_text(speech: &[TranscriptSegment], w: &Window) -> String {
+    speech[w.first..=w.last].iter().map(|s| s.text.trim()).collect::<Vec<_>>().join(" ")
+}
+
+/// Score the pool with the model, in batches. The model's 0-100 dominates;
+/// the heuristic breaks near-ties and covers anything the model skipped.
+async fn llm_rescore(
+    inference: &dyn InferenceClient,
+    model: &str,
+    speech: &[TranscriptSegment],
+    mut pool: Vec<Window>,
+    on_batch: impl Fn(usize, usize),
+) -> Result<Vec<Window>> {
+    #[derive(Deserialize)]
+    struct Scored {
+        index: usize,
+        score: f64,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        reason: String,
+    }
+    let schema = serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "index": {"type": "integer"},
+                "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                "title": {"type": "string"},
+                "reason": {"type": "string"}
+            },
+            "required": ["index", "score", "title", "reason"]
+        }
+    });
+    let system = "You are a short-form video editor (YouTube Shorts, Reels, TikTok). Each \
+        numbered candidate is a contiguous excerpt from a longer talking-head video. Score how \
+        well it works as a STANDALONE short: (1) the first sentence is a hook that stops the \
+        scroll; (2) it makes sense with zero context — no 'as I said', no unexplained \
+        'this'/'it'; (3) it delivers a payoff (an insight, a surprise, a strong opinion, a \
+        laugh) before it ends; (4) it ends on a complete thought. Be harsh: most excerpts are \
+        mediocre, so reserve 80+ for clips you would actually post. Reply with ONLY a JSON \
+        array, one object per candidate: [{\"index\": candidate number, \"score\": 0-100, \
+        \"title\": a catchy title under 60 characters, \"reason\": one short sentence on why \
+        it works or doesn't}].";
+    let mut scored_any = false;
+    let batches = pool.len().div_ceil(BATCH);
+    on_batch(0, batches);
+    for (batch_no, batch_start) in (0..pool.len()).step_by(BATCH).enumerate() {
+        let batch_end = (batch_start + BATCH).min(pool.len());
+        let user: String = (batch_start..batch_end)
+            .map(|i| {
+                let w = &pool[i];
+                let mut text = window_text(speech, w);
+                if text.len() > 900 {
+                    let cut = (0..=900).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
+                    text.truncate(cut);
+                    text.push('…');
+                }
+                format!("{i}| ({:.0}s) {text}", w.duration)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let replies: Vec<Scored> = match crate::llm::ask_json_schema(
+            inference,
+            model,
+            "short_scores",
+            system,
+            &user,
+            0.2,
+            Some(&schema),
+        )
+        .await
+        {
+            Ok(r) => r,
+            // One bad batch keeps its heuristic scores; the rest still count.
+            Err(_) => {
+                on_batch(batch_no + 1, batches);
+                continue;
+            }
+        };
+        for r in replies {
+            if !(batch_start..batch_end).contains(&r.index) {
+                continue;
+            }
+            let w = &mut pool[r.index];
+            w.score = 0.8 * r.score.clamp(0.0, 100.0) + 0.2 * w.score;
+            if !r.title.trim().is_empty() {
+                w.title = Some(r.title.trim().to_string());
+            }
+            if !r.reason.trim().is_empty() {
+                w.reason = Some(r.reason.trim().to_string());
+            }
+            w.judged = true;
+            scored_any = true;
+        }
+        on_batch(batch_no + 1, batches);
+    }
+    if !scored_any {
+        return Err(CoreError::Inference("model scored no short candidates".into()));
+    }
+    Ok(pool)
+}
+
+fn heuristic_title(open: &str) -> String {
+    let words: Vec<&str> = open.split_whitespace().collect();
+    let mut title = words.iter().take(8).copied().collect::<Vec<_>>().join(" ");
+    title = title.trim_end_matches([',', '.', ';', ':']).to_string();
+    if words.len() > 8 {
+        title.push('…');
+    }
+    title
+}
+
+fn to_candidate(speech: &[TranscriptSegment], w: &Window, method: &str) -> ShortCandidate {
+    let open = strip_leading_fillers(&speech[w.first].text);
+    let reason = w.reason.clone().unwrap_or_else(|| {
+        let mut parts: Vec<String> = w.signals.iter().map(|s| s.to_string()).collect();
+        parts.push(format!("{:.0}s", w.duration));
+        let mut r = parts.join("; ");
+        if let Some(c) = r.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+        r
+    });
+    ShortCandidate {
+        id: Uuid::new_v4(),
+        start: w.start,
+        end: w.end,
+        duration: w.duration,
+        title: w.title.clone().unwrap_or_else(|| heuristic_title(&open)),
+        hook: open,
+        reason,
+        score: (w.score * 10.0).round() / 10.0,
+        segment_ids: speech[w.first..=w.last].iter().map(|s| s.id).collect(),
+        method: method.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::inference::{ChatMessage, ChatRequest, ChatResponse};
+    use crate::model::ClipOrigin;
+
+    fn seg(start: f64, end: f64, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            id: Uuid::new_v4(),
+            start,
+            end,
+            text: text.into(),
+            words: vec![],
+            is_filler: matches!(text, "um" | "uh"),
+            is_silence: false,
+            take_group_id: None,
+            is_best_take: false,
+        }
+    }
+
+    /// Ten 6-second sentences back to back over a 60s source.
+    fn speech() -> Vec<TranscriptSegment> {
+        let lines = [
+            "Here's the biggest mistake people make when they edit.",
+            "And they keep doing it for years.",
+            "um",
+            "The fix is to cut on the transcript, not the waveform.",
+            "It sounds simple.",
+            "But it saves hours every single week.",
+            "As I said earlier, the timeline is a trap.",
+            "Why do we still drag clips around by hand?",
+            "Because nobody showed us a better way.",
+            "So try it on your next video",
+        ];
+        lines.iter().enumerate().map(|(i, l)| seg(i as f64 * 6.0, i as f64 * 6.0 + 6.0, l)).collect()
+    }
+
+    fn opts(min_s: f64, max_s: f64) -> FindOptions {
+        FindOptions { count: 5, min_s, max_s }
+    }
+
+    #[test]
+    fn windows_are_sentence_aligned_and_skip_fillers_and_cut_material() {
+        let speech = speech();
+        let mut main = Timeline::new(60.0);
+        // Cut "It sounds simple." (24-30s) in the main edit.
+        main.set_range_included(24.0, 30.0, false, ClipOrigin::Manual);
+        let ws = candidate_windows(&speech, None, &main, &opts(10.0, 20.0));
+        assert!(!ws.is_empty());
+        for w in &ws {
+            assert!(!speech[w.first].is_filler && !speech[w.last].is_filler);
+            assert_ne!(w.first, 4, "never starts on a segment the main cut removed");
+            assert_ne!(w.last, 4, "never ends on a segment the main cut removed");
+            assert!((10.0..=20.0).contains(&w.duration), "duration {}", w.duration);
+        }
+        // The cut doesn't count toward length: 18-36s spans 18s of source
+        // but only 12s plays.
+        let w = ws.iter().find(|w| w.first == 3 && w.last == 5).expect("window over the cut");
+        assert!((w.duration - 12.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn windows_stay_inside_a_beat() {
+        let speech = speech();
+        let main = Timeline::new(60.0);
+        let beat_of: Vec<usize> = (0..speech.len()).map(|i| if i < 5 { 0 } else { 1 }).collect();
+        let ws = candidate_windows(&speech, Some(&beat_of), &main, &opts(10.0, 40.0));
+        assert!(ws.iter().all(|w| beat_of[w.first] == beat_of[w.last]));
+    }
+
+    #[test]
+    fn heuristic_rewards_hooks_and_punishes_cold_opens() {
+        let speech = speech();
+        let main = Timeline::new(60.0);
+        let ws = candidate_windows(&speech, None, &main, &opts(10.0, 20.0));
+        let score_of = |first: usize, last: usize| {
+            let w = ws.iter().find(|w| w.first == first && w.last == last).unwrap();
+            heuristic_score(&speech, w, &[], &vec![0; speech.len()], &opts(10.0, 20.0))
+        };
+        let (hook, hook_signals) = score_of(0, 1); // "Here's the biggest mistake…"
+        let (dangling, _) = score_of(1, 3); // "And they keep doing it…"
+        let (backref, back_signals) = score_of(6, 7); // "As I said earlier…"
+        assert!(hook > dangling, "{hook} vs {dangling}");
+        assert!(hook > backref, "{hook} vs {backref}");
+        assert!(hook_signals.contains(&"strong opener"));
+        assert!(back_signals.contains(&"refers back to earlier"));
+        let (question, q_signals) = score_of(7, 8);
+        assert!(q_signals.contains(&"opens with a question"), "{question}");
+        let (trailing, t_signals) = score_of(8, 9); // ends without punctuation
+        assert!(t_signals.contains(&"trails off"), "{trailing}");
+    }
+
+    #[test]
+    fn leading_fillers_are_penalised_and_stripped_from_the_hook() {
+        assert_eq!(strip_leading_fillers("Um, this is huge."), "This is huge.");
+        assert_eq!(strip_leading_fillers("uh um, so here's the thing"), "So here's the thing");
+        assert_eq!(strip_leading_fillers("Umbrellas are great."), "Umbrellas are great.");
+        assert_eq!(strip_leading_fillers("um"), "");
+
+        let speech = vec![
+            seg(0.0, 10.0, "Um, here's the biggest mistake people make."),
+            seg(10.0, 20.0, "It costs hours."),
+            seg(20.0, 30.0, "Here's the biggest mistake people make."),
+            seg(30.0, 40.0, "It costs hours."),
+        ];
+        let main = Timeline::new(40.0);
+        let ws = candidate_windows(&speech, None, &main, &opts(15.0, 25.0));
+        let score_of = |first: usize| {
+            let w = ws.iter().find(|w| w.first == first && w.last == first + 1).unwrap();
+            heuristic_score(&speech, w, &[], &vec![0; speech.len()], &opts(15.0, 25.0))
+        };
+        let (with_filler, signals) = score_of(0);
+        let (clean, _) = score_of(2);
+        assert!(signals.contains(&"opens on a filler"));
+        assert!(signals.contains(&"strong opener"), "the hook still counts once the filler is cut");
+        assert!(clean > with_filler);
+        let w = ws.iter().find(|w| w.first == 0 && w.last == 1).unwrap();
+        let c = to_candidate(&speech, w, "heuristic");
+        assert_eq!(c.hook, "Here's the biggest mistake people make.");
+        assert!(c.title.starts_with("Here's the biggest"));
+    }
+
+    #[test]
+    fn diversify_drops_the_same_moment() {
+        let w = |start: f64, end: f64, score: f64| Window {
+            first: 0,
+            last: 0,
+            start,
+            end,
+            duration: end - start,
+            score,
+            signals: vec![],
+            title: None,
+            reason: None,
+            judged: false,
+        };
+        let picked = diversify(vec![w(0.0, 30.0, 60.0), w(2.0, 32.0, 70.0), w(40.0, 70.0, 50.0)], 5);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].score, 70.0);
+        assert_eq!(picked[1].start, 40.0);
+        assert_eq!(diversify(vec![w(0.0, 10.0, 1.0), w(20.0, 30.0, 2.0)], 1).len(), 1);
+    }
+
+    /// A model that loves exactly one candidate (by index) and pans the rest.
+    struct Favors(usize);
+    #[async_trait::async_trait]
+    impl InferenceClient for Favors {
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            let user = request.messages.iter().rev().find(|m| m.role == "user").unwrap();
+            let replies: Vec<serde_json::Value> = user
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .split("\n\n")
+                .filter_map(|block| block.split('|').next()?.trim().parse::<usize>().ok())
+                .map(|i| serde_json::json!({
+                    "index": i, "score": if i == self.0 { 95 } else { 5 },
+                    "title": format!("Title {i}"), "reason": "ok"
+                }))
+                .collect();
+            Ok(ChatResponse { message: ChatMessage::assistant(&serde_json::to_string(&replies).unwrap()) })
+        }
+        async fn healthy(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_scores_reorder_the_pool_and_name_the_clips() {
+        let speech = speech();
+        let main = Timeline::new(60.0);
+        let pool = diversify(candidate_windows(&speech, None, &main, &opts(10.0, 20.0)), 8);
+        let n = pool.len();
+        assert!(n >= 3);
+        let scored = llm_rescore(&Favors(n - 1), "m", &speech, pool, |_, _| {}).await.unwrap();
+        let best = diversify(scored, 1).remove(0);
+        assert_eq!(best.title.as_deref(), Some(format!("Title {}", n - 1).as_str()));
+        assert_eq!(best.reason.as_deref(), Some("ok"));
+    }
+}

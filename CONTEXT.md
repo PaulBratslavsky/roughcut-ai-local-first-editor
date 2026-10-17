@@ -56,12 +56,23 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **Checkpoint** (`model.rs`) — a named, self-contained timeline snapshot (full
   clips + padding + cut_count) the user returns to **regardless of undo/redo
   state**. `CheckpointSummary` is the lean listing view. Persisted on the Project.
+- **Short** (`model.rs`) — a short-form clip (Shorts / Reels / TikTok) cut from
+  the long-form video: its **own Timeline** over the same source — the main cut
+  restricted to `[start, end]` (`Timeline::restricted_to`), so removed
+  silences/fillers stay removed. Snapshotted at creation and on re-range; main-cut
+  edits and undo never move it. Project metadata, not journaled.
+  `ShortSummary` is the lean listing view. Exports run the normal writers over it.
 
 ## AI-derived views (read models over the transcript)
 
 - **CutSuggestion** (`model.rs`) — a Tier-2 flag (repeated take / repetition) for
   review, not yet applied: `{ id, segment_ids, start, end, reason, confidence,
   duplicate_of, preview }`. Output of `suggest_cuts`.
+- **ShortCandidate** (`model.rs`, from `shorts.rs`) — a suggested Short: a
+  sentence-aligned stretch of the current cut inside one Beat, scored 0–100 for
+  short-form potential (hook, stands alone, payoff) `{ id, start, end, duration,
+  title, hook, reason, score, segment_ids, method: "llm"|"heuristic" }`. The latest
+  `find_shorts` run is persisted on the Project until the next run.
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.
 - **Beat** (`story.rs`) — one story unit: `{ title, summary, role, cut_priority
   (1=spine…5=cut first), segment_ids, start, end }`.

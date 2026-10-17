@@ -3,6 +3,8 @@ import type { Checkpoint } from "./Checkpoint";
 import type { CutSuggestion } from "./CutSuggestion";
 import type { Layout } from "./Layout";
 import type { Media } from "./Media";
+import type { Short } from "./Short";
+import type { ShortCandidate } from "./ShortCandidate";
 import type { Timeline } from "./Timeline";
 
 export type Project = { id: string, name: string, media: Media | null, timeline: Timeline, created_at: string, updated_at: string, schema_version: number, 
@@ -35,4 +37,14 @@ suggestions: Array<CutSuggestion>,
 /**
  * Named save points (and auto-snapshots before destructive ops).
  */
-checkpoints: Array<Checkpoint>, };
+checkpoints: Array<Checkpoint>, 
+/**
+ * Short-form clips cut from this video — each its own timeline over the
+ * same source media.
+ */
+shorts: Array<Short>, 
+/**
+ * The latest `find_shorts` suggestions, best first. Reviewable, not
+ * shorts until the user creates one; replaced on each run.
+ */
+short_candidates: Array<ShortCandidate>, };

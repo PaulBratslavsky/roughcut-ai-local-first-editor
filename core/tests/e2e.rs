@@ -910,3 +910,130 @@ async fn set_preferences_patches_and_guards_egress() {
     assert_eq!(out["inference_endpoint"], "https://llm.example.com/v1");
     assert_eq!(out["silence_min_duration_s"], 1.2);
 }
+
+#[tokio::test]
+async fn shorts_find_create_export() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "long-form", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    // Before a transcript there is nothing to find.
+    let err = tools::dispatch(&editor, "find_shorts", &json!({ "project_id": pid }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("transcribe first"), "got: {err}");
+
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+
+    // 1. Find: ranked, in bounds, distinct moments, persisted.
+    let found = call(
+        &editor,
+        "find_shorts",
+        json!({ "project_id": pid, "count": 4, "min_s": 15, "max_s": 45 }),
+    )
+    .await;
+    assert_eq!(found["method"], "heuristic", "tests have no model server");
+    let candidates = found["candidates"].as_array().unwrap().clone();
+    assert!(!candidates.is_empty() && candidates.len() <= 4, "got {}", candidates.len());
+    let scores: Vec<f64> = candidates.iter().map(|c| c["score"].as_f64().unwrap()).collect();
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "best first: {scores:?}");
+    for c in &candidates {
+        let d = c["duration"].as_f64().unwrap();
+        assert!((15.0..=45.0).contains(&d), "duration {d}");
+        assert!(!c["title"].as_str().unwrap().is_empty());
+        assert!(!c["hook"].as_str().unwrap().is_empty());
+        assert!(!c["reason"].as_str().unwrap().is_empty());
+    }
+    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    assert_eq!(stored["candidates"].as_array().unwrap().len(), candidates.len());
+
+    // 2. Create from a candidate: the short plays exactly the candidate's
+    // stretch of the current cut, and the candidate leaves the list.
+    let best = &candidates[0];
+    let created = call(
+        &editor,
+        "create_short",
+        json!({ "project_id": pid, "candidate_id": best["id"] }),
+    )
+    .await;
+    let short = &created["short"];
+    let sid = short["id"].as_str().unwrap().to_string();
+    assert_eq!(short["title"], best["title"]);
+    assert!((short["duration"].as_f64().unwrap() - best["duration"].as_f64().unwrap()).abs() < 0.1);
+    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    assert_eq!(stored["candidates"].as_array().unwrap().len(), candidates.len() - 1);
+
+    // A hand-picked range works too; a bad one names the problem.
+    let ranged = call(
+        &editor,
+        "create_short",
+        json!({ "project_id": pid, "start": 10.0, "end": 40.0, "title": "My pick" }),
+    )
+    .await;
+    assert_eq!(ranged["short"]["title"], "My pick");
+    let err = tools::dispatch(
+        &editor,
+        "create_short",
+        &json!({ "project_id": pid, "start": 40.0, "end": 10.0 }),
+        Caller::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid"), "got: {err}");
+
+    // 3. Shorts are independent of the main cut: undoing the rough cut moves
+    // the main timeline, not the short.
+    let before = call(&editor, "list_shorts", json!({ "project_id": pid })).await["shorts"][0]["duration"]
+        .as_f64()
+        .unwrap();
+    call(&editor, "undo", json!({ "project_id": pid })).await;
+    let after = call(&editor, "list_shorts", json!({ "project_id": pid })).await["shorts"][0]["duration"]
+        .as_f64()
+        .unwrap();
+    assert!((before - after).abs() < 1e-9);
+
+    // 4. Update: rename + re-range.
+    let start = short["start"].as_f64().unwrap();
+    let updated = call(
+        &editor,
+        "update_short",
+        json!({ "project_id": pid, "short_id": sid, "title": "Renamed", "end": start + 20.0 }),
+    )
+    .await;
+    assert_eq!(updated["short"]["title"], "Renamed");
+    assert!(updated["short"]["duration"].as_f64().unwrap() <= 20.0 + 1e-6);
+
+    // 5. Export: the same writers over the short's timeline. Captions start
+    // at the short's own 00:00:00, not the source time.
+    let dir = std::env::temp_dir().join("roughcut-e2e-shorts");
+    for (target, needle) in [("edl", "TITLE:"), ("srt", "00:00:00,"), ("txt", " ")] {
+        let out = dir.join(format!("short.{target}"));
+        let r = call(
+            &editor,
+            "export_short",
+            json!({ "project_id": pid, "short_id": sid, "target": target, "out_path": out.to_string_lossy() }),
+        )
+        .await;
+        let content = std::fs::read_to_string(r["path"].as_str().unwrap()).unwrap();
+        assert!(content.contains(needle), "{target} export missing {needle}: {content}");
+        if target == "edl" {
+            assert!(content.contains("Renamed"), "EDL titled after the short: {content}");
+        }
+    }
+
+    // 6. Persisted with the project; delete removes it.
+    let project = call(&editor, "open_project", json!({ "project_id": pid })).await;
+    assert_eq!(project["shorts"].as_array().unwrap().len(), 2);
+    call(&editor, "delete_short", json!({ "project_id": pid, "short_id": sid })).await;
+    let listed = call(&editor, "list_shorts", json!({ "project_id": pid })).await;
+    assert_eq!(listed["shorts"].as_array().unwrap().len(), 1);
+
+    // The local agent can find and create shorts but not export them.
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let names: Vec<String> = tools::defs(agent).into_iter().map(|d| d.name).collect();
+    assert!(names.contains(&"find_shorts".to_string()));
+    assert!(!names.contains(&"export_short".to_string()));
+}

@@ -19,6 +19,7 @@ import { TerminalPanel } from "./panels/TerminalPanel";
 import { PreviewPanel } from "./panels/PreviewPanel";
 import { InspectorPanel } from "./panels/InspectorPanel";
 import { MetadataPanel } from "./panels/MetadataPanel";
+import { ShortsPanel } from "./panels/ShortsPanel";
 import { Timeline } from "./timeline/Timeline";
 import { TransportBar } from "./timeline/TransportBar";
 
@@ -110,6 +111,12 @@ function Editor({ projectId }: { projectId: string }) {
                 Clips
               </button>
               <button
+                className={`tab${activeTab === "shorts" ? " active" : ""}`}
+                onClick={() => setActiveTab("shorts")}
+              >
+                Shorts
+              </button>
+              <button
                 className={`tab${activeTab === "history" ? " active" : ""}`}
                 onClick={() => setActiveTab("history")}
               >
@@ -126,6 +133,8 @@ function Editor({ projectId }: { projectId: string }) {
               <ChatPanel projectId={projectId} />
             ) : activeTab === "clips" ? (
               <ClipsPanel projectId={projectId} />
+            ) : activeTab === "shorts" ? (
+              <ShortsPanel projectId={projectId} />
             ) : activeTab === "history" ? (
               <HistoryPanel projectId={projectId} />
             ) : activeTab === "terminal" ? (

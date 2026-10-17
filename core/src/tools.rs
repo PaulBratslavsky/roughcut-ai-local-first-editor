@@ -253,6 +253,17 @@ fn arg_f64(args: &Value, key: &str) -> Result<f64> {
     })
 }
 
+/// Optional number arg: absent/null → None; present but not a number → error
+/// (so a model that sends "30s" learns the expected type).
+fn arg_f64_opt(args: &Value, key: &str) -> Result<Option<f64>> {
+    match &args[key] {
+        Value::Null => Ok(None),
+        v => v.as_f64().map(Some).ok_or_else(|| {
+            CoreError::InvalidArg(format!("'{key}' must be a number (seconds), got {}", json_kind(v)))
+        }),
+    }
+}
+
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args[key].as_str().ok_or_else(|| {
         CoreError::InvalidArg(format!(
@@ -842,6 +853,78 @@ handler!(h_export, |e, a, s| {
     Ok(json!({ "path": path }))
 });
 
+handler!(h_find_shorts, |e, a, _s| {
+    let defaults = crate::shorts::FindOptions::default();
+    let opts = crate::shorts::FindOptions {
+        count: a["count"].as_u64().map(|n| n as usize).unwrap_or(defaults.count),
+        min_s: arg_f64_opt(a, "min_s")?.unwrap_or(defaults.min_s),
+        max_s: arg_f64_opt(a, "max_s")?.unwrap_or(defaults.max_s),
+    };
+    let candidates = crate::shorts::find_shorts(e, arg_uuid(a, "project_id")?, opts).await?;
+    let method = candidates.first().map(|c| c.method.clone()).unwrap_or_default();
+    Ok(json!({ "candidates": candidates, "method": method }))
+});
+
+handler!(h_get_short_candidates, |e, a, _s| {
+    Ok(json!({ "candidates": e.get_short_candidates(arg_uuid(a, "project_id")?)? }))
+});
+
+handler!(h_create_short, |e, a, _s| {
+    let from = match arg_uuid_opt(a, "candidate_id")? {
+        Some(id) => crate::engine::ShortSource::Candidate(id),
+        None => match (arg_f64_opt(a, "start")?, arg_f64_opt(a, "end")?) {
+            (Some(start), Some(end)) => crate::engine::ShortSource::Range { start, end },
+            _ => {
+                return Err(CoreError::InvalidArg(
+                    "create_short needs candidate_id (from find_shorts) or both start and end (seconds)".into(),
+                ))
+            }
+        },
+    };
+    let short = e.create_short(arg_uuid(a, "project_id")?, from, a["title"].as_str())?;
+    Ok(json!({ "short": short }))
+});
+
+handler!(h_list_shorts, |e, a, _s| {
+    Ok(json!({ "shorts": e.list_shorts(arg_uuid(a, "project_id")?)? }))
+});
+
+handler!(h_update_short, |e, a, _s| {
+    let short = e.update_short(
+        arg_uuid(a, "project_id")?,
+        arg_uuid(a, "short_id")?,
+        a["title"].as_str(),
+        arg_f64_opt(a, "start")?,
+        arg_f64_opt(a, "end")?,
+    )?;
+    Ok(json!({ "short": short }))
+});
+
+handler!(h_delete_short, |e, a, _s| {
+    e.delete_short(arg_uuid(a, "project_id")?, arg_uuid(a, "short_id")?)?;
+    Ok(json!({ "deleted": true }))
+});
+
+handler!(h_export_short, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let short_id = arg_uuid(a, "short_id")?;
+    let target = arg_str(a, "target")?.to_string();
+    let out_path = arg_str(a, "out_path")?.to_string();
+    if s == ActionSource::McpClient
+        && !e
+            .request_confirmation(&format!(
+                "Export a short as {target} to {out_path}? (requested by an external MCP client)"
+            ))
+            .await
+    {
+        return Err(CoreError::Unavailable(
+            "export denied: the user did not approve this externally-requested write".into(),
+        ));
+    }
+    let path = e.export_short(project_id, short_id, &target, &out_path).await?;
+    Ok(json!({ "path": path }))
+});
+
 handler!(h_create_project, |e, a, _s| {
     let p = e.create_project(arg_str(a, "name")?, a["file_path"].as_str()).await?;
     Ok(serde_json::to_value(p)?)
@@ -1105,6 +1188,27 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
+    tool!("find_shorts", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_short_candidates). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Turn one into a short with create_short.",
+        || obj(json!({"project_id": pid_schema(), "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
+        agent: true, meta: false, h_find_shorts),
+    tool!("get_short_candidates", "The candidates from the latest find_shorts run, best first (no recompute).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_get_short_candidates),
+    tool!("create_short", "Create a short from a find_shorts candidate (candidate_id) or a source range (start + end, seconds). The short is its own timeline: the current cut inside the range, so removed silences/fillers stay removed. Main-cut edits made later don't change it.",
+        || obj(json!({"project_id": pid_schema(), "candidate_id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}}), &["project_id"]),
+        agent: true, meta: false, h_create_short),
+    tool!("list_shorts", "List the project's shorts: {id, title, start, end, duration, score, reason, hook, created_at}.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_list_shorts),
+    tool!("update_short", "Rename a short and/or change its source range (start/end, seconds). A new range re-snapshots the CURRENT main cut inside it.",
+        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}, "title": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "short_id"]),
+        agent: false, meta: false, h_update_short),
+    tool!("delete_short", "Delete a short.",
+        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}}), &["project_id", "short_id"]),
+        agent: false, meta: false, h_delete_short),
+    tool!("export_short", "Export one short. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); mp4 renders at the source aspect ratio.",
+        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "short_id", "target", "out_path"]),
+        agent: false, meta: false, h_export_short),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),

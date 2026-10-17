@@ -8,7 +8,7 @@ import type { ProgressEvent } from "../ipc/types";
 import { useExport } from "../ipc/queries";
 import type { ExportTarget } from "../ipc/types";
 
-const TARGETS: { target: ExportTarget; label: string; ext: string }[] = [
+export const EXPORT_TARGETS: { target: ExportTarget; label: string; ext: string }[] = [
   { target: "premiere_xml", label: "Premiere XML", ext: "xml" },
   { target: "fcp_xml", label: "Final Cut XML", ext: "fcpxml" },
   { target: "resolve_xml", label: "Resolve XML", ext: "xml" },
@@ -156,7 +156,7 @@ export function ExportMenu({
               → Send to DaVinci Resolve
             </button>
           )}
-          {TARGETS.map((t) => (
+          {EXPORT_TARGETS.map((t) => (
             <button
               key={t.target}
               className="export-item"

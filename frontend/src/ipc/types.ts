@@ -25,6 +25,9 @@ export type { CutSuggestion } from "./generated/CutSuggestion";
 export type { HistoryEntry } from "./generated/HistoryEntry";
 export type { History } from "./generated/History";
 export type { ThumbnailRef } from "./generated/ThumbnailRef";
+export type { Short } from "./generated/Short";
+export type { ShortSummary } from "./generated/ShortSummary";
+export type { ShortCandidate } from "./generated/ShortCandidate";
 
 import type { Clip } from "./generated/Clip";
 import type { EditAction } from "./generated/EditAction";
@@ -64,7 +67,7 @@ export interface TranscriptChangedEvent { project_id: string }
 export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
   | "projects-changed" | "media-assets-changed" | "confirm-request"
-  | "terminal-output" | "terminal-exit";
+  | "terminal-output" | "terminal-exit" | "shorts-changed";
 
 export interface ConfirmRequestEvent { id: string; summary: string }
 

@@ -26,6 +26,7 @@ pub enum ProgressTask {
     Recording,
     ModelPull,
     RuntimeInstall,
+    Shorts,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +64,10 @@ pub enum CoreEvent {
     /// Project created / duplicated / deleted — refetch the library list.
     ProjectsChanged {},
     TranscriptChanged {
+        project_id: Uuid,
+    },
+    /// Shorts or short candidates changed (by any caller) — refetch them.
+    ShortsChanged {
         project_id: Uuid,
     },
     McpReady {
@@ -122,6 +127,7 @@ impl CoreEvent {
             CoreEvent::MediaAssetsChanged { .. } => "media-assets-changed",
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
+            CoreEvent::ShortsChanged { .. } => "shorts-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
             CoreEvent::ConfirmRequest { .. } => "confirm-request",
             CoreEvent::TerminalOutput { .. } => "terminal-output",

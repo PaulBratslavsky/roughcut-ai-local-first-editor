@@ -11,6 +11,8 @@ import type {
   ProgressEvent,
   Project,
   ProjectSummary,
+  Short,
+  ShortSummary,
   Timeline,
   Transcript,
   TranscriptSegment,
@@ -273,6 +275,42 @@ function requireProject(projectId?: unknown): Project {
   return p;
 }
 
+function includedWithin(tl: Timeline, start: number, end: number): number {
+  return tl.clips
+    .filter((c) => c.included)
+    .reduce((sum, c) => sum + Math.max(0, Math.min(c.source_out, end) - Math.max(c.source_in, start)), 0);
+}
+
+/** The main cut restricted to [start, end] (the core's Timeline::restricted_to). */
+function restrictTimeline(tl: Timeline, start: number, end: number): Timeline {
+  const clips: Clip[] = [];
+  for (const c of tl.clips) {
+    const cuts = [start, end].filter((t) => t > c.source_in && t < c.source_out);
+    const edges = [c.source_in, ...cuts, c.source_out];
+    for (let i = 0; i < edges.length - 1; i++) {
+      const [a, b] = [edges[i], edges[i + 1]];
+      const inside = a >= start && b <= end;
+      clips.push({ ...clone(c), id: `${c.id}-s${clips.length}`, source_in: a, source_out: b, included: c.included && inside });
+    }
+  }
+  clips.forEach((c, i) => (c.order = i));
+  return { ...clone(tl), id: `${tl.id}-short`, clips, cut_count: clips.filter((c) => !c.included).length };
+}
+
+function shortSummary(s: Short): ShortSummary {
+  return {
+    id: s.id,
+    title: s.title,
+    start: s.start,
+    end: s.end,
+    duration: includedWithin(s.timeline, s.start, s.end),
+    score: s.score,
+    reason: s.reason,
+    hook: s.hook,
+    created_at: s.created_at,
+  };
+}
+
 function snapshotOp(timeline: Timeline): EditOp {
   return {
     type: "set_clips",
@@ -434,6 +472,8 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       layout: { mode: "pip", shape: "rounded", corner: "br", size: 0.25 },
       suggestions: [],
       checkpoints: [],
+      shorts: [],
+      short_candidates: [],
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -1175,6 +1215,138 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     };
     const srt = segs.map((s, i) => `${i + 1}\n${fmt(s.start)} --> ${fmt(s.end)}\n${s.text}\n`).join("\n");
     return { srt };
+  },
+
+  // ---- Shorts -----------------------------------------------------------------
+  // Same shape as the core; the finder is a crude stand-in for its heuristic
+  // (sentence windows of the current cut, cold-open penalty, overlap pruning).
+
+  async find_shorts(args): Promise<unknown> {
+    const p = requireProject(args.project_id);
+    const t = state.transcript;
+    if (!t) throw { code: "invalid_arg", message: "no transcript; transcribe first" };
+    await emitProgress("shorts", p.id, ["outlining the video…", "scoring candidates…"], 800);
+    const count = Math.min(20, Math.max(1, Number(args.count ?? 8)));
+    const minS = Number(args.min_s ?? 15);
+    const maxS = Number(args.max_s ?? 60);
+    const speech = t.segments.filter((s) => !s.is_silence && s.text.trim() !== "");
+    const kept = (s: TranscriptSegment) => {
+      const mid = (s.start + s.end) / 2;
+      return p.timeline.clips.some((c) => c.included && c.source_in <= mid && mid < c.source_out);
+    };
+    const usable = speech.map((s) => !s.is_filler && kept(s));
+    const dangling = ["and", "but", "so", "because", "which", "also", "anyway", "then", "or"];
+    type W = { first: number; last: number; start: number; end: number; duration: number; score: number };
+    const windows: W[] = [];
+    for (let i = 0; i < speech.length; i++) {
+      if (!usable[i]) continue;
+      for (let j = i; j < speech.length; j++) {
+        const start = speech[i].start, end = speech[j].end;
+        const duration = includedWithin(p.timeline, start, end);
+        if (duration > maxS) break;
+        if (!usable[j] || duration < minS) continue;
+        const open = speech[i].text.trim();
+        const word = open.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z']/g, "") ?? "";
+        let score = 60;
+        if (dangling.includes(word)) score -= 20;
+        if (open.includes("?")) score += 12;
+        if (/[.!?]$/.test(speech[j].text.trim())) score += 8;
+        score += 10 - Math.min(10, Math.abs(duration - 35) / 3);
+        windows.push({ first: i, last: j, start, end, duration, score });
+      }
+    }
+    windows.sort((a, b) => b.score - a.score || a.start - b.start);
+    const picked: W[] = [];
+    for (const w of windows) {
+      if (picked.length >= count) break;
+      const clash = picked.some((q) => {
+        const inter = Math.max(0, Math.min(q.end, w.end) - Math.max(q.start, w.start));
+        return inter / (Math.max(q.end, w.end) - Math.min(q.start, w.start)) > 0.25;
+      });
+      if (!clash) picked.push(w);
+    }
+    p.short_candidates = picked.map((w, i) => {
+      const hook = speech[w.first].text.trim().replace(/^((um|uh|er|erm|ah|hmm)[,.…]?\s+)+/i, "").replace(/^./, (c) => c.toUpperCase());
+      return {
+        id: `cand-${Date.now()}-${i}`,
+        start: w.start,
+        end: w.end,
+        duration: w.duration,
+        title: hook.split(/\s+/).slice(0, 8).join(" ").replace(/[,.;:]$/, ""),
+        hook,
+        reason: `Mock heuristic; ${Math.round(w.duration)}s`,
+        score: Math.round(Math.min(100, Math.max(0, w.score)) * 10) / 10,
+        segment_ids: speech.slice(w.first, w.last + 1).map((s) => s.id),
+        method: "heuristic",
+      };
+    });
+    return { candidates: clone(p.short_candidates), method: "heuristic" };
+  },
+
+  get_short_candidates(args): unknown {
+    const p = requireProject(args.project_id);
+    return { candidates: clone(p.short_candidates ?? []) };
+  },
+
+  create_short(args): unknown {
+    const p = requireProject(args.project_id);
+    let start: number, end: number, title = "", hook = "", reason = "", score: number | null = null;
+    if (args.candidate_id) {
+      const c = (p.short_candidates ?? []).find((x) => x.id === args.candidate_id);
+      if (!c) throw { code: "not_found", message: `short candidate ${String(args.candidate_id)}` };
+      p.short_candidates = p.short_candidates.filter((x) => x.id !== c.id);
+      ({ start, end, title, hook, reason, score } = c);
+    } else {
+      start = Number(args.start);
+      end = Number(args.end);
+    }
+    if (!(start < end) || start < 0 || start >= p.timeline.duration) {
+      throw { code: "invalid_arg", message: `short range ${start}s–${end}s is invalid` };
+    }
+    const short: Short = {
+      id: `short-${Date.now()}-${p.shorts.length}`,
+      title: String(args.title ?? "").trim() || title || `Short ${p.shorts.length + 1}`,
+      start,
+      end,
+      timeline: restrictTimeline(p.timeline, start, end),
+      score,
+      reason,
+      hook,
+      created_at: new Date().toISOString(),
+    };
+    p.shorts = [...(p.shorts ?? []), short];
+    return { short: shortSummary(short) };
+  },
+
+  list_shorts(args): unknown {
+    const p = requireProject(args.project_id);
+    return { shorts: (p.shorts ?? []).map(shortSummary) };
+  },
+
+  update_short(args): unknown {
+    const p = requireProject(args.project_id);
+    const s = (p.shorts ?? []).find((x) => x.id === args.short_id);
+    if (!s) throw { code: "not_found", message: `short ${String(args.short_id)}` };
+    if (args.start != null || args.end != null) {
+      s.start = args.start != null ? Number(args.start) : s.start;
+      s.end = args.end != null ? Number(args.end) : s.end;
+      s.timeline = restrictTimeline(p.timeline, s.start, s.end);
+    }
+    const title = String(args.title ?? "").trim();
+    if (title) s.title = title;
+    return { short: shortSummary(s) };
+  },
+
+  delete_short(args): unknown {
+    const p = requireProject(args.project_id);
+    p.shorts = (p.shorts ?? []).filter((x) => x.id !== args.short_id);
+    return { deleted: true };
+  },
+
+  async export_short(args) {
+    const p = requireProject(args.project_id);
+    await emitProgress("export", p.id, ["Resolving short…", "Writing file…"], 700);
+    return { path: String(args.out_path ?? "~/Downloads/short.xml") };
   },
 
   // ---- Export -----------------------------------------------------------------

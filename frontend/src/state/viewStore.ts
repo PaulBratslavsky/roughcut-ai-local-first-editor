@@ -39,7 +39,7 @@ function savePrefs(s: PersistedPrefs): void {
   }
 }
 
-export type ActiveTab = "tools" | "chat" | "clips" | "history" | "terminal";
+export type ActiveTab = "tools" | "chat" | "clips" | "shorts" | "history" | "terminal";
 export type AppScreen = "editor" | "recorder";
 
 export interface ViewState {
@@ -64,6 +64,8 @@ export interface ViewState {
   activeTab: ActiveTab;
   /** Collapse the video picture to give the tabs room (audio keeps playing). */
   previewCollapsed: boolean;
+  /** Auditioning a range (a short): playback pauses here. Cleared by any seek. */
+  playUntil: number | null;
 }
 
 export const viewStore = new Store<ViewState>({
@@ -80,6 +82,7 @@ export const viewStore = new Store<ViewState>({
   selectedClipId: null,
   selectedSegmentIds: [],
   activeTab: "tools",
+  playUntil: null,
   ...loadPrefs(),
 });
 
@@ -116,7 +119,27 @@ export function seekTo(t: number): void {
     ...s,
     playhead: Math.max(0, t),
     seekNonce: s.seekNonce + 1,
+    playUntil: null,
   }));
+}
+
+/** Play `[start, end]` once and stop — auditioning a short. */
+export function previewRange(start: number, end: number): void {
+  viewStore.setState((s) => ({
+    ...s,
+    playhead: Math.max(0, start),
+    seekNonce: s.seekNonce + 1,
+    playUntil: end,
+    playing: true,
+  }));
+}
+
+/** The playback clocks call this as time advances: true = the audition is over. */
+export function reachedPlayUntil(t: number): boolean {
+  const until = viewStore.state.playUntil;
+  if (until === null || t < until) return false;
+  viewStore.setState((s) => ({ ...s, playhead: until, playing: false, playUntil: null }));
+  return true;
 }
 
 /** Arrow-key jog: step the playhead and audition audio at the new position. */

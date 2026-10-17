@@ -110,7 +110,17 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `generate_captions { project_id } -> { srt: string }`
 
 ### Export
-- `export { project_id, target: "premiere_xml"|"fcp_xml"|"resolve_xml"|"edl"|"otio"|"mp4"|"srt", out_path } -> { path }`
+- `export { project_id, target: "premiere_xml"|"fcp_xml"|"resolve_xml"|"edl"|"otio"|"mp4"|"srt"|"txt", out_path } -> { path }` — `txt` is the plain-text transcript of the current cut
+
+### Shorts
+A short is a short-form clip (Shorts / Reels / TikTok) cut from the long-form video: its own timeline over the same source — the current cut restricted to a range, snapshotted at creation (main-cut edits and undo don't move it). Project metadata, not journaled.
+- `find_shorts { project_id, count?, min_s?, max_s? } -> { candidates: [ShortCandidate], method: "llm"|"heuristic" }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results), ranked best first by short-form potential (hook, stands alone, payoff). Scored by the on-device model when reachable. Replaces the stored candidates
+- `get_short_candidates { project_id } -> { candidates }` — the latest find_shorts results, no recompute
+- `create_short { project_id, candidate_id? | start, end, title? } -> { short: ShortSummary }` — from a candidate (removes it from the list) or a source range in seconds
+- `list_shorts { project_id } -> { shorts: [ShortSummary] }` — `{ id, title, start, end, duration, score, reason, hook, created_at }`, creation order
+- `update_short { project_id, short_id, title?, start?, end? } -> { short }` — rename and/or re-range (a new range re-snapshots the current cut)
+- `delete_short { project_id, short_id } -> { deleted }`
+- `export_short { project_id, short_id, target, out_path } -> { path }` — the `export` targets over the short's timeline; captions start at the short's 00:00. External (MCP) requests need the user's approval
 
 ### Project / state
 - `create_project { name, file_path? } -> Project`

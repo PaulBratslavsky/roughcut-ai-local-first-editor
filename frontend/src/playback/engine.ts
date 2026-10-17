@@ -9,13 +9,15 @@
 //   - the mock clock runs only without a real <video> (src == null)
 //   - the fade watcher owns volume; everyone else leaves it alone
 //     (except seek, which restores full volume)
+//   - a range audition (playUntil, previewing a short) is ended by whichever
+//     clock reaches it first; any seek cancels it
 //
 // The UI (PreviewPanel) renders controls and calls `onTimeUpdate`; it never
 // touches the video element's clock directly.
 
 import { useEffect, useRef, type RefObject } from "react";
 import { useStore } from "@tanstack/react-store";
-import { setPlayhead, setPlaying, viewStore } from "../state/viewStore";
+import { reachedPlayUntil, setPlayhead, setPlaying, viewStore } from "../state/viewStore";
 import { skipTarget, type Range } from "./time";
 
 export interface PlaybackEngineArgs {
@@ -103,6 +105,7 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
         setPlaying(false);
         return;
       }
+      if (reachedPlayUntil(t)) return;
       setPlayhead(t);
       raf = requestAnimationFrame(tick);
     };
@@ -122,6 +125,11 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
       raf = requestAnimationFrame(tick);
       const v = videoRef.current;
       if (!v || v.paused) return;
+      // A range audition ends on the frame, not on the next ~250ms timeupdate.
+      if (reachedPlayUntil(v.currentTime)) {
+        v.pause();
+        return;
+      }
       if (!viewStore.state.skipCuts) {
         if (v.volume < 1) v.volume = Math.min(1, v.volume + 0.15);
         return;
@@ -161,6 +169,7 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
         t = jump;
       }
     }
+    if (reachedPlayUntil(t)) return;
     setPlayhead(t);
   };
 

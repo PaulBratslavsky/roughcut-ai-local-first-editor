@@ -27,6 +27,8 @@ import type {
   Transcript,
   UndoResult,
   MediaAssets,
+  ShortCandidate,
+  ShortSummary,
 } from "./types";
 
 export const queryKeys = {
@@ -120,11 +122,17 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   const offAssets = onAppEvent("media-assets-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["media-assets"] });
   });
+  // Shorts change from the panel, the chat agent, or an MCP client alike.
+  const offShorts = onAppEvent("shorts-changed", () => {
+    void queryClient.invalidateQueries({ queryKey: ["shorts"] });
+    void queryClient.invalidateQueries({ queryKey: ["short-candidates"] });
+  });
   return () => {
     offTimeline();
     offTranscript();
     offProjects();
     offAssets();
+    offShorts();
   };
 }
 
@@ -139,7 +147,10 @@ export function useCoreEventInvalidation(): void {
 
 function useEditMutation<TArgs extends Record<string, unknown>, TResult>(
   toolName: string,
-  invalidate: ("timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions" | "history")[],
+  invalidate: (
+    | "timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions" | "history"
+    | "shorts" | "short-candidates"
+  )[],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -342,4 +353,66 @@ export function useTranscribe() {
     "project",
     "projects",
   ]);
+}
+
+// ---------------------------------------------------------------------------
+// Shorts
+// ---------------------------------------------------------------------------
+
+export function useShorts(projectId: string | null) {
+  return useQuery({
+    queryKey: ["shorts", projectId ?? "none"],
+    queryFn: () => callTool<{ shorts: ShortSummary[] }>("list_shorts", { project_id: projectId }),
+    enabled: projectId !== null,
+    select: (r) => r.shorts,
+  });
+}
+
+export function useShortCandidates(projectId: string | null) {
+  return useQuery({
+    queryKey: ["short-candidates", projectId ?? "none"],
+    queryFn: () =>
+      callTool<{ candidates: ShortCandidate[] }>("get_short_candidates", { project_id: projectId }),
+    enabled: projectId !== null,
+    select: (r) => r.candidates,
+  });
+}
+
+export interface FindShortsArgs extends Record<string, unknown> {
+  project_id: string;
+  count?: number;
+  min_s?: number;
+  max_s?: number;
+}
+
+export function useFindShorts() {
+  return useEditMutation<FindShortsArgs, { candidates: ShortCandidate[]; method: string }>(
+    "find_shorts",
+    ["short-candidates"],
+  );
+}
+
+export function useCreateShort() {
+  return useEditMutation<
+    { project_id: string; candidate_id?: string; start?: number; end?: number; title?: string },
+    { short: ShortSummary }
+  >("create_short", ["shorts", "short-candidates"]);
+}
+
+export function useUpdateShort() {
+  return useEditMutation<
+    { project_id: string; short_id: string; title?: string; start?: number; end?: number },
+    { short: ShortSummary }
+  >("update_short", ["shorts"]);
+}
+
+export function useDeleteShort() {
+  return useEditMutation<{ project_id: string; short_id: string }, unknown>("delete_short", ["shorts"]);
+}
+
+export function useExportShort() {
+  return useEditMutation<
+    { project_id: string; short_id: string; target: ExportTarget; out_path: string },
+    ExportResult
+  >("export_short", []);
 }

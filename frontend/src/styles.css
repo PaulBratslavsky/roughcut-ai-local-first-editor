@@ -2057,3 +2057,72 @@ input, select { font: inherit; }
 .history-row.original { border-top: 1px solid var(--line); margin-top: 4px; color: var(--fg-dim); }
 
 .history-error { padding: 0 12px 8px; margin: 0; }
+
+/* shorts tab: ranked suggestions, then the shorts you made */
+.shorts-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; height: 100%; min-height: 0; }
+.shorts-note { font-size: 12px; color: var(--fg-dim); margin: 0; }
+.shorts-find { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.shorts-lengths { display: inline-flex; gap: 2px; border: 1px solid var(--line); }
+.shorts-lengths .tab { white-space: nowrap; padding: 4px 10px; font-variant-numeric: tabular-nums; }
+.shorts-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-top: 4px;
+}
+.shorts-method { letter-spacing: 0; text-transform: none; }
+.shorts-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.short-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.short-score {
+  flex-shrink: 0;
+  width: 26px;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.short-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.short-title {
+  align-self: flex-start;
+  max-width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.short-title:hover { text-decoration: underline; }
+.short-title-input {
+  font: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: 1px 4px;
+}
+.short-meta { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.short-hook { color: var(--fg); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.short-reason { color: var(--fg-dim); display: flex; align-items: baseline; gap: 8px; }
+.short-actions { position: relative; flex-shrink: 0; display: flex; gap: 4px; }
+.short-actions .ghost-btn { padding: 3px 8px; }
+.short-delete:hover { background: transparent; border-color: var(--danger); color: var(--danger); }
+.short-actions .export-dropdown.up { top: auto; bottom: calc(100% + 6px); }

@@ -16,6 +16,9 @@ mod edits;
 mod media;
 mod projects;
 mod semantic;
+mod shorts;
+
+pub use shorts::ShortSource;
 
 use crate::adapters::{
     AutoTranscriber, AutoVideoEngine, Embedder, InferenceClient, MockTranscriber,
