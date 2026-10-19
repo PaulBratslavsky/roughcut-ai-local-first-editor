@@ -203,6 +203,39 @@ impl Editor {
         })
     }
 
+    /// Hybrid retrieval over the transcript: BM25 (lexical) fused with
+    /// embedding cosine (semantic) by reciprocal-rank fusion; BM25 alone when
+    /// no index exists. Best first `(segment id, fused score)`, plus which
+    /// method ran ("hybrid" | "bm25").
+    pub async fn hybrid_find(
+        &self,
+        project_id: Uuid,
+        query: &str,
+        k: usize,
+    ) -> Result<(Vec<(Uuid, f64)>, &'static str)> {
+        let semantic = self.semantic_find(project_id, query, k * 2).await?;
+        self.with_project(project_id, |_, t| {
+            let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+            let bm25 = crate::detect::bm25_rank(t, query, k * 2);
+            let mut rrf: HashMap<Uuid, f64> = HashMap::new();
+            for (rank, (seg, _)) in bm25.iter().enumerate() {
+                *rrf.entry(seg.id).or_default() += 1.0 / (60.0 + rank as f64);
+            }
+            let method = if let Some(hits) = &semantic {
+                for (rank, (id, _)) in hits.iter().enumerate() {
+                    *rrf.entry(*id).or_default() += 1.0 / (60.0 + rank as f64);
+                }
+                "hybrid"
+            } else {
+                "bm25"
+            };
+            let mut fused: Vec<(Uuid, f64)> = rrf.into_iter().collect();
+            fused.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+            fused.truncate(k);
+            Ok((fused, method))
+        })
+    }
+
     /// Cosine top-k over the project's index. None = no usable index (caller
     /// falls back to keyword search).
     pub async fn semantic_find(

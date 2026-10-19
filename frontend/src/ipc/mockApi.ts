@@ -1234,6 +1234,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       const mid = (s.start + s.end) / 2;
       return p.timeline.clips.some((c) => c.included && c.source_in <= mid && mid < c.source_out);
     };
+    const theme = String(args.theme ?? "").trim();
+    // Keyword stand-in for the core's hybrid search.
+    const themeWords = theme.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+    const onTheme = (s: TranscriptSegment) =>
+      themeWords.length === 0 || themeWords.some((w) => s.text.toLowerCase().includes(w));
     const usable = speech.map((s) => !s.is_filler && kept(s));
     const dangling = ["and", "but", "so", "because", "which", "also", "anyway", "then", "or"];
     type W = { first: number; last: number; start: number; end: number; duration: number; score: number };
@@ -1245,6 +1250,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         const duration = includedWithin(p.timeline, start, end);
         if (duration > maxS) break;
         if (!usable[j] || duration < minS) continue;
+        if (!speech.slice(i, j + 1).some(onTheme)) continue;
         const open = speech[i].text.trim();
         const word = open.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z']/g, "") ?? "";
         let score = 60;
@@ -1254,6 +1260,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         score += 10 - Math.min(10, Math.abs(duration - 35) / 3);
         windows.push({ first: i, last: j, start, end, duration, score });
       }
+    }
+    if (theme && windows.length === 0) {
+      throw { code: "invalid_arg", message: `nothing in the current cut matches the theme “${theme}” — try different words` };
     }
     windows.sort((a, b) => b.score - a.score || a.start - b.start);
     const picked: W[] = [];
@@ -1274,13 +1283,14 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         duration: w.duration,
         title: hook.split(/\s+/).slice(0, 8).join(" ").replace(/[,.;:]$/, ""),
         hook,
-        reason: `Mock heuristic; ${Math.round(w.duration)}s`,
+        reason: `${theme ? "On theme; " : ""}Mock heuristic; ${Math.round(w.duration)}s`,
         score: Math.round(Math.min(100, Math.max(0, w.score)) * 10) / 10,
         segment_ids: speech.slice(w.first, w.last + 1).map((s) => s.id),
         method: "heuristic",
+        theme: theme || null,
       };
     });
-    return { candidates: clone(p.short_candidates), method: "heuristic" };
+    return { candidates: clone(p.short_candidates), method: "heuristic", theme: theme || null };
   },
 
   get_short_candidates(args): unknown {
@@ -1291,9 +1301,14 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   create_short(args): unknown {
     const p = requireProject(args.project_id);
     let start: number, end: number, title = "", hook = "", reason = "", score: number | null = null;
-    if (args.candidate_id) {
-      const c = (p.short_candidates ?? []).find((x) => x.id === args.candidate_id);
-      if (!c) throw { code: "not_found", message: `short candidate ${String(args.candidate_id)}` };
+    const byRank = args.rank != null ? p.short_candidates?.[Number(args.rank) - 1]?.id : undefined;
+    const candidateId = args.candidate_id ?? byRank;
+    if (args.rank != null && !byRank) {
+      throw { code: "invalid_arg", message: `rank ${String(args.rank)} is out of range` };
+    }
+    if (candidateId) {
+      const c = (p.short_candidates ?? []).find((x) => x.id === candidateId);
+      if (!c) throw { code: "not_found", message: `short candidate ${String(candidateId)}` };
       p.short_candidates = p.short_candidates.filter((x) => x.id !== c.id);
       ({ start, end, title, hook, reason, score } = c);
     } else {

@@ -383,10 +383,12 @@ export interface FindShortsArgs extends Record<string, unknown> {
   count?: number;
   min_s?: number;
   max_s?: number;
+  /** Only moments about this topic. */
+  theme?: string;
 }
 
 export function useFindShorts() {
-  return useEditMutation<FindShortsArgs, { candidates: ShortCandidate[]; method: string }>(
+  return useEditMutation<FindShortsArgs, { candidates: ShortCandidate[]; method: string; theme: string | null }>(
     "find_shorts",
     ["short-candidates"],
   );
@@ -394,7 +396,7 @@ export function useFindShorts() {
 
 export function useCreateShort() {
   return useEditMutation<
-    { project_id: string; candidate_id?: string; start?: number; end?: number; title?: string },
+    { project_id: string; rank?: number; candidate_id?: string; start?: number; end?: number; title?: string },
     { short: ShortSummary }
   >("create_short", ["shorts", "short-candidates"]);
 }

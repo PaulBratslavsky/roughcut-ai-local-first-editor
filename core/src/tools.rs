@@ -677,29 +677,11 @@ handler!(h_find_segments, |e, a, _s| {
     let project_id = arg_uuid(a, "project_id")?;
     let query = arg_str(a, "query")?;
     let limit = (a["limit"].as_u64().unwrap_or(8) as usize).clamp(1, 50);
-    // Hybrid retrieval: BM25 (lexical) fused with embedding cosine (semantic)
-    // by reciprocal-rank fusion; BM25 alone when no index exists.
-    let semantic = e.semantic_find(project_id, query, limit * 2).await?;
+    let (fused, method) = e.hybrid_find(project_id, query, limit).await?;
     e.with_project(project_id, |_, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-        let bm25 = detect::bm25_rank(t, query, limit * 2);
-        let mut rrf: std::collections::HashMap<Uuid, f64> = std::collections::HashMap::new();
-        for (rank, (seg, _)) in bm25.iter().enumerate() {
-            *rrf.entry(seg.id).or_default() += 1.0 / (60.0 + rank as f64);
-        }
-        let method = if let Some(hits) = &semantic {
-            for (rank, (id, _)) in hits.iter().enumerate() {
-                *rrf.entry(*id).or_default() += 1.0 / (60.0 + rank as f64);
-            }
-            "hybrid"
-        } else {
-            "bm25"
-        };
-        let mut fused: Vec<(Uuid, f64)> = rrf.into_iter().collect();
-        fused.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
         let segments: Vec<Value> = fused
             .iter()
-            .take(limit)
             .filter_map(|(id, score)| {
                 t.segment(*id).map(|seg| {
                     let mut v = lean_segment(seg);
@@ -859,10 +841,12 @@ handler!(h_find_shorts, |e, a, _s| {
         count: a["count"].as_u64().map(|n| n as usize).unwrap_or(defaults.count),
         min_s: arg_f64_opt(a, "min_s")?.unwrap_or(defaults.min_s),
         max_s: arg_f64_opt(a, "max_s")?.unwrap_or(defaults.max_s),
+        theme: a["theme"].as_str().map(str::to_string),
     };
     let candidates = crate::shorts::find_shorts(e, arg_uuid(a, "project_id")?, opts).await?;
     let method = candidates.first().map(|c| c.method.clone()).unwrap_or_default();
-    Ok(json!({ "candidates": candidates, "method": method }))
+    let theme = candidates.first().and_then(|c| c.theme.clone());
+    Ok(json!({ "candidates": candidates, "method": method, "theme": theme }))
 });
 
 handler!(h_get_short_candidates, |e, a, _s| {
@@ -870,18 +854,30 @@ handler!(h_get_short_candidates, |e, a, _s| {
 });
 
 handler!(h_create_short, |e, a, _s| {
-    let from = match arg_uuid_opt(a, "candidate_id")? {
-        Some(id) => crate::engine::ShortSource::Candidate(id),
-        None => match (arg_f64_opt(a, "start")?, arg_f64_opt(a, "end")?) {
+    let project_id = arg_uuid(a, "project_id")?;
+    let from = match (arg_uuid_opt(a, "candidate_id")?, a["rank"].as_u64()) {
+        (Some(id), _) => crate::engine::ShortSource::Candidate(id),
+        // Rank, not uuid: small models copy positions reliably, ids not.
+        (None, Some(rank)) => {
+            let candidates = e.get_short_candidates(project_id)?;
+            let c = candidates.get((rank as usize).wrapping_sub(1)).ok_or_else(|| {
+                CoreError::InvalidArg(format!(
+                    "rank {rank} is out of range: there are {} short candidates (run find_shorts first)",
+                    candidates.len()
+                ))
+            })?;
+            crate::engine::ShortSource::Candidate(c.id)
+        }
+        (None, None) => match (arg_f64_opt(a, "start")?, arg_f64_opt(a, "end")?) {
             (Some(start), Some(end)) => crate::engine::ShortSource::Range { start, end },
             _ => {
                 return Err(CoreError::InvalidArg(
-                    "create_short needs candidate_id (from find_shorts) or both start and end (seconds)".into(),
+                    "create_short needs rank or candidate_id (from find_shorts), or both start and end (seconds)".into(),
                 ))
             }
         },
     };
-    let short = e.create_short(arg_uuid(a, "project_id")?, from, a["title"].as_str())?;
+    let short = e.create_short(project_id, from, a["title"].as_str())?;
     Ok(json!({ "short": short }))
 });
 
@@ -1188,14 +1184,14 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
-    tool!("find_shorts", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_short_candidates). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Turn one into a short with create_short.",
-        || obj(json!({"project_id": pid_schema(), "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
+    tool!("find_shorts", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_short_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Turn one into a short with create_short.",
+        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find shorts about this topic (a few words)"}, "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
         agent: true, meta: false, h_find_shorts),
     tool!("get_short_candidates", "The candidates from the latest find_shorts run, best first (no recompute).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_get_short_candidates),
-    tool!("create_short", "Create a short from a find_shorts candidate (candidate_id) or a source range (start + end, seconds). The short is its own timeline: the current cut inside the range, so removed silences/fillers stay removed. Main-cut edits made later don't change it.",
-        || obj(json!({"project_id": pid_schema(), "candidate_id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}}), &["project_id"]),
+    tool!("create_short", "Create a short from a find_shorts candidate — by rank (1 = the top candidate) or candidate_id — or from a source range (start + end, seconds). The short is its own timeline: the current cut inside the range, so removed silences/fillers stay removed. Main-cut edits made later don't change it.",
+        || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_shorts list, 1 = best"}, "candidate_id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}}), &["project_id"]),
         agent: true, meta: false, h_create_short),
     tool!("list_shorts", "List the project's shorts: {id, title, start, end, duration, score, reason, hook, created_at}.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),

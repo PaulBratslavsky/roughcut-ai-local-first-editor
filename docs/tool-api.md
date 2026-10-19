@@ -114,9 +114,9 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Shorts
 A short is a short-form clip (Shorts / Reels / TikTok) cut from the long-form video: its own timeline over the same source — the current cut restricted to a range, snapshotted at creation (main-cut edits and undo don't move it). Project metadata, not journaled.
-- `find_shorts { project_id, count?, min_s?, max_s? } -> { candidates: [ShortCandidate], method: "llm"|"heuristic" }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results), ranked best first by short-form potential (hook, stands alone, payoff). Scored by the on-device model when reachable. Replaces the stored candidates
+- `find_shorts { project_id, theme?, count?, min_s?, max_s? } -> { candidates: [ShortCandidate], method: "llm"|"heuristic", theme }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results), ranked best first by short-form potential (hook, stands alone, payoff). `theme` keeps only moments about that topic (hybrid transcript search, then the model judges relevance); errors when nothing matches. Scored by the on-device model when reachable. Replaces the stored candidates
 - `get_short_candidates { project_id } -> { candidates }` — the latest find_shorts results, no recompute
-- `create_short { project_id, candidate_id? | start, end, title? } -> { short: ShortSummary }` — from a candidate (removes it from the list) or a source range in seconds
+- `create_short { project_id, rank? | candidate_id? | start, end, title? } -> { short: ShortSummary }` — from a candidate by `rank` (1 = top of the latest find_shorts list) or id (removes it from the list), or from a source range in seconds
 - `list_shorts { project_id } -> { shorts: [ShortSummary] }` — `{ id, title, start, end, duration, score, reason, hook, created_at }`, creation order
 - `update_short { project_id, short_id, title?, start?, end? } -> { short }` — rename and/or re-range (a new range re-snapshots the current cut)
 - `delete_short { project_id, short_id } -> { deleted }`

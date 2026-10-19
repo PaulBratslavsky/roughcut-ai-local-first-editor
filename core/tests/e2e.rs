@@ -1037,3 +1037,66 @@ async fn shorts_find_create_export() {
     assert!(names.contains(&"find_shorts".to_string()));
     assert!(!names.contains(&"export_short".to_string()));
 }
+
+#[tokio::test]
+async fn shorts_by_theme_and_from_chat() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "themed", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    let transcript = call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let hiking = transcript["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["text"].as_str().unwrap_or("").contains("hiking"))
+        .expect("fixture has the hiking tangent")["id"]
+        .clone();
+
+    // A theme keeps only moments about it, and is reported back.
+    let found = call(&editor, "find_shorts", json!({ "project_id": pid, "theme": "hiking" })).await;
+    assert_eq!(found["theme"], "hiking");
+    let candidates = found["candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty());
+    for c in candidates {
+        assert!(c["segment_ids"].as_array().unwrap().contains(&hiking), "off-theme candidate: {c}");
+        assert_eq!(c["theme"], "hiking");
+        assert!(c["reason"].as_str().unwrap().contains("On theme") || c["reason"].as_str().unwrap().contains("on theme"));
+    }
+
+    // A theme nothing matches says so instead of returning random clips.
+    let err = tools::dispatch(
+        &editor,
+        "find_shorts",
+        &json!({ "project_id": pid, "theme": "quantum chromodynamics" }),
+        Caller::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("matches the theme"), "got: {err}");
+
+    // Create by rank (what the chat agent uses — positions, not uuids).
+    let created = call(&editor, "create_short", json!({ "project_id": pid, "rank": 1 })).await;
+    assert_eq!(created["short"]["title"], candidates[0]["title"]);
+    let err = tools::dispatch(&editor, "create_short", &json!({ "project_id": pid, "rank": 99 }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("out of range"), "got: {err}");
+
+    // Chat with no model running: a shorts request containing "cut" finds
+    // shorts and never touches the main video.
+    let before = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].clone();
+    let out = call(
+        &editor,
+        "apply_instruction",
+        json!({ "project_id": pid, "instruction": "cut me a couple of shorts about hiking" }),
+    )
+    .await;
+    assert!(out["actions"].as_array().unwrap().is_empty(), "no edits: {out}");
+    assert!(out["summary"].as_str().unwrap().contains("Shorts tab"), "{out}");
+    let after = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].clone();
+    assert_eq!(before, after, "the main video is untouched");
+    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    assert_eq!(stored["candidates"][0]["theme"], "hiking");
+}

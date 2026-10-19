@@ -71,8 +71,9 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **ShortCandidate** (`model.rs`, from `shorts.rs`) — a suggested Short: a
   sentence-aligned stretch of the current cut inside one Beat, scored 0–100 for
   short-form potential (hook, stands alone, payoff) `{ id, start, end, duration,
-  title, hook, reason, score, segment_ids, method: "llm"|"heuristic" }`. The latest
-  `find_shorts` run is persisted on the Project until the next run.
+  title, hook, reason, score, segment_ids, method: "llm"|"heuristic", theme }`. A
+  `theme` restricts candidates to moments the hybrid search finds about it. The
+  latest `find_shorts` run is persisted on the Project until the next run.
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.
 - **Beat** (`story.rs`) — one story unit: `{ title, summary, role, cut_priority
   (1=spine…5=cut first), segment_ids, start, end }`.

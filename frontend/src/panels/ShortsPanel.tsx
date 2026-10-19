@@ -51,6 +51,7 @@ export function ShortsPanel({ projectId }: { projectId: string }) {
   const find = useFindShorts();
   const create = useCreateShort();
   const [lengthIdx, setLengthIdx] = useState(1);
+  const [theme, setTheme] = useState("");
   const [method, setMethod] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const elapsed = useElapsed(find.isPending);
@@ -73,7 +74,13 @@ export function ShortsPanel({ projectId }: { projectId: string }) {
     setProgress(null);
     const len = LENGTHS[lengthIdx];
     find.mutate(
-      { project_id: projectId, count: 8, min_s: len.min_s, max_s: len.max_s },
+      {
+        project_id: projectId,
+        count: 8,
+        min_s: len.min_s,
+        max_s: len.max_s,
+        theme: theme.trim() || undefined,
+      },
       {
         onSuccess: (r) => setMethod(r.method),
         onError: (e) => setError(errText(e)),
@@ -107,6 +114,17 @@ export function ShortsPanel({ projectId }: { projectId: string }) {
         silences and fillers.
       </p>
 
+      <input
+        className="shorts-theme"
+        value={theme}
+        onChange={(e) => setTheme(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !find.isPending) runFind();
+        }}
+        placeholder="about… (optional) — e.g. AI tools, pricing, my guitar plugin"
+        aria-label="Only find shorts about this topic"
+        disabled={find.isPending}
+      />
       <div className="shorts-find">
         <div className="shorts-lengths" role="radiogroup" aria-label="Short length">
           {LENGTHS.map((l, i) => (
@@ -136,7 +154,10 @@ export function ShortsPanel({ projectId }: { projectId: string }) {
       {candidates.length > 0 && (
         <>
           <div className="shorts-label">
-            suggestions
+            <span>
+              suggestions
+              {candidates[0]?.theme && <span className="shorts-method"> · about “{candidates[0].theme}”</span>}
+            </span>
             {shownMethod && (
               <span className="shorts-method">
                 {shownMethod === "llm" ? "scored by the on-device model" : "heuristic — no model reachable"}

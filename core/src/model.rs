@@ -734,6 +734,9 @@ pub struct ShortCandidate {
     pub segment_ids: Vec<Uuid>,
     /// "llm" (scored by the model) | "heuristic" (no model reachable).
     pub method: String,
+    /// The theme it was found for, if the search asked for one.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 /// A named, self-contained snapshot of the timeline — a "save point" the

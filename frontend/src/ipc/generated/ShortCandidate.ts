@@ -16,4 +16,8 @@ score: number, segment_ids: Array<string>,
 /**
  * "llm" (scored by the model) | "heuristic" (no model reachable).
  */
-method: string, };
+method: string, 
+/**
+ * The theme it was found for, if the search asked for one.
+ */
+theme: string | null, };

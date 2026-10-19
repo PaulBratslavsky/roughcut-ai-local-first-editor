@@ -68,6 +68,14 @@ fn system_prompt(project_id: Uuid) -> String {
          ferry segment ids yourself, do not run generate_rough_cut before or \
          after (it only removes fillers and cannot hit a duration), and do not \
          keep cutting past the target. \
+         SHORTS: when the user asks for shorts, reels, TikToks, or short clips \
+         for social media — optionally about a topic — call find_shorts ONCE, \
+         with theme set to the topic in a few words if they named one. It \
+         returns ranked candidates (they also appear in the Shorts tab). To turn \
+         one into a short, call create_short with rank (1 = the top candidate). \
+         A shorts request NEVER cuts the main video: do not call cut tools for \
+         it. ('Make it shorter' or 'make it short' is a length request, not \
+         shorts.) \
          Every change is non-destructive and undoable. When you are done, reply \
          with a one-sentence summary of what you changed instead of calling more \
          tools. \
@@ -252,6 +260,9 @@ pub async fn run_instruction_with(
     // which are silence-only or run their own coherence pass.) Drives the
     // once-per-turn "does this still flow?" advisory after the model finishes.
     let mut narrative_cut_this_turn = false;
+    // Found or created shorts this turn: the receipt points at the Shorts tab
+    // instead of claiming nothing happened.
+    let mut shorts_this_turn = false;
     for step in 0..MAX_STEPS {
         step_text(
             editor,
@@ -331,6 +342,9 @@ pub async fn run_instruction_with(
                     Some(err) => format!(
                         "{text}\n\n[No changes were applied — the last edit failed: {err}]"
                     ),
+                    None if shorts_this_turn => {
+                        format!("{text}\n\n[Main video unchanged — see the Shorts tab.]")
+                    }
                     None => format!("{text}\n\n[No changes were applied.]"),
                 }
             } else {
@@ -345,6 +359,9 @@ pub async fn run_instruction_with(
         }
         messages.push(msg);
         let mut round_mutated = false;
+        // Shorts work is real output even though it never touches the main
+        // cut — it must not trip the read-loop guard, whose nudge says "cut".
+        let mut round_produced = false;
         let mut last_error: Option<String> = None;
         let mut finalize_with: Option<String> = None;
         let _ = &last_turn_error;
@@ -428,6 +445,10 @@ pub async fn run_instruction_with(
                         // Only successes advance the act/read accounting and
                         // enter the repeat cache as plain results.
                         round_mutated |= is_mutating(&name);
+                        if matches!(name.as_str(), "find_shorts" | "create_short") {
+                            round_produced = true;
+                            shorts_this_turn = true;
+                        }
                         if matches!(name.as_str(), "cut_by_transcript" | "cut_range" | "apply_edits")
                         {
                             narrative_cut_this_turn = true;
@@ -493,7 +514,7 @@ pub async fn run_instruction_with(
             readonly_rounds = 0;
             // State changed: cached reads are stale and legit to repeat now.
             seen_calls.clear();
-        } else {
+        } else if !round_produced {
             readonly_rounds += 1;
             if readonly_rounds >= 2 && !steered {
                 steered = true;
@@ -552,6 +573,36 @@ async fn run_instruction_offline(
         step_text(editor, project_id, 1, "final", summary.clone());
         return Ok(InstructionOutcome { actions, summary });
     }
+    // Shorts BEFORE cut: "cut me a few shorts about X" must find shorts, not
+    // cut a sentence out of the main video.
+    if wants_shorts(&lower) {
+        let theme = shorts_theme(&lower);
+        emit_step(
+            editor,
+            project_id,
+            1,
+            "tool_call",
+            Some("find_shorts".into()),
+            Some(json!({ "theme": theme })),
+            None,
+            None,
+        );
+        let opts = crate::shorts::FindOptions { theme: theme.clone(), ..Default::default() };
+        let summary = match crate::shorts::find_shorts(editor, project_id, opts).await {
+            Ok(found) if !found.is_empty() => format!(
+                "Found {} short candidate(s){} — the best is “{}” ({:.0}s). They're in the \
+                 Shorts tab; the main video is untouched.",
+                found.len(),
+                theme.as_deref().map(|t| format!(" about “{t}”")).unwrap_or_default(),
+                found[0].title,
+                found[0].duration,
+            ),
+            Ok(_) => "No short candidates found in the current cut.".to_string(),
+            Err(e) => format!("Couldn't find shorts: {e}"),
+        };
+        step_text(editor, project_id, 2, "final", summary.clone());
+        return Ok(InstructionOutcome { actions: vec![], summary });
+    }
     let wants_cut = ["cut", "remove", "delete", "trim out", "get rid"]
         .iter()
         .any(|k| lower.contains(k));
@@ -592,6 +643,35 @@ async fn run_instruction_offline(
     let summary = format!("Cut the best-matching segment for: “{instruction}”. Undo if it picked wrong.");
     step_text(editor, project_id, 2, "final", summary.clone());
     Ok(InstructionOutcome { actions: vec![action], summary })
+}
+
+/// A request for short-form clips: "shorts", "reels", "tiktoks", or "a short
+/// about/from/clip…". Whole words only — "make it short(er)" is a length
+/// request, and "a short section" is ordinary editing.
+fn wants_shorts(lower: &str) -> bool {
+    let words: Vec<&str> =
+        lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    words.iter().any(|w| matches!(*w, "shorts" | "reel" | "reels" | "tiktok" | "tiktoks"))
+        || words.windows(2).enumerate().any(|(i, pair)| {
+            matches!(pair[0], "a" | "one" | "another" | "new")
+                && pair[1] == "short"
+                && words
+                    .get(i + 2)
+                    .map_or(true, |next| matches!(*next, "about" | "from" | "on" | "of" | "for" | "clip" | "video"))
+        })
+}
+
+/// The topic after "about" / "regarding" / "related to", if the request names one.
+fn shorts_theme(lower: &str) -> Option<String> {
+    ["about ", "regarding ", "related to "].iter().find_map(|marker| {
+        let at = lower.find(marker)?;
+        let theme = lower[at + marker.len()..]
+            .trim()
+            .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+            .trim_end_matches(" please")
+            .trim();
+        (!theme.is_empty()).then(|| theme.to_string())
+    })
 }
 
 fn truncate_json(v: &Value) -> Value {
@@ -808,4 +888,39 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
             "description": sentences.iter().take(4).cloned().collect::<Vec<_>>().join(" "),
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shorts_theme, wants_shorts};
+
+    #[test]
+    fn shorts_intent_is_whole_words_and_not_a_length_request() {
+        for yes in [
+            "find me some shorts",
+            "cut me a couple of shorts about pricing",
+            "make reels from this",
+            "any good tiktoks in here?",
+            "make a short about the guitar plugin",
+            "give me a short",
+        ] {
+            assert!(wants_shorts(yes), "{yes}");
+        }
+        for no in [
+            "make it shorter",
+            "make this short",
+            "cut a short section about my weekend",
+            "remove the shortcut tangent",
+            "tighten the intro",
+        ] {
+            assert!(!wants_shorts(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn shorts_theme_is_the_topic_after_about() {
+        assert_eq!(shorts_theme("find shorts about ai tools."), Some("ai tools".into()));
+        assert_eq!(shorts_theme("reels regarding pricing please"), Some("pricing".into()));
+        assert_eq!(shorts_theme("find me some shorts"), None);
+    }
 }

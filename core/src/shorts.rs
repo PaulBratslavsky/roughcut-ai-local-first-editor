@@ -16,18 +16,21 @@ use crate::story::Beat;
 use serde::Deserialize;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FindOptions {
     /// How many candidates to return.
     pub count: usize,
     /// Playable length bounds, seconds.
     pub min_s: f64,
     pub max_s: f64,
+    /// Only moments about this topic ("AI tools", "pricing"). Located with the
+    /// hybrid transcript search, then judged by the model.
+    pub theme: Option<String>,
 }
 
 impl Default for FindOptions {
     fn default() -> Self {
-        Self { count: 8, min_s: 15.0, max_s: 60.0 }
+        Self { count: 8, min_s: 15.0, max_s: 60.0, theme: None }
     }
 }
 
@@ -58,6 +61,8 @@ const BATCH: usize = 6;
 /// same moment; keep the better one. (Over the union is too lenient: two 30s
 /// clips sharing 13s read as the same short but score only 0.24.)
 const MAX_OVERLAP: f64 = 0.3;
+/// With a theme, model-judged candidates under this are off-topic rejects.
+const MIN_THEMED_SCORE: f64 = 30.0;
 
 /// Find, rank, and persist short candidates for the project's current cut.
 pub async fn find_shorts(
@@ -69,6 +74,7 @@ pub async fn find_shorts(
         count: opts.count.clamp(1, 20),
         min_s: opts.min_s.max(3.0),
         max_s: opts.max_s.max(opts.min_s.max(3.0) + 1.0),
+        theme: opts.theme.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string),
     };
     let (main, speech) = editor.with_project(project_id, |p, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript; transcribe first".into()))?;
@@ -103,6 +109,29 @@ pub async fn find_shorts(
         w.score = score;
         w.signals = signals;
     }
+    if let Some(theme) = &opts.theme {
+        progress(editor, project_id, 0.2, format!("searching for “{theme}”…"));
+        // Generous recall: the model, told the theme, judges what is really
+        // about it. Without a model this ranking is the answer.
+        let k = (speech.len() / 6).clamp(8, 40);
+        let (hits, _) = editor.hybrid_find(project_id, theme, k).await?;
+        let relevance = segment_relevance(&speech, &hits);
+        windows.retain_mut(|w| {
+            let rel = window_relevance(&relevance, w);
+            if rel <= 0.0 {
+                return false;
+            }
+            // On theme first, short-form craft second.
+            w.score = 0.4 * w.score + 60.0 * rel;
+            w.signals.push("on theme");
+            true
+        });
+        if windows.is_empty() {
+            return Err(CoreError::InvalidArg(format!(
+                "nothing in the current cut matches the theme “{theme}” — try different words"
+            )));
+        }
+    }
     let pool = diversify(windows, POOL_MAX.max(opts.count));
 
     let inference = editor.inference()?;
@@ -116,17 +145,27 @@ pub async fn find_shorts(
                 format!("scoring candidates on-device — {done}/{total}"),
             )
         };
-        match llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), on_batch).await {
+        let theme = opts.theme.as_deref();
+        match llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), theme, on_batch).await {
             Ok(scored) => (scored, "llm"),
             Err(_) => (pool, "heuristic"),
         }
     } else {
         (pool, "heuristic")
     };
+    let mut ranked = ranked;
+    if opts.theme.is_some() && method == "llm" {
+        // The model was told to score off-theme clips below 20: trust it and
+        // return fewer, on-topic results rather than pad the list.
+        let keep_best = ranked.iter().any(|w| w.judged && w.score >= MIN_THEMED_SCORE);
+        if keep_best {
+            ranked.retain(|w| !w.judged || w.score >= MIN_THEMED_SCORE);
+        }
+    }
     let picked = diversify(ranked, opts.count);
     progress(editor, project_id, 1.0, format!("found {} short candidates", picked.len()));
     let candidates: Vec<ShortCandidate> =
-        picked.iter().map(|w| to_candidate(&speech, w, method)).collect();
+        picked.iter().map(|w| to_candidate(&speech, w, method, opts.theme.as_deref())).collect();
     editor.set_short_candidates(project_id, candidates.clone())?;
     Ok(candidates)
 }
@@ -141,6 +180,33 @@ fn progress(editor: &Editor, project_id: Uuid, fraction: f64, message: impl Into
             message,
         ),
     );
+}
+
+/// Each speech segment's relevance to the theme, 0..1 (1 = the best hit).
+/// Segments the search didn't return are 0.
+fn segment_relevance(speech: &[TranscriptSegment], hits: &[(Uuid, f64)]) -> Vec<f64> {
+    let top = hits.iter().map(|(_, s)| *s).fold(0.0, f64::max);
+    speech
+        .iter()
+        .map(|seg| {
+            hits.iter()
+                .find(|(id, _)| *id == seg.id)
+                .map(|(_, s)| if top > 0.0 { s / top } else { 0.0 })
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
+/// How much of a window is about the theme, 0..1: its best-matching sentence
+/// dominates; coverage rewards staying on topic throughout. 0 = no hit at all.
+fn window_relevance(relevance: &[f64], w: &Window) -> f64 {
+    let segs = &relevance[w.first..=w.last];
+    let best = segs.iter().copied().fold(0.0, f64::max);
+    if best <= 0.0 {
+        return 0.0;
+    }
+    let coverage = segs.iter().filter(|r| **r > 0.0).count() as f64 / segs.len() as f64;
+    0.7 * best + 0.3 * coverage
 }
 
 /// Which beat each speech segment belongs to (a segment no beat claims
@@ -393,6 +459,7 @@ async fn llm_rescore(
     model: &str,
     speech: &[TranscriptSegment],
     mut pool: Vec<Window>,
+    theme: Option<&str>,
     on_batch: impl Fn(usize, usize),
 ) -> Result<Vec<Window>> {
     #[derive(Deserialize)]
@@ -417,7 +484,8 @@ async fn llm_rescore(
             "required": ["index", "score", "title", "reason"]
         }
     });
-    let system = "You are a short-form video editor (YouTube Shorts, Reels, TikTok). Each \
+    let mut system = String::from(
+        "You are a short-form video editor (YouTube Shorts, Reels, TikTok). Each \
         numbered candidate is a contiguous excerpt from a longer talking-head video. Score how \
         well it works as a STANDALONE short: (1) the first sentence is a hook that stops the \
         scroll; (2) it makes sense with zero context — no 'as I said', no unexplained \
@@ -426,7 +494,14 @@ async fn llm_rescore(
         mediocre, so reserve 80+ for clips you would actually post. Reply with ONLY a JSON \
         array, one object per candidate: [{\"index\": candidate number, \"score\": 0-100, \
         \"title\": a catchy title under 60 characters, \"reason\": one short sentence on why \
-        it works or doesn't}].";
+        it works or doesn't}].",
+    );
+    if let Some(theme) = theme {
+        system.push_str(&format!(
+            " The user wants shorts ABOUT: {theme}. A candidate that is not substantially \
+             about that scores below 20, however well made it is otherwise."
+        ));
+    }
     let mut scored_any = false;
     let batches = pool.len().div_ceil(BATCH);
     on_batch(0, batches);
@@ -449,7 +524,7 @@ async fn llm_rescore(
             inference,
             model,
             "short_scores",
-            system,
+            &system,
             &user,
             0.2,
             Some(&schema),
@@ -496,7 +571,12 @@ fn heuristic_title(open: &str) -> String {
     title
 }
 
-fn to_candidate(speech: &[TranscriptSegment], w: &Window, method: &str) -> ShortCandidate {
+fn to_candidate(
+    speech: &[TranscriptSegment],
+    w: &Window,
+    method: &str,
+    theme: Option<&str>,
+) -> ShortCandidate {
     let open = strip_leading_fillers(&speech[w.first].text);
     let reason = w.reason.clone().unwrap_or_else(|| {
         let mut parts: Vec<String> = w.signals.iter().map(|s| s.to_string()).collect();
@@ -518,6 +598,7 @@ fn to_candidate(speech: &[TranscriptSegment], w: &Window, method: &str) -> Short
         score: (w.score * 10.0).round() / 10.0,
         segment_ids: speech[w.first..=w.last].iter().map(|s| s.id).collect(),
         method: method.to_string(),
+        theme: theme.map(str::to_string),
     }
 }
 
@@ -559,7 +640,7 @@ mod tests {
     }
 
     fn opts(min_s: f64, max_s: f64) -> FindOptions {
-        FindOptions { count: 5, min_s, max_s }
+        FindOptions { count: 5, min_s, max_s, theme: None }
     }
 
     #[test]
@@ -638,9 +719,27 @@ mod tests {
         assert!(signals.contains(&"strong opener"), "the hook still counts once the filler is cut");
         assert!(clean > with_filler);
         let w = ws.iter().find(|w| w.first == 0 && w.last == 1).unwrap();
-        let c = to_candidate(&speech, w, "heuristic");
+        let c = to_candidate(&speech, w, "heuristic", None);
         assert_eq!(c.hook, "Here's the biggest mistake people make.");
         assert!(c.title.starts_with("Here's the biggest"));
+    }
+
+    #[test]
+    fn theme_relevance_needs_a_hit_and_rewards_staying_on_topic() {
+        let speech = speech();
+        let main = Timeline::new(60.0);
+        let ws = candidate_windows(&speech, None, &main, &opts(10.0, 20.0));
+        // The search returned two segments: 3 (best) and 5.
+        let hits = vec![(speech[3].id, 0.04), (speech[5].id, 0.02)];
+        let rel = segment_relevance(&speech, &hits);
+        assert_eq!(rel[3], 1.0);
+        assert_eq!(rel[5], 0.5);
+        assert_eq!(rel[0], 0.0);
+        let window = |first: usize, last: usize| ws.iter().find(|w| w.first == first && w.last == last).unwrap();
+        assert_eq!(window_relevance(&rel, window(0, 1)), 0.0, "no hit → off theme");
+        let both = window_relevance(&rel, window(3, 5));
+        let one = window_relevance(&rel, window(5, 6));
+        assert!(both > one, "{both} vs {one}");
     }
 
     #[test]
@@ -695,7 +794,7 @@ mod tests {
         let pool = diversify(candidate_windows(&speech, None, &main, &opts(10.0, 20.0)), 8);
         let n = pool.len();
         assert!(n >= 3);
-        let scored = llm_rescore(&Favors(n - 1), "m", &speech, pool, |_, _| {}).await.unwrap();
+        let scored = llm_rescore(&Favors(n - 1), "m", &speech, pool, None, |_, _| {}).await.unwrap();
         let best = diversify(scored, 1).remove(0);
         assert_eq!(best.title.as_deref(), Some(format!("Title {}", n - 1).as_str()));
         assert_eq!(best.reason.as_deref(), Some("ok"));
