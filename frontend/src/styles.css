@@ -1940,18 +1940,20 @@ input, select { font: inherit; }
 
 /* dual-mode recorder stage: screen backdrop + docked live camera bubble */
 .recorder-stage.dual { overflow: hidden; }
+/* The stage is black in both themes, so what's drawn on it (backdrop, corner
+   dots) uses the dark theme's ink values as literals instead of tokens. */
 .screen-backdrop {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  color: var(--text-muted);
+  color: #8e939c;
   font-size: 12px;
   background:
     repeating-linear-gradient(45deg, transparent, transparent 14px,
-      color-mix(in srgb, var(--text) 5%, transparent) 14px,
-      color-mix(in srgb, var(--text) 5%, transparent) 15px);
-  border: 1px dashed var(--border-soft);
+      rgba(232, 234, 237, 0.05) 14px,
+      rgba(232, 234, 237, 0.05) 15px);
+  border: 1px dashed #24262c;
 }
 .recorder-preview.as-pip {
   position: absolute;
@@ -1964,8 +1966,8 @@ input, select { font: inherit; }
   position: absolute;
   width: 14px;
   height: 14px;
-  border: 1px solid var(--text-muted);
-  background: var(--bg);
+  border: 1px solid #8e939c;
+  background: #0c0d0f;
   cursor: pointer;
   z-index: 3;
   padding: 0;
@@ -1974,7 +1976,7 @@ input, select { font: inherit; }
 .corner-dot.tr { top: 8px; right: 8px; }
 .corner-dot.bl { bottom: 8px; left: 8px; }
 .corner-dot.br { bottom: 8px; right: 8px; }
-.corner-dot.active, .corner-dot:hover { background: var(--text); border-color: var(--text); }
+.corner-dot.active, .corner-dot:hover { background: #e8eaed; border-color: #e8eaed; }
 .stage-chips {
   position: absolute;
   left: 50%;
