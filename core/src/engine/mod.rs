@@ -18,7 +18,7 @@ mod media;
 mod projects;
 mod semantic;
 
-pub use clips::{ClipChanges, ClipSource};
+pub use clips::{ClipChanges, ClipSource, FaceCrop};
 
 use crate::adapters::{
     AutoTranscriber, AutoVideoEngine, Embedder, InferenceClient, MockTranscriber,

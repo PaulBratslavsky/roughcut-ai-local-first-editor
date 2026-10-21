@@ -434,6 +434,21 @@ function emptyTimeline(): Timeline {
 
 type Args = Record<string, unknown>;
 
+/** Demo footage has no real frames: the mock "finds" a speaker a little
+ *  right of centre, so face framing visibly does something in the browser. */
+const MOCK_FACE_CROP_X = 0.62;
+
+/** Mirror of the core's background face pass for a clip that just became
+ *  9:16 — moves the crop only if nobody moved it meanwhile. */
+function mockAutoCenter(projectId: string, clip: { crop_x: number }): void {
+  const before = clip.crop_x;
+  setTimeout(() => {
+    if (clip.crop_x !== before) return;
+    clip.crop_x = MOCK_FACE_CROP_X;
+    emit("clips-changed", { project_id: projectId });
+  }, 900);
+}
+
 async function emitProgress(task: ProgressEvent["task"], projectId: string, steps: string[], totalMs: number) {
   for (let i = 0; i < steps.length; i++) {
     emit("progress", {
@@ -1375,6 +1390,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       created_at: new Date().toISOString(),
     };
     p.saved_clips = [...(p.saved_clips ?? []), clip];
+    if (clip.format === "vertical") mockAutoCenter(p.id, clip);
     return { clip: clipSummary(clip) };
   },
 
@@ -1396,9 +1412,22 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     }
     const title = String(args.title ?? "").trim();
     if (title) c.title = title;
+    const wasVertical = c.format === "vertical";
     if (args.format === "landscape" || args.format === "vertical") c.format = args.format;
     if (args.crop_x != null) c.crop_x = Math.min(1, Math.max(0, Number(args.crop_x)));
+    if (!wasVertical && args.crop_x == null && c.format === "vertical" && c.crop_x === 0.5) {
+      mockAutoCenter(p.id, c);
+    }
     return { clip: clipSummary(c) };
+  },
+
+  async center_clip_on_face(args) {
+    const p = requireProject(args.project_id);
+    const c = (p.saved_clips ?? []).find((x) => x.id === args.clip_id);
+    if (!c) throw { code: "not_found", message: `clip ${String(args.clip_id)}` };
+    await new Promise((r) => setTimeout(r, 600));
+    c.crop_x = MOCK_FACE_CROP_X;
+    return { clip: clipSummary(c), crop_x: c.crop_x, frames_sampled: 12, frames_with_face: 12 };
   },
 
   delete_clip(args): unknown {

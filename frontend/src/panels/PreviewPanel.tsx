@@ -9,6 +9,7 @@ import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
 import { registerAudibleElement } from "../playback/meter";
 import { usePlaybackEngine } from "../playback/engine";
 import { excludedRanges, excludedTotal, toEditedTime, type Range } from "../playback/time";
+import { CropGuide } from "./CropGuide";
 import {
   seekTo,
   setPlaybackRate,
@@ -239,6 +240,9 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             {videoError}
           </div>
         )}
+
+        {/* A 9:16 clip's crop, when one is being framed (Clips ▸ crop). */}
+        <CropGuide projectId={projectId} frameW={w} frameH={h} />
 
         {/* Big center affordance while paused */}
         {!playing && (

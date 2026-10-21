@@ -926,6 +926,10 @@ handler!(h_create_clip, |e, a, _s| {
         },
     };
     let clip = e.create_clip(project_id, from, a["title"].as_str(), arg_clip_format(a)?)?;
+    if clip.format == crate::model::ClipFormat::Vertical {
+        // Frame the short on the speaker; the crop updates when it lands.
+        e.auto_center_clip(project_id, clip.id);
+    }
     Ok(json!({ "clip": clip }))
 });
 
@@ -941,8 +945,20 @@ handler!(h_update_clip, |e, a, _s| {
         format: arg_clip_format(a)?,
         crop_x: arg_f64_opt(a, "crop_x")?,
     };
-    let clip = e.update_clip(project_id, arg_uuid(a, "clip_id")?, changes)?;
+    let clip_id = arg_uuid(a, "clip_id")?;
+    let was_vertical = e.get_clip(project_id, clip_id)?.format == crate::model::ClipFormat::Vertical;
+    let crop_given = changes.crop_x.is_some();
+    let clip = e.update_clip(project_id, clip_id, changes)?;
+    // Newly 9:16 with the crop never moved: frame it on the speaker.
+    if !was_vertical && !crop_given && clip.format == crate::model::ClipFormat::Vertical && clip.crop_x == 0.5 {
+        e.auto_center_clip(project_id, clip_id);
+    }
     Ok(json!({ "clip": clip }))
+});
+
+handler!(h_center_clip_on_face, |e, a, _s| {
+    let found = e.center_clip_on_face(arg_uuid(a, "project_id")?, arg_uuid(a, "clip_id")?).await?;
+    Ok(serde_json::to_value(found)?)
 });
 
 handler!(h_delete_clip, |e, a, _s| {
@@ -1248,6 +1264,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("update_clip", "Change a saved clip: title; format (landscape | vertical); crop_x (vertical only: 0 = crop the left of the frame, 0.5 = centre, 1 = right); or its pieces (segment_ids / ranges / start+end — re-snapshots the CURRENT main cut inside them).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}, "crop_x": {"type": "number"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_update_clip),
+    tool!("center_clip_on_face", "Frame a clip's 9:16 crop on the speaker: samples frames across the clip, finds faces on-device (Apple Vision), and sets crop_x to centre the median speaker position. Returns {clip, crop_x (null = no confident face, crop unchanged), frames_sampled, frames_with_face}. Runs by itself when a clip is created as, or switched to, vertical. Not for projects that composite a screen recording (set crop_x instead).",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
+        agent: false, meta: false, h_center_clip_on_face),
     tool!("delete_clip", "Delete a saved clip.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_delete_clip),

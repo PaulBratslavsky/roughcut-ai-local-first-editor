@@ -1039,6 +1039,42 @@ async fn clips_find_save_export() {
 }
 
 #[tokio::test]
+async fn clip_face_framing_without_frames_or_on_a_composite() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "faces", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    // A new 9:16 clip kicks off a background face pass. Demo mode has no
+    // frames to grab, so it fails quietly and the crop stays centred.
+    let created = call(
+        &editor,
+        "create_clip",
+        json!({ "project_id": pid, "start": 10.0, "end": 40.0, "format": "vertical" }),
+    )
+    .await;
+    let cid = created["clip"]["id"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let listed = call(&editor, "list_clips", json!({ "project_id": pid })).await;
+    assert_eq!(listed["clips"][0]["crop_x"], 0.5);
+
+    // Asked directly, it says why.
+    let err = tools::dispatch(&editor, "center_clip_on_face", &json!({ "project_id": pid, "clip_id": cid }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ffmpeg"), "got: {err}");
+
+    // A screen + camera project crops the composite: no auto framing.
+    let id = uuid::Uuid::parse_str(&pid).unwrap();
+    editor.attach_screen_media(id, "/demo/screen.mp4").await.unwrap();
+    let err = tools::dispatch(&editor, "center_clip_on_face", &json!({ "project_id": pid, "clip_id": cid }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("screen recording"), "got: {err}");
+}
+
+#[tokio::test]
 async fn clips_by_theme_and_from_chat() {
     let editor = Editor::test_instance();
     let p = call(&editor, "create_project", json!({ "name": "themed", "file_path": "/demo/footage.mp4" })).await;
