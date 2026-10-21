@@ -11,8 +11,10 @@ import type {
   ProgressEvent,
   Project,
   ProjectSummary,
-  Short,
-  ShortSummary,
+  ClipFormat,
+  SavedClip,
+  SavedClipSummary,
+  SourceRange,
   Timeline,
   Transcript,
   TranscriptSegment,
@@ -281,33 +283,71 @@ function includedWithin(tl: Timeline, start: number, end: number): number {
     .reduce((sum, c) => sum + Math.max(0, Math.min(c.source_out, end) - Math.max(c.source_in, start)), 0);
 }
 
-/** The main cut restricted to [start, end] (the core's Timeline::restricted_to). */
-function restrictTimeline(tl: Timeline, start: number, end: number): Timeline {
+/** The main cut restricted to `ranges` (the core's Timeline::restricted_to). */
+function restrictTimeline(tl: Timeline, ranges: SourceRange[]): Timeline {
+  const inside = (a: number, b: number) => ranges.some((r) => a >= r.start && b <= r.end);
+  const edgesAll = ranges.flatMap((r) => [r.start, r.end]);
   const clips: Clip[] = [];
   for (const c of tl.clips) {
-    const cuts = [start, end].filter((t) => t > c.source_in && t < c.source_out);
+    const cuts = edgesAll.filter((t) => t > c.source_in && t < c.source_out).sort((x, y) => x - y);
     const edges = [c.source_in, ...cuts, c.source_out];
     for (let i = 0; i < edges.length - 1; i++) {
       const [a, b] = [edges[i], edges[i + 1]];
-      const inside = a >= start && b <= end;
-      clips.push({ ...clone(c), id: `${c.id}-s${clips.length}`, source_in: a, source_out: b, included: c.included && inside });
+      clips.push({ ...clone(c), id: `${c.id}-s${clips.length}`, source_in: a, source_out: b, included: c.included && inside(a, b) });
     }
   }
   clips.forEach((c, i) => (c.order = i));
-  return { ...clone(tl), id: `${tl.id}-short`, clips, cut_count: clips.filter((c) => !c.included).length };
+  return { ...clone(tl), id: `${tl.id}-clip`, clips, cut_count: clips.filter((c) => !c.included).length };
 }
 
-function shortSummary(s: Short): ShortSummary {
+/** Sorted, merged pieces; throws like the core on a bad range. */
+function normalizeRanges(p: Project, ranges: SourceRange[]): SourceRange[] {
+  if (ranges.length === 0) throw { code: "invalid_arg", message: "a clip needs at least one range" };
+  const sorted = ranges
+    .map((r) => {
+      if (!(r.start < r.end) || r.start < 0 || r.start >= p.timeline.duration) {
+        throw { code: "invalid_arg", message: `range ${r.start}s–${r.end}s is invalid` };
+      }
+      return { start: r.start, end: Math.min(r.end, p.timeline.duration) };
+    })
+    .sort((a, b) => a.start - b.start);
+  const merged: SourceRange[] = [];
+  for (const r of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else merged.push({ ...r });
+  }
+  return merged;
+}
+
+/** Pieces from ranges / segment_ids / start+end, whichever the caller sent. */
+function argRanges(args: Args): SourceRange[] | null {
+  if (Array.isArray(args.ranges)) return (args.ranges as SourceRange[]).map((r) => ({ start: Number(r.start), end: Number(r.end) }));
+  if (Array.isArray(args.segment_ids)) {
+    return (args.segment_ids as string[]).map((id) => {
+      const seg = state.transcript?.segments.find((s) => s.id === id);
+      if (!seg) throw { code: "not_found", message: `segment ${id}` };
+      return { start: seg.start, end: seg.end };
+    });
+  }
+  if (args.start != null && args.end != null) return [{ start: Number(args.start), end: Number(args.end) }];
+  return null;
+}
+
+function clipSummary(c: SavedClip): SavedClipSummary {
   return {
-    id: s.id,
-    title: s.title,
-    start: s.start,
-    end: s.end,
-    duration: includedWithin(s.timeline, s.start, s.end),
-    score: s.score,
-    reason: s.reason,
-    hook: s.hook,
-    created_at: s.created_at,
+    id: c.id,
+    title: c.title,
+    ranges: clone(c.ranges),
+    format: c.format,
+    crop_x: c.crop_x,
+    start: c.start,
+    end: c.end,
+    duration: c.ranges.reduce((sum, r) => sum + includedWithin(c.timeline, r.start, r.end), 0),
+    score: c.score,
+    reason: c.reason,
+    hook: c.hook,
+    created_at: c.created_at,
   };
 }
 
@@ -472,8 +512,8 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       layout: { mode: "pip", shape: "rounded", corner: "br", size: 0.25 },
       suggestions: [],
       checkpoints: [],
-      shorts: [],
-      short_candidates: [],
+      saved_clips: [],
+      clip_candidates: [],
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -1217,15 +1257,15 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return { srt };
   },
 
-  // ---- Shorts -----------------------------------------------------------------
+  // ---- Clips ------------------------------------------------------------------
   // Same shape as the core; the finder is a crude stand-in for its heuristic
   // (sentence windows of the current cut, cold-open penalty, overlap pruning).
 
-  async find_shorts(args): Promise<unknown> {
+  async find_clips(args): Promise<unknown> {
     const p = requireProject(args.project_id);
     const t = state.transcript;
     if (!t) throw { code: "invalid_arg", message: "no transcript; transcribe first" };
-    await emitProgress("shorts", p.id, ["outlining the video…", "scoring candidates…"], 800);
+    await emitProgress("find_clips", p.id, ["outlining the video…", "scoring candidates…"], 800);
     const count = Math.min(20, Math.max(1, Number(args.count ?? 8)));
     const minS = Number(args.min_s ?? 15);
     const maxS = Number(args.max_s ?? 60);
@@ -1274,7 +1314,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       });
       if (!clash) picked.push(w);
     }
-    p.short_candidates = picked.map((w, i) => {
+    p.clip_candidates = picked.map((w, i) => {
       const hook = speech[w.first].text.trim().replace(/^((um|uh|er|erm|ah|hmm)[,.…]?\s+)+/i, "").replace(/^./, (c) => c.toUpperCase());
       return {
         id: `cand-${Date.now()}-${i}`,
@@ -1290,78 +1330,87 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         theme: theme || null,
       };
     });
-    return { candidates: clone(p.short_candidates), method: "heuristic", theme: theme || null };
+    return { candidates: clone(p.clip_candidates), method: "heuristic", theme: theme || null };
   },
 
-  get_short_candidates(args): unknown {
+  get_clip_candidates(args): unknown {
     const p = requireProject(args.project_id);
-    return { candidates: clone(p.short_candidates ?? []) };
+    return { candidates: clone(p.clip_candidates ?? []) };
   },
 
-  create_short(args): unknown {
+  create_clip(args): unknown {
     const p = requireProject(args.project_id);
-    let start: number, end: number, title = "", hook = "", reason = "", score: number | null = null;
-    const byRank = args.rank != null ? p.short_candidates?.[Number(args.rank) - 1]?.id : undefined;
+    let ranges: SourceRange[] | null;
+    let title = "", hook = "", reason = "", score: number | null = null;
+    let format: ClipFormat = "landscape";
+    const byRank = args.rank != null ? p.clip_candidates?.[Number(args.rank) - 1]?.id : undefined;
     const candidateId = args.candidate_id ?? byRank;
     if (args.rank != null && !byRank) {
       throw { code: "invalid_arg", message: `rank ${String(args.rank)} is out of range` };
     }
     if (candidateId) {
-      const c = (p.short_candidates ?? []).find((x) => x.id === candidateId);
-      if (!c) throw { code: "not_found", message: `short candidate ${String(candidateId)}` };
-      p.short_candidates = p.short_candidates.filter((x) => x.id !== c.id);
-      ({ start, end, title, hook, reason, score } = c);
+      const c = (p.clip_candidates ?? []).find((x) => x.id === candidateId);
+      if (!c) throw { code: "not_found", message: `clip candidate ${String(candidateId)}` };
+      p.clip_candidates = p.clip_candidates.filter((x) => x.id !== c.id);
+      ({ title, hook, reason, score } = c);
+      ranges = [{ start: c.start, end: c.end }];
+      format = "vertical";
     } else {
-      start = Number(args.start);
-      end = Number(args.end);
+      ranges = argRanges(args);
+      if (!ranges) throw { code: "invalid_arg", message: "create_clip needs rank, candidate_id, segment_ids, ranges, or start + end" };
     }
-    if (!(start < end) || start < 0 || start >= p.timeline.duration) {
-      throw { code: "invalid_arg", message: `short range ${start}s–${end}s is invalid` };
-    }
-    const short: Short = {
-      id: `short-${Date.now()}-${p.shorts.length}`,
-      title: String(args.title ?? "").trim() || title || `Short ${p.shorts.length + 1}`,
-      start,
-      end,
-      timeline: restrictTimeline(p.timeline, start, end),
+    const pieces = normalizeRanges(p, ranges);
+    const clip: SavedClip = {
+      id: `clip-${Date.now()}-${p.saved_clips.length}`,
+      title: String(args.title ?? "").trim() || title || `Clip ${p.saved_clips.length + 1}`,
+      ranges: pieces,
+      format: (args.format as ClipFormat | undefined) ?? format,
+      crop_x: 0.5,
+      start: pieces[0]!.start,
+      end: pieces[pieces.length - 1]!.end,
+      timeline: restrictTimeline(p.timeline, pieces),
       score,
       reason,
       hook,
       created_at: new Date().toISOString(),
     };
-    p.shorts = [...(p.shorts ?? []), short];
-    return { short: shortSummary(short) };
+    p.saved_clips = [...(p.saved_clips ?? []), clip];
+    return { clip: clipSummary(clip) };
   },
 
-  list_shorts(args): unknown {
+  list_clips(args): unknown {
     const p = requireProject(args.project_id);
-    return { shorts: (p.shorts ?? []).map(shortSummary) };
+    return { clips: (p.saved_clips ?? []).map(clipSummary) };
   },
 
-  update_short(args): unknown {
+  update_clip(args): unknown {
     const p = requireProject(args.project_id);
-    const s = (p.shorts ?? []).find((x) => x.id === args.short_id);
-    if (!s) throw { code: "not_found", message: `short ${String(args.short_id)}` };
-    if (args.start != null || args.end != null) {
-      s.start = args.start != null ? Number(args.start) : s.start;
-      s.end = args.end != null ? Number(args.end) : s.end;
-      s.timeline = restrictTimeline(p.timeline, s.start, s.end);
+    const c = (p.saved_clips ?? []).find((x) => x.id === args.clip_id);
+    if (!c) throw { code: "not_found", message: `clip ${String(args.clip_id)}` };
+    const ranges = argRanges(args);
+    if (ranges) {
+      c.ranges = normalizeRanges(p, ranges);
+      c.start = c.ranges[0]!.start;
+      c.end = c.ranges[c.ranges.length - 1]!.end;
+      c.timeline = restrictTimeline(p.timeline, c.ranges);
     }
     const title = String(args.title ?? "").trim();
-    if (title) s.title = title;
-    return { short: shortSummary(s) };
+    if (title) c.title = title;
+    if (args.format === "landscape" || args.format === "vertical") c.format = args.format;
+    if (args.crop_x != null) c.crop_x = Math.min(1, Math.max(0, Number(args.crop_x)));
+    return { clip: clipSummary(c) };
   },
 
-  delete_short(args): unknown {
+  delete_clip(args): unknown {
     const p = requireProject(args.project_id);
-    p.shorts = (p.shorts ?? []).filter((x) => x.id !== args.short_id);
+    p.saved_clips = (p.saved_clips ?? []).filter((x) => x.id !== args.clip_id);
     return { deleted: true };
   },
 
-  async export_short(args) {
+  async export_clip(args) {
     const p = requireProject(args.project_id);
-    await emitProgress("export", p.id, ["Resolving short…", "Writing file…"], 700);
-    return { path: String(args.out_path ?? "~/Downloads/short.xml") };
+    await emitProgress("export", p.id, ["Resolving clip…", "Writing file…"], 700);
+    return { path: String(args.out_path ?? "~/Downloads/clip.xml") };
   },
 
   // ---- Export -----------------------------------------------------------------

@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod agent;
 pub mod capabilities;
+pub mod clip_finder;
 pub mod demo;
 pub mod detect;
 pub mod download;
@@ -28,7 +29,6 @@ pub mod progress;
 pub mod pty;
 pub mod resolve;
 pub mod setup;
-pub mod shorts;
 pub mod story;
 pub mod store;
 pub mod time;

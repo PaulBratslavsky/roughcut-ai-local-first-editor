@@ -83,23 +83,25 @@ impl Editor {
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
         let (project, transcript) = self.snapshot(project_id)?;
-        self.write_export(&project, transcript.as_ref(), target, out_path).await
+        self.write_export(&project, transcript.as_ref(), target, out_path, None).await
     }
 
-    /// Export one short: the same writers, run over the short's timeline. The
-    /// NLE sequence is named after the short.
-    pub async fn export_short(
+    /// Export one saved clip: the same writers, run over the clip's
+    /// timeline. The NLE sequence is named after the clip; a vertical clip's
+    /// MP4 renders 9:16.
+    pub async fn export_clip(
         &self,
         project_id: Uuid,
-        short_id: Uuid,
+        clip_id: Uuid,
         target: &str,
         out_path: &str,
     ) -> Result<String> {
-        let short = self.get_short(project_id, short_id)?;
+        let clip = self.get_clip(project_id, clip_id)?;
         let (mut project, transcript) = self.snapshot(project_id)?;
-        project.name = format!("{} — {}", project.name, short.title);
-        project.timeline = short.timeline;
-        self.write_export(&project, transcript.as_ref(), target, out_path).await
+        project.name = format!("{} — {}", project.name, clip.title);
+        project.timeline = clip.timeline;
+        let vertical = (clip.format == crate::model::ClipFormat::Vertical).then_some(clip.crop_x);
+        self.write_export(&project, transcript.as_ref(), target, out_path, vertical).await
     }
 
     async fn write_export(
@@ -108,6 +110,7 @@ impl Editor {
         transcript: Option<&Transcript>,
         target: &str,
         out_path: &str,
+        vertical_crop_x: Option<f64>,
     ) -> Result<String> {
         let out_path = &expand_tilde(out_path);
         if target == "mp4" {
@@ -118,6 +121,7 @@ impl Editor {
                 out_path,
                 audio_offset_s: project.audio_offset_s,
                 screen: project.screen_media.as_ref().map(|m| (m, &project.layout)),
+                vertical_crop_x,
             };
             self.video().render_mp4(&job, &self.sink()).await?;
             return Ok(out_path.to_string());

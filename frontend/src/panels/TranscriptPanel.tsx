@@ -20,11 +20,15 @@ import {
   useTranscript,
 } from "../ipc/queries";
 import {
+  addToClipDraft,
+  removeFromClipDraft,
   seekTo,
   selectSegment,
   setSelectedSegmentIds,
   viewStore,
 } from "../state/viewStore";
+import type { Range } from "../playback/time";
+import { ClipDraftBar } from "./ClipDraftBar";
 import { callTool, onAppEvent } from "../ipc/api";
 import type { CutSuggestion, ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
 
@@ -36,16 +40,19 @@ function WordSpan({
   highlight,
   cutWord,
   current,
+  inClip,
 }: {
   word: Word;
   isFiller: boolean;
   highlight: boolean;
   cutWord: boolean;
   current: boolean;
+  /** Part of the clip being assembled ("Add to clip"). */
+  inClip: boolean;
 }) {
   return (
     <span
-      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}${current ? " current" : ""}`}
+      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}${current ? " current" : ""}${inClip ? " inclip" : ""}`}
       data-wstart={word.start}
       data-wend={word.end}
       onClick={(e) => {
@@ -73,6 +80,7 @@ function SegmentBlock({
   onDismissSuggestion,
   silenceAfter,
   onRestoreRange,
+  clipDraft,
 }: {
   seg: TranscriptSegment;
   cut: boolean;
@@ -88,6 +96,7 @@ function SegmentBlock({
   onDismissSuggestion: (id: string) => void;
   silenceAfter?: { start: number; end: number; dur: number };
   onRestoreRange: (start: number, end: number) => void;
+  clipDraft: Range[];
 }) {
   // Word under the playhead — selector returns an index, so this block only
   // re-renders when the spoken word changes (and only while it's active).
@@ -159,6 +168,7 @@ function SegmentBlock({
               highlight={q.length > 0 && normalize(w.text).includes(q)}
               cutWord={wordCut}
               current={i === currentWordIdx}
+              inClip={clipDraft.some((r) => mid >= r.start && mid < r.end)}
             />
           );
         })}
@@ -213,6 +223,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     dismissSuggestion.mutate({ project_id: projectId, suggestion_id: id });
 
   const showCuts = useStore(viewStore, (s) => s.showCuts);
+  const clipDraft = useStore(viewStore, (s) => s.clipDraft);
   const selectedIds = useStore(viewStore, (s) => s.selectedSegmentIds);
 
   const [query, setQuery] = useState("");
@@ -404,7 +415,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
       : `${segIds.length} paragraph${segIds.length === 1 ? "" : "s"}`;
     setMenu({
       x: Math.min(e.clientX || 0, window.innerWidth - 220),
-      y: Math.min(e.clientY || 0, window.innerHeight - 160),
+      y: Math.min(e.clientY || 0, window.innerHeight - 230),
       label,
       range,
       segIds,
@@ -448,6 +459,29 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     } else if (menu.segIds.length > 0) {
       restoreByTranscript.mutate({ project_id: projectId, segment_ids: menu.segIds });
     }
+    finishMenuAction();
+  };
+
+  // The menu's target as clip pieces: the text selection, or each selected
+  // paragraph as its own piece (gaps between them are skipped in the clip).
+  const menuPieces = (): Range[] => {
+    if (!menu) return [];
+    if (menu.range) return [menu.range];
+    return menu.segIds
+      .map((id) => segments.find((s) => s.id === id))
+      .filter((s): s is TranscriptSegment => !!s)
+      .map((s) => ({ start: s.start, end: s.end }));
+  };
+  const menuInClip =
+    !!menu && menuPieces().some((p) => clipDraft.some((r) => r.start < p.end && p.start < r.end));
+
+  const menuAddToClip = () => {
+    menuPieces().forEach(addToClipDraft);
+    finishMenuAction();
+  };
+
+  const menuRemoveFromClip = () => {
+    menuPieces().forEach(removeFromClipDraft);
     finishMenuAction();
   };
 
@@ -588,6 +622,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
                     onDismissSuggestion={onDismissSuggestion}
                     silenceAfter={silenceAfter.get(seg.id)}
                     onRestoreRange={onRestoreRange}
+                    clipDraft={clipDraft}
                   />
                 </div>
               );
@@ -595,9 +630,10 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
           </div>
         )}
       </div>
+      <ClipDraftBar projectId={projectId} />
       <div className="transcript-hint">
         Click a word to seek · ←/→ step words (⌥ frames, ⇧ seconds) · select text + right-click to
-        cut · ⌘-click paragraphs for multi · Delete cuts selection
+        cut or add to a clip · ⌘-click paragraphs for multi · Delete cuts selection
       </div>
 
       {menu && (
@@ -622,6 +658,22 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
             </svg>
             Restore
           </button>
+          <button onClick={menuAddToClip}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="2.5" y="3.5" width="11" height="9" />
+              <path d="M8 6v4M6 8h4" />
+            </svg>
+            Add to clip
+          </button>
+          {menuInClip && (
+            <button onClick={menuRemoveFromClip}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="2.5" y="3.5" width="11" height="9" />
+                <path d="M6 8h4" />
+              </svg>
+              Remove from clip
+            </button>
+          )}
           <button onClick={menuPlayHere}>
             <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" stroke="none">
               <path d="M5 3.5v9l7.5-4.5z" />

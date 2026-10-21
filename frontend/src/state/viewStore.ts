@@ -4,6 +4,7 @@
 // preferences, not session state.
 
 import { Store } from "@tanstack/react-store";
+import type { Range } from "../playback/time";
 
 const PERSIST_KEY = "rc-view-prefs";
 
@@ -39,7 +40,7 @@ function savePrefs(s: PersistedPrefs): void {
   }
 }
 
-export type ActiveTab = "tools" | "chat" | "clips" | "shorts" | "history" | "terminal";
+export type ActiveTab = "tools" | "chat" | "footage" | "clips" | "history" | "terminal";
 export type AppScreen = "editor" | "recorder";
 
 export interface ViewState {
@@ -64,8 +65,12 @@ export interface ViewState {
   activeTab: ActiveTab;
   /** Collapse the video picture to give the tabs room (audio keeps playing). */
   previewCollapsed: boolean;
-  /** Auditioning a range (a short): playback pauses here. Cleared by any seek. */
-  playUntil: number | null;
+  /** Auditioning a clip: play these pieces back to back, then pause. Gaps
+   *  between pieces are skipped. Cleared by any seek. */
+  audition: Range[] | null;
+  /** The clip being assembled in the transcript ("Add to clip"): pieces in
+   *  source order, not yet saved. */
+  clipDraft: Range[];
 }
 
 export const viewStore = new Store<ViewState>({
@@ -82,7 +87,8 @@ export const viewStore = new Store<ViewState>({
   selectedClipId: null,
   selectedSegmentIds: [],
   activeTab: "tools",
-  playUntil: null,
+  audition: null,
+  clipDraft: [],
   ...loadPrefs(),
 });
 
@@ -107,6 +113,8 @@ export function setProjectId(projectId: string | null): void {
       scrollX: 0,
       selectedClipId: null,
       selectedSegmentIds: [],
+      audition: null,
+      clipDraft: [],
     };
   });
 }
@@ -119,28 +127,67 @@ export function seekTo(t: number): void {
     ...s,
     playhead: Math.max(0, t),
     seekNonce: s.seekNonce + 1,
-    playUntil: null,
+    audition: null,
   }));
 }
 
-/** Play `[start, end]` once and stop — auditioning a short. */
-export function previewRange(start: number, end: number): void {
+/** Play these pieces back to back once and stop — auditioning a clip. */
+export function previewRanges(ranges: Range[]): void {
+  const pieces = [...ranges].sort((a, b) => a.start - b.start);
+  if (pieces.length === 0) return;
   viewStore.setState((s) => ({
     ...s,
-    playhead: Math.max(0, start),
+    playhead: Math.max(0, pieces[0]!.start),
     seekNonce: s.seekNonce + 1,
-    playUntil: end,
+    audition: pieces,
     playing: true,
   }));
 }
 
 /** The playback clocks call this as time advances: true = the audition is over. */
-export function reachedPlayUntil(t: number): boolean {
-  const until = viewStore.state.playUntil;
-  if (until === null || t < until) return false;
-  viewStore.setState((s) => ({ ...s, playhead: until, playing: false, playUntil: null }));
+export function reachedAuditionEnd(t: number): boolean {
+  const pieces = viewStore.state.audition;
+  if (pieces === null) return false;
+  const end = pieces[pieces.length - 1]!.end;
+  if (t < end) return false;
+  viewStore.setState((s) => ({ ...s, playhead: end, playing: false, audition: null }));
   return true;
 }
+
+/** The gaps an audition skips: everything between its pieces. */
+export function auditionGaps(): Range[] {
+  const pieces = viewStore.state.audition;
+  if (!pieces) return [];
+  const gaps: Range[] = [];
+  for (let i = 1; i < pieces.length; i++) {
+    if (pieces[i]!.start > pieces[i - 1]!.end) gaps.push({ start: pieces[i - 1]!.end, end: pieces[i]!.start });
+  }
+  return gaps;
+}
+
+/** Add a piece to the clip being assembled; overlapping pieces merge. */
+export function addToClipDraft(piece: Range): void {
+  viewStore.setState((s) => {
+    const all = [...s.clipDraft, piece].sort((a, b) => a.start - b.start);
+    const merged: Range[] = [];
+    for (const r of all) {
+      const last = merged[merged.length - 1];
+      if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+      else merged.push({ ...r });
+    }
+    return { ...s, clipDraft: merged };
+  });
+}
+
+/** Take back every draft piece overlapping `piece`. */
+export function removeFromClipDraft(piece: Range): void {
+  viewStore.setState((s) => ({
+    ...s,
+    clipDraft: s.clipDraft.filter((r) => r.end <= piece.start || r.start >= piece.end),
+  }));
+}
+
+export const clearClipDraft = () => patch({ clipDraft: [] });
 
 /** Arrow-key jog: step the playhead and audition audio at the new position. */
 export function scrubBy(delta: number, max: number): void {

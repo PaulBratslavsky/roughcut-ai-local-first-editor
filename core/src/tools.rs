@@ -835,81 +835,130 @@ handler!(h_export, |e, a, s| {
     Ok(json!({ "path": path }))
 });
 
-handler!(h_find_shorts, |e, a, _s| {
-    let defaults = crate::shorts::FindOptions::default();
-    let opts = crate::shorts::FindOptions {
+handler!(h_find_clips, |e, a, _s| {
+    let defaults = crate::clip_finder::FindOptions::default();
+    let opts = crate::clip_finder::FindOptions {
         count: a["count"].as_u64().map(|n| n as usize).unwrap_or(defaults.count),
         min_s: arg_f64_opt(a, "min_s")?.unwrap_or(defaults.min_s),
         max_s: arg_f64_opt(a, "max_s")?.unwrap_or(defaults.max_s),
         theme: a["theme"].as_str().map(str::to_string),
     };
-    let candidates = crate::shorts::find_shorts(e, arg_uuid(a, "project_id")?, opts).await?;
+    let candidates = crate::clip_finder::find_clips(e, arg_uuid(a, "project_id")?, opts).await?;
     let method = candidates.first().map(|c| c.method.clone()).unwrap_or_default();
     let theme = candidates.first().and_then(|c| c.theme.clone());
     Ok(json!({ "candidates": candidates, "method": method, "theme": theme }))
 });
 
-handler!(h_get_short_candidates, |e, a, _s| {
-    Ok(json!({ "candidates": e.get_short_candidates(arg_uuid(a, "project_id")?)? }))
+handler!(h_get_clip_candidates, |e, a, _s| {
+    Ok(json!({ "candidates": e.get_clip_candidates(arg_uuid(a, "project_id")?)? }))
 });
 
-handler!(h_create_short, |e, a, _s| {
+/// Optional clip format arg: "landscape" (16:9) | "vertical" (9:16).
+fn arg_clip_format(args: &Value) -> Result<Option<crate::model::ClipFormat>> {
+    match args["format"].as_str() {
+        None | Some("") => Ok(None),
+        Some("landscape" | "16:9") => Ok(Some(crate::model::ClipFormat::Landscape)),
+        Some("vertical" | "9:16" | "short") => Ok(Some(crate::model::ClipFormat::Vertical)),
+        Some(other) => Err(CoreError::InvalidArg(format!(
+            "'format' must be \"landscape\" (16:9) or \"vertical\" (9:16), got \"{other}\""
+        ))),
+    }
+}
+
+/// Clip pieces from `ranges` ([{start, end}]), `segment_ids` (whole
+/// sentences), or a single `start`+`end` — whichever the caller sent.
+fn arg_clip_ranges(e: &Editor, project_id: Uuid, args: &Value) -> Result<Option<Vec<crate::model::SourceRange>>> {
+    use crate::model::SourceRange;
+    if let Some(arr) = args["ranges"].as_array() {
+        return arr
+            .iter()
+            .map(|r| match (r["start"].as_f64(), r["end"].as_f64()) {
+                (Some(start), Some(end)) => Ok(SourceRange { start, end }),
+                _ => Err(CoreError::InvalidArg(format!(
+                    "each range must be {{\"start\": seconds, \"end\": seconds}}, got {r}"
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some);
+    }
+    if args["segment_ids"].is_array() {
+        let ids = arg_uuid_vec(args, "segment_ids")?;
+        return e.with_project(project_id, |_, t| {
+            let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+            ids.iter()
+                .map(|id| {
+                    t.segment(*id)
+                        .map(|s| SourceRange { start: s.start, end: s.end })
+                        .ok_or_else(|| CoreError::NotFound(format!("segment {id}")))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(Some)
+        });
+    }
+    match (arg_f64_opt(args, "start")?, arg_f64_opt(args, "end")?) {
+        (Some(start), Some(end)) => Ok(Some(vec![SourceRange { start, end }])),
+        _ => Ok(None),
+    }
+}
+
+handler!(h_create_clip, |e, a, _s| {
     let project_id = arg_uuid(a, "project_id")?;
     let from = match (arg_uuid_opt(a, "candidate_id")?, a["rank"].as_u64()) {
-        (Some(id), _) => crate::engine::ShortSource::Candidate(id),
+        (Some(id), _) => crate::engine::ClipSource::Candidate(id),
         // Rank, not uuid: small models copy positions reliably, ids not.
         (None, Some(rank)) => {
-            let candidates = e.get_short_candidates(project_id)?;
+            let candidates = e.get_clip_candidates(project_id)?;
             let c = candidates.get((rank as usize).wrapping_sub(1)).ok_or_else(|| {
                 CoreError::InvalidArg(format!(
-                    "rank {rank} is out of range: there are {} short candidates (run find_shorts first)",
+                    "rank {rank} is out of range: there are {} clip candidates (run find_clips first)",
                     candidates.len()
                 ))
             })?;
-            crate::engine::ShortSource::Candidate(c.id)
+            crate::engine::ClipSource::Candidate(c.id)
         }
-        (None, None) => match (arg_f64_opt(a, "start")?, arg_f64_opt(a, "end")?) {
-            (Some(start), Some(end)) => crate::engine::ShortSource::Range { start, end },
-            _ => {
+        (None, None) => match arg_clip_ranges(e, project_id, a)? {
+            Some(ranges) => crate::engine::ClipSource::Ranges(ranges),
+            None => {
                 return Err(CoreError::InvalidArg(
-                    "create_short needs rank or candidate_id (from find_shorts), or both start and end (seconds)".into(),
+                    "create_clip needs rank or candidate_id (from find_clips), segment_ids, ranges, or start + end (seconds)".into(),
                 ))
             }
         },
     };
-    let short = e.create_short(project_id, from, a["title"].as_str())?;
-    Ok(json!({ "short": short }))
+    let clip = e.create_clip(project_id, from, a["title"].as_str(), arg_clip_format(a)?)?;
+    Ok(json!({ "clip": clip }))
 });
 
-handler!(h_list_shorts, |e, a, _s| {
-    Ok(json!({ "shorts": e.list_shorts(arg_uuid(a, "project_id")?)? }))
+handler!(h_list_clips, |e, a, _s| {
+    Ok(json!({ "clips": e.list_clips(arg_uuid(a, "project_id")?)? }))
 });
 
-handler!(h_update_short, |e, a, _s| {
-    let short = e.update_short(
-        arg_uuid(a, "project_id")?,
-        arg_uuid(a, "short_id")?,
-        a["title"].as_str(),
-        arg_f64_opt(a, "start")?,
-        arg_f64_opt(a, "end")?,
-    )?;
-    Ok(json!({ "short": short }))
+handler!(h_update_clip, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let changes = crate::engine::ClipChanges {
+        title: a["title"].as_str().map(str::to_string),
+        ranges: arg_clip_ranges(e, project_id, a)?,
+        format: arg_clip_format(a)?,
+        crop_x: arg_f64_opt(a, "crop_x")?,
+    };
+    let clip = e.update_clip(project_id, arg_uuid(a, "clip_id")?, changes)?;
+    Ok(json!({ "clip": clip }))
 });
 
-handler!(h_delete_short, |e, a, _s| {
-    e.delete_short(arg_uuid(a, "project_id")?, arg_uuid(a, "short_id")?)?;
+handler!(h_delete_clip, |e, a, _s| {
+    e.delete_clip(arg_uuid(a, "project_id")?, arg_uuid(a, "clip_id")?)?;
     Ok(json!({ "deleted": true }))
 });
 
-handler!(h_export_short, |e, a, s| {
+handler!(h_export_clip, |e, a, s| {
     let project_id = arg_uuid(a, "project_id")?;
-    let short_id = arg_uuid(a, "short_id")?;
+    let clip_id = arg_uuid(a, "clip_id")?;
     let target = arg_str(a, "target")?.to_string();
     let out_path = arg_str(a, "out_path")?.to_string();
     if s == ActionSource::McpClient
         && !e
             .request_confirmation(&format!(
-                "Export a short as {target} to {out_path}? (requested by an external MCP client)"
+                "Export a clip as {target} to {out_path}? (requested by an external MCP client)"
             ))
             .await
     {
@@ -917,7 +966,7 @@ handler!(h_export_short, |e, a, s| {
             "export denied: the user did not approve this externally-requested write".into(),
         ));
     }
-    let path = e.export_short(project_id, short_id, &target, &out_path).await?;
+    let path = e.export_clip(project_id, clip_id, &target, &out_path).await?;
     Ok(json!({ "path": path }))
 });
 
@@ -1184,27 +1233,27 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
-    tool!("find_shorts", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_short_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Turn one into a short with create_short.",
-        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find shorts about this topic (a few words)"}, "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
-        agent: true, meta: false, h_find_shorts),
-    tool!("get_short_candidates", "The candidates from the latest find_shorts run, best first (no recompute).",
+    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Save one with create_clip (rank).",
+        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
+        agent: true, meta: false, h_find_clips),
+    tool!("get_clip_candidates", "The candidates from the latest find_clips run, best first (no recompute).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
-        agent: true, meta: false, h_get_short_candidates),
-    tool!("create_short", "Create a short from a find_shorts candidate — by rank (1 = the top candidate) or candidate_id — or from a source range (start + end, seconds). The short is its own timeline: the current cut inside the range, so removed silences/fillers stay removed. Main-cut edits made later don't change it.",
-        || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_shorts list, 1 = best"}, "candidate_id": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}}), &["project_id"]),
-        agent: true, meta: false, h_create_short),
-    tool!("list_shorts", "List the project's shorts: {id, title, start, end, duration, score, reason, hook, created_at}.",
+        agent: true, meta: false, h_get_clip_candidates),
+    tool!("create_clip", "Save a CLIP — a standalone edit made of one or more pieces of the video, played back to back, in format landscape (16:9, default for picked pieces) or vertical (9:16 short, default for candidates). Pieces from: rank (1 = top find_clips candidate) or candidate_id; OR segment_ids (whole transcript sentences, any number, from anywhere); OR ranges [{start, end}] in seconds; OR start + end. The clip keeps the current cut's removals inside its pieces, and later main-cut edits don't change it. (Not to be confused with the main timeline's clips that trim_clip / split_clip edit.)",
+        || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_clips list, 1 = best"}, "candidate_id": {"type": "string"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id"]),
+        agent: true, meta: false, h_create_clip),
+    tool!("list_clips", "List saved clips: {id, title, ranges, format, crop_x, start, end, duration, score, reason, hook, created_at}.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
-        agent: true, meta: false, h_list_shorts),
-    tool!("update_short", "Rename a short and/or change its source range (start/end, seconds). A new range re-snapshots the CURRENT main cut inside it.",
-        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}, "title": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "short_id"]),
-        agent: false, meta: false, h_update_short),
-    tool!("delete_short", "Delete a short.",
-        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}}), &["project_id", "short_id"]),
-        agent: false, meta: false, h_delete_short),
-    tool!("export_short", "Export one short. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); mp4 renders at the source aspect ratio.",
-        || obj(json!({"project_id": pid_schema(), "short_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "short_id", "target", "out_path"]),
-        agent: false, meta: false, h_export_short),
+        agent: true, meta: false, h_list_clips),
+    tool!("update_clip", "Change a saved clip: title; format (landscape | vertical); crop_x (vertical only: 0 = crop the left of the frame, 0.5 = centre, 1 = right); or its pieces (segment_ids / ranges / start+end — re-snapshots the CURRENT main cut inside them).",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}, "crop_x": {"type": "number"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "clip_id"]),
+        agent: false, meta: false, h_update_clip),
+    tool!("delete_clip", "Delete a saved clip.",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
+        agent: false, meta: false, h_delete_clip),
+    tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x).",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "clip_id", "target", "out_path"]),
+        agent: false, meta: false, h_export_clip),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),

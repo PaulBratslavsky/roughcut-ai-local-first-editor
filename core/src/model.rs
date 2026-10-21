@@ -409,20 +409,24 @@ impl Timeline {
             .sum()
     }
 
-    /// A copy of this edit restricted to `[start, end]`: everything outside
-    /// the range excluded, the cuts inside it kept. Fresh ids, so the copy
-    /// can be edited without aliasing this timeline's clips.
-    pub fn restricted_to(&self, start: f64, end: f64) -> Timeline {
+    /// A copy of this edit restricted to `ranges` (sorted, non-overlapping):
+    /// everything outside them excluded, the cuts inside them kept. Fresh
+    /// ids, so the copy can be edited without aliasing this timeline's clips.
+    pub fn restricted_to(&self, ranges: &[SourceRange]) -> Timeline {
         let mut tl = self.clone();
         tl.id = Uuid::new_v4();
         for c in &mut tl.clips {
             c.id = Uuid::new_v4();
         }
-        if start > EPS {
-            tl.set_range_included(0.0, start, false, ClipOrigin::Manual);
+        let mut cursor = 0.0;
+        for r in ranges {
+            if r.start > cursor + EPS {
+                tl.set_range_included(cursor, r.start, false, ClipOrigin::Manual);
+            }
+            cursor = cursor.max(r.end);
         }
-        if end < tl.duration - EPS {
-            tl.set_range_included(end, tl.duration, false, ClipOrigin::Manual);
+        if cursor < tl.duration - EPS {
+            tl.set_range_included(cursor, tl.duration, false, ClipOrigin::Manual);
         }
         tl
     }
@@ -648,50 +652,95 @@ pub struct Project {
     /// Named save points (and auto-snapshots before destructive ops).
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
-    /// Short-form clips cut from this video — each its own timeline over the
-    /// same source media.
-    #[serde(default)]
-    pub shorts: Vec<Short>,
-    /// The latest `find_shorts` suggestions, best first. Reviewable, not
-    /// shorts until the user creates one; replaced on each run.
-    #[serde(default)]
-    pub short_candidates: Vec<ShortCandidate>,
+    /// Saved clips cut from this video (16:9 cut-downs or 9:16 shorts) —
+    /// each its own timeline over the same source media. (Not the
+    /// timeline's `Clip`s: those are the partition pieces of the main edit.)
+    #[serde(default, alias = "shorts")]
+    pub saved_clips: Vec<SavedClip>,
+    /// The latest `find_clips` suggestions, best first. Reviewable, not
+    /// clips until the user saves one; replaced on each run.
+    #[serde(default, alias = "short_candidates")]
+    pub clip_candidates: Vec<ClipCandidate>,
 }
 
-/// A short-form clip (Reels/Shorts/TikTok) cut from the long-form video.
-/// Its timeline is the main edit's clips inside `[start, end]` with
-/// everything outside excluded — so the main cut's silence/filler removal
-/// carries over. Snapshotted at creation (and when the range changes):
-/// later edits to the main cut don't move a short underneath you.
+/// A span of the source media, seconds.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SourceRange {
+    pub start: f64,
+    pub end: f64,
+}
+
+/// The frame a saved clip renders in.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipFormat {
+    /// The source frame (16:9): a cut-down for YouTube, a trailer, a quote.
+    Landscape,
+    /// 9:16 for Shorts / Reels / TikTok: a crop of the source frame.
+    Vertical,
+}
+
+impl ClipFormat {
+    /// Clips saved before formats existed were all shorts.
+    fn legacy() -> Self {
+        ClipFormat::Vertical
+    }
+}
+
+/// A clip the user saved: one or more pieces of the long-form video, played
+/// back to back in source order, in a 16:9 or 9:16 frame. Its timeline is the
+/// main edit restricted to those pieces — so the main cut's silence/filler
+/// removal carries over. Snapshotted at save (and when the pieces change):
+/// later edits to the main cut don't move a clip underneath you.
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Short {
+pub struct SavedClip {
     pub id: Uuid,
     pub title: String,
-    /// Source range the short covers, seconds, frame-snapped.
+    /// The pieces, frame-snapped, sorted, non-overlapping.
+    #[serde(default)]
+    pub ranges: Vec<SourceRange>,
+    #[serde(default = "ClipFormat::legacy")]
+    pub format: ClipFormat,
+    /// Vertical only: where the 9:16 crop sits across the source frame
+    /// (0 = left edge, 0.5 = centred, 1 = right edge).
+    #[serde(default = "centred")]
+    pub crop_x: f64,
+    /// The overall span (first piece's start → last piece's end).
     pub start: f64,
     pub end: f64,
     pub timeline: Timeline,
-    /// 0..100 when it came from `find_shorts`; null for a hand-picked range.
+    /// 0..100 when it came from `find_clips`; null for a hand-picked clip.
     pub score: Option<f64>,
-    /// Why it was picked (empty for a hand-picked range).
+    /// Why it was suggested (empty for a hand-picked clip).
     pub reason: String,
     /// The opening line — what has to stop the scroll.
     pub hook: String,
     pub created_at: DateTime<Utc>,
 }
 
-/// The lean short view for listings (no clip dump).
+fn centred() -> f64 {
+    0.5
+}
+
+/// The lean saved-clip view for listings (no clip dump).
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
-pub struct ShortSummary {
+pub struct SavedClipSummary {
     pub id: Uuid,
     pub title: String,
+    pub ranges: Vec<SourceRange>,
+    pub format: ClipFormat,
+    pub crop_x: f64,
     pub start: f64,
     pub end: f64,
-    /// Playable seconds (cuts inside the range don't count).
+    /// Playable seconds (cuts inside the pieces don't count).
     pub duration: f64,
     pub score: Option<f64>,
     pub reason: String,
@@ -699,11 +748,14 @@ pub struct ShortSummary {
     pub created_at: DateTime<Utc>,
 }
 
-impl Short {
-    pub fn summary(&self) -> ShortSummary {
-        ShortSummary {
+impl SavedClip {
+    pub fn summary(&self) -> SavedClipSummary {
+        SavedClipSummary {
             id: self.id,
             title: self.title.clone(),
+            ranges: self.ranges.clone(),
+            format: self.format,
+            crop_x: self.crop_x,
             start: self.start,
             end: self.end,
             duration: self.timeline.included_duration(),
@@ -715,12 +767,12 @@ impl Short {
     }
 }
 
-/// A suggested short from `find_shorts`: a sentence-aligned range of the
+/// A suggested clip from `find_clips`: a sentence-aligned stretch of the
 /// current cut, scored for short-form potential (hook, stands alone, payoff).
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShortCandidate {
+pub struct ClipCandidate {
     pub id: Uuid,
     pub start: f64,
     pub end: f64,
@@ -870,8 +922,19 @@ impl Project {
             layout: Layout::default(),
             suggestions: vec![],
             checkpoints: vec![],
-            shorts: vec![],
-            short_candidates: vec![],
+            saved_clips: vec![],
+            clip_candidates: vec![],
+        }
+    }
+
+    /// Bring a project loaded from an older schema up to date (in memory;
+    /// the next save persists it). Saved clips from before multi-piece clips
+    /// were one `[start, end]` range.
+    pub fn upgrade(&mut self) {
+        for clip in &mut self.saved_clips {
+            if clip.ranges.is_empty() && clip.end > clip.start {
+                clip.ranges = vec![SourceRange { start: clip.start, end: clip.end }];
+            }
         }
     }
 
@@ -928,7 +991,7 @@ mod tests {
     fn restricted_to_keeps_inner_cuts_and_excludes_the_outside() {
         let mut t = Timeline::new(100.0);
         t.set_range_included(30.0, 35.0, false, ClipOrigin::AiCut);
-        let s = t.restricted_to(20.0, 50.0);
+        let s = t.restricted_to(&[SourceRange { start: 20.0, end: 50.0 }]);
         assert!((s.included_duration() - 25.0).abs() < 1e-6, "30s range minus a 5s cut");
         assert!((t.included_within(20.0, 50.0) - 25.0).abs() < 1e-6);
         // The source of truth is untouched and the copy shares no clip ids.
@@ -937,6 +1000,43 @@ mod tests {
         assert_ne!(s.id, t.id);
         // Output time starts at the range start.
         assert!(s.source_to_output(20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn restricted_to_several_pieces_plays_them_back_to_back() {
+        let t = Timeline::new(100.0);
+        let s = t.restricted_to(&[
+            SourceRange { start: 10.0, end: 20.0 },
+            SourceRange { start: 60.0, end: 75.0 },
+        ]);
+        assert!((s.included_duration() - 25.0).abs() < 1e-6);
+        // The second piece starts right where the first one ends.
+        assert!((s.source_to_output(60.0) - 10.0).abs() < 1e-6);
+        assert_eq!(s.included_clips().count(), 2);
+    }
+
+    #[test]
+    fn legacy_shorts_load_as_vertical_single_piece_clips() {
+        let mut p = Project::new("old");
+        p.timeline = Timeline::new(60.0);
+        let mut doc = serde_json::to_value(&p).unwrap();
+        let obj = doc.as_object_mut().unwrap();
+        obj.remove("saved_clips");
+        obj.remove("clip_candidates");
+        obj.insert(
+            "shorts".into(),
+            serde_json::json!([{
+                "id": Uuid::new_v4(), "title": "Old short", "start": 5.0, "end": 25.0,
+                "timeline": Timeline::new(60.0), "score": 80.0, "reason": "r", "hook": "h",
+                "created_at": Utc::now()
+            }]),
+        );
+        let mut loaded: Project = serde_json::from_value(doc).unwrap();
+        loaded.upgrade();
+        let c = &loaded.saved_clips[0];
+        assert_eq!(c.format, ClipFormat::Vertical);
+        assert_eq!(c.ranges, vec![SourceRange { start: 5.0, end: 25.0 }]);
+        assert_eq!(c.crop_x, 0.5);
     }
 
     #[test]

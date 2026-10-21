@@ -26,7 +26,7 @@ pub enum ProgressTask {
     Recording,
     ModelPull,
     RuntimeInstall,
-    Shorts,
+    FindClips,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,8 +66,8 @@ pub enum CoreEvent {
     TranscriptChanged {
         project_id: Uuid,
     },
-    /// Shorts or short candidates changed (by any caller) — refetch them.
-    ShortsChanged {
+    /// Saved clips or clip candidates changed (by any caller) — refetch them.
+    ClipsChanged {
         project_id: Uuid,
     },
     McpReady {
@@ -127,7 +127,7 @@ impl CoreEvent {
             CoreEvent::MediaAssetsChanged { .. } => "media-assets-changed",
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
-            CoreEvent::ShortsChanged { .. } => "shorts-changed",
+            CoreEvent::ClipsChanged { .. } => "clips-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
             CoreEvent::ConfirmRequest { .. } => "confirm-request",
             CoreEvent::TerminalOutput { .. } => "terminal-output",

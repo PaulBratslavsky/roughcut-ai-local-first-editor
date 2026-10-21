@@ -588,6 +588,9 @@ input, select { font: inherit; }
   text-decoration: line-through;
   opacity: 0.4;
 }
+/* In the clip being assembled: a heavy underline rule, so it reads apart from
+   search hits and the playhead block (which are backgrounds). */
+.word.inclip { box-shadow: inset 0 -2px 0 var(--text); border-radius: 0; }
 
 .segment.silence {
   display: flex;
@@ -618,6 +621,32 @@ input, select { font: inherit; }
   padding: 3px 9px;
 }
 .restore-btn:hover { background: rgba(79, 140, 255, 0.22); }
+
+/* The clip being assembled: a status line above the hint bar. */
+.clip-draft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--panel-2);
+}
+.clip-draft-summary { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--text-muted); }
+.clip-draft-title {
+  flex: 1;
+  min-width: 80px;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 0;
+  padding: 3px 6px;
+}
+.clip-draft-title:focus { outline: none; border-color: var(--text); }
+.clip-draft-formats { display: inline-flex; gap: 2px; border: 1px solid var(--border-soft); }
+.clip-draft-formats .tab { padding: 2px 8px; }
+.clip-draft .ghost-btn { padding: 3px 8px; }
 
 .transcript-hint {
   padding: 5px 12px;
@@ -1764,11 +1793,11 @@ input, select { font: inherit; }
 .rec-delete { color: var(--fg-dim); }
 .rec-delete:hover { color: #e5484d; }
 
-/* clips tab */
-.clips-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; }
-.clips-note { font-size: 12px; color: var(--fg-dim); margin: 0; }
-.clips-actions { display: flex; gap: 8px; }
-.clips-lib-label {
+/* footage tab */
+.footage-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; }
+.footage-note { font-size: 12px; color: var(--fg-dim); margin: 0; }
+.footage-actions { display: flex; gap: 8px; }
+.footage-lib-label {
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2058,24 +2087,24 @@ input, select { font: inherit; }
 
 .history-error { padding: 0 12px 8px; margin: 0; }
 
-/* shorts tab: ranked suggestions, then the shorts you made */
-.shorts-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; height: 100%; min-height: 0; }
-.shorts-note { font-size: 12px; color: var(--fg-dim); margin: 0; }
-.shorts-theme {
+/* clips tab: ranked suggestions, then the clips you saved */
+.clips-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; height: 100%; min-height: 0; }
+.clips-note { font-size: 12px; color: var(--text-muted); margin: 0; }
+.clips-theme {
   font: inherit;
   font-size: 12px;
-  color: var(--fg);
+  color: var(--text);
   background: transparent;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-soft);
   border-radius: 0;
   padding: 6px 8px;
 }
-.shorts-theme::placeholder { color: var(--fg-dim); }
-.shorts-theme:focus { outline: none; border-color: var(--fg); }
-.shorts-find { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.shorts-lengths { display: inline-flex; gap: 2px; border: 1px solid var(--line); }
-.shorts-lengths .tab { white-space: nowrap; padding: 4px 10px; font-variant-numeric: tabular-nums; }
-.shorts-label {
+.clips-theme::placeholder { color: var(--text-muted); }
+.clips-theme:focus { outline: none; border-color: var(--text); }
+.clips-find { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.clips-lengths { display: inline-flex; gap: 2px; border: 1px solid var(--border-soft); }
+.clips-lengths .tab { white-space: nowrap; padding: 4px 10px; font-variant-numeric: tabular-nums; }
+.clips-label {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -2083,20 +2112,35 @@ input, select { font: inherit; }
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--fg-dim);
+  color: var(--text-muted);
   margin-top: 4px;
 }
-.shorts-method { letter-spacing: 0; text-transform: none; }
-.shorts-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
-.short-row {
+.clips-method { letter-spacing: 0; text-transform: none; }
+.clips-list { display: flex; flex-direction: column; border-top: 1px solid var(--border-soft); }
+.clip-row {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 8px 2px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-soft);
   font-size: 12px;
 }
-.short-score {
+.clip-format {
+  flex-shrink: 0;
+  width: 42px;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 0;
+  cursor: pointer;
+}
+.clip-format.vertical { background: var(--text); color: var(--bg); border-color: var(--text); }
+.clip-format:hover:not(:disabled) { border-color: var(--text); }
+.clip-score {
   flex-shrink: 0;
   width: 26px;
   font-size: 15px;
@@ -2104,8 +2148,8 @@ input, select { font: inherit; }
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.short-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.short-title {
+.clip-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.clip-title {
   align-self: flex-start;
   max-width: 100%;
   background: none;
@@ -2113,27 +2157,27 @@ input, select { font: inherit; }
   padding: 0;
   font: inherit;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--text);
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
 }
-.short-title:hover { text-decoration: underline; }
-.short-title-input {
+.clip-title:hover { text-decoration: underline; }
+.clip-title-input {
   font: inherit;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--text);
   background: transparent;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-soft);
   border-radius: 0;
   padding: 1px 4px;
 }
-.short-meta { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
-.short-hook { color: var(--fg); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.short-reason { color: var(--fg-dim); display: flex; align-items: baseline; gap: 8px; }
-.short-actions { position: relative; flex-shrink: 0; display: flex; gap: 4px; }
-.short-actions .ghost-btn { padding: 3px 8px; }
-.short-delete:hover { background: transparent; border-color: var(--danger); color: var(--danger); }
-.short-actions .export-dropdown.up { top: auto; bottom: calc(100% + 6px); }
+.clip-meta { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.clip-hook { color: var(--text); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.clip-reason { color: var(--text-muted); display: flex; align-items: baseline; gap: 8px; }
+.clip-actions { position: relative; flex-shrink: 0; display: flex; gap: 4px; }
+.clip-actions .ghost-btn { padding: 3px 8px; }
+.clip-delete:hover { background: transparent; border-color: var(--danger); color: var(--danger); }
+.clip-actions .export-dropdown.up { top: auto; bottom: calc(100% + 6px); }

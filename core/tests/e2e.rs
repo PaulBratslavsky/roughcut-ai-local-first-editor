@@ -912,13 +912,13 @@ async fn set_preferences_patches_and_guards_egress() {
 }
 
 #[tokio::test]
-async fn shorts_find_create_export() {
+async fn clips_find_save_export() {
     let editor = Editor::test_instance();
     let p = call(&editor, "create_project", json!({ "name": "long-form", "file_path": "/demo/footage.mp4" })).await;
     let pid = p["id"].as_str().unwrap().to_string();
 
     // Before a transcript there is nothing to find.
-    let err = tools::dispatch(&editor, "find_shorts", &json!({ "project_id": pid }), Caller::Ui)
+    let err = tools::dispatch(&editor, "find_clips", &json!({ "project_id": pid }), Caller::Ui)
         .await
         .unwrap_err()
         .to_string();
@@ -930,7 +930,7 @@ async fn shorts_find_create_export() {
     // 1. Find: ranked, in bounds, distinct moments, persisted.
     let found = call(
         &editor,
-        "find_shorts",
+        "find_clips",
         json!({ "project_id": pid, "count": 4, "min_s": 15, "max_s": 45 }),
     )
     .await;
@@ -946,36 +946,36 @@ async fn shorts_find_create_export() {
         assert!(!c["hook"].as_str().unwrap().is_empty());
         assert!(!c["reason"].as_str().unwrap().is_empty());
     }
-    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    let stored = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
     assert_eq!(stored["candidates"].as_array().unwrap().len(), candidates.len());
 
-    // 2. Create from a candidate: the short plays exactly the candidate's
+    // 2. Create from a candidate: the clip plays exactly the candidate's
     // stretch of the current cut, and the candidate leaves the list.
     let best = &candidates[0];
     let created = call(
         &editor,
-        "create_short",
+        "create_clip",
         json!({ "project_id": pid, "candidate_id": best["id"] }),
     )
     .await;
-    let short = &created["short"];
-    let sid = short["id"].as_str().unwrap().to_string();
-    assert_eq!(short["title"], best["title"]);
-    assert!((short["duration"].as_f64().unwrap() - best["duration"].as_f64().unwrap()).abs() < 0.1);
-    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    let clip = &created["clip"];
+    let sid = clip["id"].as_str().unwrap().to_string();
+    assert_eq!(clip["title"], best["title"]);
+    assert!((clip["duration"].as_f64().unwrap() - best["duration"].as_f64().unwrap()).abs() < 0.1);
+    let stored = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
     assert_eq!(stored["candidates"].as_array().unwrap().len(), candidates.len() - 1);
 
     // A hand-picked range works too; a bad one names the problem.
     let ranged = call(
         &editor,
-        "create_short",
+        "create_clip",
         json!({ "project_id": pid, "start": 10.0, "end": 40.0, "title": "My pick" }),
     )
     .await;
-    assert_eq!(ranged["short"]["title"], "My pick");
+    assert_eq!(ranged["clip"]["title"], "My pick");
     let err = tools::dispatch(
         &editor,
-        "create_short",
+        "create_clip",
         &json!({ "project_id": pid, "start": 40.0, "end": 10.0 }),
         Caller::Ui,
     )
@@ -984,62 +984,62 @@ async fn shorts_find_create_export() {
     .to_string();
     assert!(err.contains("invalid"), "got: {err}");
 
-    // 3. Shorts are independent of the main cut: undoing the rough cut moves
-    // the main timeline, not the short.
-    let before = call(&editor, "list_shorts", json!({ "project_id": pid })).await["shorts"][0]["duration"]
+    // 3. Saved clips are independent of the main cut: undoing the rough cut moves
+    // the main timeline, not the clip.
+    let before = call(&editor, "list_clips", json!({ "project_id": pid })).await["clips"][0]["duration"]
         .as_f64()
         .unwrap();
     call(&editor, "undo", json!({ "project_id": pid })).await;
-    let after = call(&editor, "list_shorts", json!({ "project_id": pid })).await["shorts"][0]["duration"]
+    let after = call(&editor, "list_clips", json!({ "project_id": pid })).await["clips"][0]["duration"]
         .as_f64()
         .unwrap();
     assert!((before - after).abs() < 1e-9);
 
     // 4. Update: rename + re-range.
-    let start = short["start"].as_f64().unwrap();
+    let start = clip["start"].as_f64().unwrap();
     let updated = call(
         &editor,
-        "update_short",
-        json!({ "project_id": pid, "short_id": sid, "title": "Renamed", "end": start + 20.0 }),
+        "update_clip",
+        json!({ "project_id": pid, "clip_id": sid, "title": "Renamed", "start": start, "end": start + 20.0 }),
     )
     .await;
-    assert_eq!(updated["short"]["title"], "Renamed");
-    assert!(updated["short"]["duration"].as_f64().unwrap() <= 20.0 + 1e-6);
+    assert_eq!(updated["clip"]["title"], "Renamed");
+    assert!(updated["clip"]["duration"].as_f64().unwrap() <= 20.0 + 1e-6);
 
-    // 5. Export: the same writers over the short's timeline. Captions start
-    // at the short's own 00:00:00, not the source time.
-    let dir = std::env::temp_dir().join("roughcut-e2e-shorts");
+    // 5. Export: the same writers over the clip's timeline. Captions start
+    // at the clip's own 00:00:00, not the source time.
+    let dir = std::env::temp_dir().join("roughcut-e2e-clips");
     for (target, needle) in [("edl", "TITLE:"), ("srt", "00:00:00,"), ("txt", " ")] {
-        let out = dir.join(format!("short.{target}"));
+        let out = dir.join(format!("clip.{target}"));
         let r = call(
             &editor,
-            "export_short",
-            json!({ "project_id": pid, "short_id": sid, "target": target, "out_path": out.to_string_lossy() }),
+            "export_clip",
+            json!({ "project_id": pid, "clip_id": sid, "target": target, "out_path": out.to_string_lossy() }),
         )
         .await;
         let content = std::fs::read_to_string(r["path"].as_str().unwrap()).unwrap();
         assert!(content.contains(needle), "{target} export missing {needle}: {content}");
         if target == "edl" {
-            assert!(content.contains("Renamed"), "EDL titled after the short: {content}");
+            assert!(content.contains("Renamed"), "EDL titled after the clip: {content}");
         }
     }
 
     // 6. Persisted with the project; delete removes it.
     let project = call(&editor, "open_project", json!({ "project_id": pid })).await;
-    assert_eq!(project["shorts"].as_array().unwrap().len(), 2);
-    call(&editor, "delete_short", json!({ "project_id": pid, "short_id": sid })).await;
-    let listed = call(&editor, "list_shorts", json!({ "project_id": pid })).await;
-    assert_eq!(listed["shorts"].as_array().unwrap().len(), 1);
+    assert_eq!(project["saved_clips"].as_array().unwrap().len(), 2);
+    call(&editor, "delete_clip", json!({ "project_id": pid, "clip_id": sid })).await;
+    let listed = call(&editor, "list_clips", json!({ "project_id": pid })).await;
+    assert_eq!(listed["clips"].as_array().unwrap().len(), 1);
 
-    // The local agent can find and create shorts but not export them.
+    // The local agent can find and save clips but not export them.
     let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
     let names: Vec<String> = tools::defs(agent).into_iter().map(|d| d.name).collect();
-    assert!(names.contains(&"find_shorts".to_string()));
-    assert!(!names.contains(&"export_short".to_string()));
+    assert!(names.contains(&"find_clips".to_string()));
+    assert!(!names.contains(&"export_clip".to_string()));
 }
 
 #[tokio::test]
-async fn shorts_by_theme_and_from_chat() {
+async fn clips_by_theme_and_from_chat() {
     let editor = Editor::test_instance();
     let p = call(&editor, "create_project", json!({ "name": "themed", "file_path": "/demo/footage.mp4" })).await;
     let pid = p["id"].as_str().unwrap().to_string();
@@ -1053,7 +1053,7 @@ async fn shorts_by_theme_and_from_chat() {
         .clone();
 
     // A theme keeps only moments about it, and is reported back.
-    let found = call(&editor, "find_shorts", json!({ "project_id": pid, "theme": "hiking" })).await;
+    let found = call(&editor, "find_clips", json!({ "project_id": pid, "theme": "hiking" })).await;
     assert_eq!(found["theme"], "hiking");
     let candidates = found["candidates"].as_array().unwrap();
     assert!(!candidates.is_empty());
@@ -1066,7 +1066,7 @@ async fn shorts_by_theme_and_from_chat() {
     // A theme nothing matches says so instead of returning random clips.
     let err = tools::dispatch(
         &editor,
-        "find_shorts",
+        "find_clips",
         &json!({ "project_id": pid, "theme": "quantum chromodynamics" }),
         Caller::Ui,
     )
@@ -1076,16 +1076,16 @@ async fn shorts_by_theme_and_from_chat() {
     assert!(err.contains("matches the theme"), "got: {err}");
 
     // Create by rank (what the chat agent uses — positions, not uuids).
-    let created = call(&editor, "create_short", json!({ "project_id": pid, "rank": 1 })).await;
-    assert_eq!(created["short"]["title"], candidates[0]["title"]);
-    let err = tools::dispatch(&editor, "create_short", &json!({ "project_id": pid, "rank": 99 }), Caller::Ui)
+    let created = call(&editor, "create_clip", json!({ "project_id": pid, "rank": 1 })).await;
+    assert_eq!(created["clip"]["title"], candidates[0]["title"]);
+    let err = tools::dispatch(&editor, "create_clip", &json!({ "project_id": pid, "rank": 99 }), Caller::Ui)
         .await
         .unwrap_err()
         .to_string();
     assert!(err.contains("out of range"), "got: {err}");
 
-    // Chat with no model running: a shorts request containing "cut" finds
-    // shorts and never touches the main video.
+    // Chat with no model running: a shorts request containing "cut" finds clips
+    // and never touches the main video.
     let before = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].clone();
     let out = call(
         &editor,
@@ -1094,9 +1094,88 @@ async fn shorts_by_theme_and_from_chat() {
     )
     .await;
     assert!(out["actions"].as_array().unwrap().is_empty(), "no edits: {out}");
-    assert!(out["summary"].as_str().unwrap().contains("Shorts tab"), "{out}");
+    assert!(out["summary"].as_str().unwrap().contains("Clips tab"), "{out}");
     let after = call(&editor, "get_timeline", json!({ "project_id": pid })).await["cut_count"].clone();
     assert_eq!(before, after, "the main video is untouched");
-    let stored = call(&editor, "get_short_candidates", json!({ "project_id": pid })).await;
+    let stored = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
     assert_eq!(stored["candidates"][0]["theme"], "hiking");
+}
+
+#[tokio::test]
+async fn clips_from_several_pieces_in_either_format() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "pieces", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    let transcript = call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let speech: Vec<&Value> = transcript["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| !s["is_silence"].as_bool().unwrap() && !s["is_filler"].as_bool().unwrap())
+        .collect();
+    let (a, b) = (speech[1], speech[speech.len() - 2]);
+    let len = |s: &Value| s["end"].as_f64().unwrap() - s["start"].as_f64().unwrap();
+
+    // Two sentences from opposite ends of the video, picked by id: one clip,
+    // played back to back, 16:9 by default.
+    let saved = call(
+        &editor,
+        "create_clip",
+        json!({ "project_id": pid, "segment_ids": [b["id"], a["id"]], "title": "Bookends" }),
+    )
+    .await;
+    let clip = &saved["clip"];
+    assert_eq!(clip["format"], "landscape");
+    assert_eq!(clip["ranges"].as_array().unwrap().len(), 2, "two pieces, in source order");
+    assert!(clip["ranges"][0]["start"].as_f64().unwrap() < clip["ranges"][1]["start"].as_f64().unwrap());
+    assert!((clip["duration"].as_f64().unwrap() - (len(a) + len(b))).abs() < 0.1);
+    let cid = clip["id"].as_str().unwrap().to_string();
+
+    // Word-level ranges work too; touching pieces merge.
+    let ranged = call(
+        &editor,
+        "create_clip",
+        json!({ "project_id": pid, "format": "vertical", "ranges": [
+            { "start": 10.0, "end": 20.0 }, { "start": 20.0, "end": 25.0 }, { "start": 100.0, "end": 110.0 }
+        ] }),
+    )
+    .await;
+    assert_eq!(ranged["clip"]["format"], "vertical");
+    assert_eq!(ranged["clip"]["ranges"].as_array().unwrap().len(), 2);
+
+    // Switch format and crop; bad values say what's expected.
+    let updated = call(
+        &editor,
+        "update_clip",
+        json!({ "project_id": pid, "clip_id": cid, "format": "vertical", "crop_x": 0.3 }),
+    )
+    .await;
+    assert_eq!(updated["clip"]["format"], "vertical");
+    assert_eq!(updated["clip"]["crop_x"], 0.3);
+    let err = tools::dispatch(
+        &editor,
+        "update_clip",
+        &json!({ "project_id": pid, "clip_id": cid, "format": "square" }),
+        Caller::Ui,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("landscape"), "got: {err}");
+
+    // The EDL plays the two pieces back to back.
+    let out = std::env::temp_dir().join("roughcut-e2e-clips").join("bookends.edl");
+    let r = call(
+        &editor,
+        "export_clip",
+        json!({ "project_id": pid, "clip_id": cid, "target": "edl", "out_path": out.to_string_lossy() }),
+    )
+    .await;
+    let edl = std::fs::read_to_string(r["path"].as_str().unwrap()).unwrap();
+    let events = edl.lines().filter(|l| l.starts_with("00")).count();
+    assert!(events >= 2, "one event per piece: {edl}");
+
+    // Nothing here touched the main video.
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(tl["cut_count"], 0);
 }

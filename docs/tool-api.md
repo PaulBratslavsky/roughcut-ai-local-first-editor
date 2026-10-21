@@ -112,15 +112,15 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 ### Export
 - `export { project_id, target: "premiere_xml"|"fcp_xml"|"resolve_xml"|"edl"|"otio"|"mp4"|"srt"|"txt", out_path } -> { path }` — `txt` is the plain-text transcript of the current cut
 
-### Shorts
-A short is a short-form clip (Shorts / Reels / TikTok) cut from the long-form video: its own timeline over the same source — the current cut restricted to a range, snapshotted at creation (main-cut edits and undo don't move it). Project metadata, not journaled.
-- `find_shorts { project_id, theme?, count?, min_s?, max_s? } -> { candidates: [ShortCandidate], method: "llm"|"heuristic", theme }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results), ranked best first by short-form potential (hook, stands alone, payoff). `theme` keeps only moments about that topic (hybrid transcript search, then the model judges relevance); errors when nothing matches. Scored by the on-device model when reachable. Replaces the stored candidates
-- `get_short_candidates { project_id } -> { candidates }` — the latest find_shorts results, no recompute
-- `create_short { project_id, rank? | candidate_id? | start, end, title? } -> { short: ShortSummary }` — from a candidate by `rank` (1 = top of the latest find_shorts list) or id (removes it from the list), or from a source range in seconds
-- `list_shorts { project_id } -> { shorts: [ShortSummary] }` — `{ id, title, start, end, duration, score, reason, hook, created_at }`, creation order
-- `update_short { project_id, short_id, title?, start?, end? } -> { short }` — rename and/or re-range (a new range re-snapshots the current cut)
-- `delete_short { project_id, short_id } -> { deleted }`
-- `export_short { project_id, short_id, target, out_path } -> { path }` — the `export` targets over the short's timeline; captions start at the short's 00:00. External (MCP) requests need the user's approval
+### Clips
+A saved clip is a standalone edit made of one or more pieces of the long-form video, played back to back in source order, in a 16:9 (`landscape`) or 9:16 (`vertical`, a short) frame. Its timeline is the current cut restricted to those pieces, snapshotted at save (main-cut edits and undo don't move it). Project metadata, not journaled. Not to be confused with the main timeline's clips (`trim_clip`, `split_clip`).
+- `find_clips { project_id, theme?, count?, min_s?, max_s? } -> { candidates: [ClipCandidate], method: "llm"|"heuristic", theme }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results) that work as standalone shorts, ranked best first (hook, stands alone, payoff). `theme` keeps only moments about that topic (hybrid transcript search, then the model judges relevance); errors when nothing matches. Scored by the on-device model when reachable. Replaces the stored candidates
+- `get_clip_candidates { project_id } -> { candidates }` — the latest find_clips results, no recompute
+- `create_clip { project_id, rank? | candidate_id? | segment_ids? | ranges? | start, end, title?, format? } -> { clip: SavedClipSummary }` — from a candidate by `rank` (1 = top) or id (removes it from the list; defaults to `vertical`), or from pieces: `segment_ids` (whole sentences, anywhere), `ranges: [{start, end}]`, or one `start`+`end` (defaults to `landscape`). Touching pieces merge
+- `list_clips { project_id } -> { clips: [SavedClipSummary] }` — `{ id, title, ranges, format, crop_x, start, end, duration, score, reason, hook, created_at }`, creation order
+- `update_clip { project_id, clip_id, title?, format?, crop_x?, segment_ids? | ranges? | start, end } -> { clip }` — rename, switch format, move the vertical crop (`crop_x` 0 = left … 0.5 = centre … 1 = right), or replace the pieces (re-snapshots the current cut)
+- `delete_clip { project_id, clip_id } -> { deleted }`
+- `export_clip { project_id, clip_id, target, out_path } -> { path }` — the `export` targets over the clip's timeline; captions start at the clip's 00:00. A vertical clip's `mp4` renders 1080×1920, a full-height crop at `crop_x`. External (MCP) requests need the user's approval
 
 ### Project / state
 - `create_project { name, file_path? } -> Project`

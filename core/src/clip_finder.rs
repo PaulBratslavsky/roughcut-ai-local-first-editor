@@ -1,5 +1,5 @@
-//! Shorts: find the moments of a long-form video that work as standalone
-//! short-form clips (Shorts / Reels / TikTok) and rank them.
+//! The clip finder: find the moments of a long-form video that work as
+//! standalone short-form clips (Shorts / Reels / TikTok) and rank them.
 //!
 //! Same design rule as `story.rs`: deterministic scaffolding with the model
 //! embedded in ONE step. Candidates are generated without a model
@@ -11,7 +11,7 @@
 use crate::adapters::InferenceClient;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
-use crate::model::{ShortCandidate, Timeline, TranscriptSegment};
+use crate::model::{ClipCandidate, Timeline, TranscriptSegment};
 use crate::story::Beat;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -64,12 +64,12 @@ const MAX_OVERLAP: f64 = 0.3;
 /// With a theme, model-judged candidates under this are off-topic rejects.
 const MIN_THEMED_SCORE: f64 = 30.0;
 
-/// Find, rank, and persist short candidates for the project's current cut.
-pub async fn find_shorts(
+/// Find, rank, and persist clip candidates for the project's current cut.
+pub async fn find_clips(
     editor: &Editor,
     project_id: Uuid,
     opts: FindOptions,
-) -> Result<Vec<ShortCandidate>> {
+) -> Result<Vec<ClipCandidate>> {
     let opts = FindOptions {
         count: opts.count.clamp(1, 20),
         min_s: opts.min_s.max(3.0),
@@ -163,10 +163,10 @@ pub async fn find_shorts(
         }
     }
     let picked = diversify(ranked, opts.count);
-    progress(editor, project_id, 1.0, format!("found {} short candidates", picked.len()));
-    let candidates: Vec<ShortCandidate> =
+    progress(editor, project_id, 1.0, format!("found {} clip candidates", picked.len()));
+    let candidates: Vec<ClipCandidate> =
         picked.iter().map(|w| to_candidate(&speech, w, method, opts.theme.as_deref())).collect();
-    editor.set_short_candidates(project_id, candidates.clone())?;
+    editor.set_clip_candidates(project_id, candidates.clone())?;
     Ok(candidates)
 }
 
@@ -174,7 +174,7 @@ fn progress(editor: &Editor, project_id: Uuid, fraction: f64, message: impl Into
     crate::events::send(
         &editor.sink(),
         crate::events::CoreEvent::progress(
-            crate::events::ProgressTask::Shorts,
+            crate::events::ProgressTask::FindClips,
             Some(project_id),
             fraction,
             message,
@@ -556,7 +556,7 @@ async fn llm_rescore(
         on_batch(batch_no + 1, batches);
     }
     if !scored_any {
-        return Err(CoreError::Inference("model scored no short candidates".into()));
+        return Err(CoreError::Inference("model scored no clip candidates".into()));
     }
     Ok(pool)
 }
@@ -576,7 +576,7 @@ fn to_candidate(
     w: &Window,
     method: &str,
     theme: Option<&str>,
-) -> ShortCandidate {
+) -> ClipCandidate {
     let open = strip_leading_fillers(&speech[w.first].text);
     let reason = w.reason.clone().unwrap_or_else(|| {
         let mut parts: Vec<String> = w.signals.iter().map(|s| s.to_string()).collect();
@@ -587,7 +587,7 @@ fn to_candidate(
         }
         r
     });
-    ShortCandidate {
+    ClipCandidate {
         id: Uuid::new_v4(),
         start: w.start,
         end: w.end,

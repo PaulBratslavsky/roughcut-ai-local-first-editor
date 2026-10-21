@@ -9,15 +9,16 @@
 //   - the mock clock runs only without a real <video> (src == null)
 //   - the fade watcher owns volume; everyone else leaves it alone
 //     (except seek, which restores full volume)
-//   - a range audition (playUntil, previewing a short) is ended by whichever
-//     clock reaches it first; any seek cancels it
+//   - a clip audition (previewing a clip's pieces) skips the gaps between
+//     them even with skip-cuts off, and is ended by whichever clock reaches
+//     its last piece first; any seek cancels it
 //
 // The UI (PreviewPanel) renders controls and calls `onTimeUpdate`; it never
 // touches the video element's clock directly.
 
 import { useEffect, useRef, type RefObject } from "react";
 import { useStore } from "@tanstack/react-store";
-import { reachedPlayUntil, setPlayhead, setPlaying, viewStore } from "../state/viewStore";
+import { auditionGaps, reachedAuditionEnd, setPlayhead, setPlaying, viewStore } from "../state/viewStore";
 import { skipTarget, type Range } from "./time";
 
 export interface PlaybackEngineArgs {
@@ -36,6 +37,15 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
   rangesRef.current = ranges;
   const durationRef = useRef(duration);
   durationRef.current = duration;
+
+  // What playback skips right now: the cuts (when skipping them) plus,
+  // during a clip audition, the gaps between its pieces. Sorted (skipTarget
+  // scans in order).
+  const skipRanges = (): Range[] => {
+    const cuts = viewStore.state.skipCuts ? rangesRef.current : [];
+    const gaps = auditionGaps();
+    return gaps.length ? [...cuts, ...gaps].sort((a, b) => a.start - b.start) : cuts;
+  };
 
   // --- seek-follow: the <video> element follows seek requests -------------
   const seekNonce = useStore(viewStore, (s) => s.seekNonce);
@@ -96,16 +106,14 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
       const dt = (now - last) / 1000;
       last = now;
       let t = viewStore.state.playhead + dt * viewStore.state.playbackRate;
-      if (viewStore.state.skipCuts) {
-        const jump = skipTarget(t, rangesRef.current);
-        if (jump !== null) t = jump;
-      }
+      const jump = skipTarget(t, skipRanges());
+      if (jump !== null) t = jump;
       if (t >= durationRef.current && durationRef.current > 0) {
         setPlayhead(durationRef.current);
         setPlaying(false);
         return;
       }
-      if (reachedPlayUntil(t)) return;
+      if (reachedAuditionEnd(t)) return;
       setPlayhead(t);
       raf = requestAnimationFrame(tick);
     };
@@ -126,16 +134,17 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
       const v = videoRef.current;
       if (!v || v.paused) return;
       // A range audition ends on the frame, not on the next ~250ms timeupdate.
-      if (reachedPlayUntil(v.currentTime)) {
+      if (reachedAuditionEnd(v.currentTime)) {
         v.pause();
         return;
       }
-      if (!viewStore.state.skipCuts) {
+      const ranges = skipRanges();
+      if (ranges.length === 0) {
         if (v.volume < 1) v.volume = Math.min(1, v.volume + 0.15);
         return;
       }
       const t = v.currentTime;
-      const upcoming = rangesRef.current.find((r) => t >= r.start - FADE_S && t < r.end);
+      const upcoming = ranges.find((r) => t >= r.start - FADE_S && t < r.end);
       if (upcoming) {
         if (t < upcoming.start) {
           // Approaching the cut: proportional fade-out.
@@ -162,14 +171,12 @@ export function usePlaybackEngine({ videoRef, src, ranges, duration }: PlaybackE
     if (!v) return;
     if (auditioningRef.current) return; // scrub audition: playhead stays put
     let t = v.currentTime;
-    if (viewStore.state.skipCuts) {
-      const jump = skipTarget(t, rangesRef.current);
-      if (jump !== null) {
-        v.currentTime = jump;
-        t = jump;
-      }
+    const jump = skipTarget(t, skipRanges());
+    if (jump !== null) {
+      v.currentTime = jump;
+      t = jump;
     }
-    if (reachedPlayUntil(t)) return;
+    if (reachedAuditionEnd(t)) return;
     setPlayhead(t);
   };
 

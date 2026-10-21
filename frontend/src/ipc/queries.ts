@@ -27,8 +27,10 @@ import type {
   Transcript,
   UndoResult,
   MediaAssets,
-  ShortCandidate,
-  ShortSummary,
+  ClipCandidate,
+  ClipFormat,
+  SavedClipSummary,
+  SourceRange,
 } from "./types";
 
 export const queryKeys = {
@@ -122,17 +124,17 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   const offAssets = onAppEvent("media-assets-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["media-assets"] });
   });
-  // Shorts change from the panel, the chat agent, or an MCP client alike.
-  const offShorts = onAppEvent("shorts-changed", () => {
-    void queryClient.invalidateQueries({ queryKey: ["shorts"] });
-    void queryClient.invalidateQueries({ queryKey: ["short-candidates"] });
+  // Saved clips change from the panel, the chat agent, or an MCP client alike.
+  const offClips = onAppEvent("clips-changed", () => {
+    void queryClient.invalidateQueries({ queryKey: ["clips"] });
+    void queryClient.invalidateQueries({ queryKey: ["clip-candidates"] });
   });
   return () => {
     offTimeline();
     offTranscript();
     offProjects();
     offAssets();
-    offShorts();
+    offClips();
   };
 }
 
@@ -149,7 +151,7 @@ function useEditMutation<TArgs extends Record<string, unknown>, TResult>(
   toolName: string,
   invalidate: (
     | "timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions" | "history"
-    | "shorts" | "short-candidates"
+    | "clips" | "clip-candidates"
   )[],
 ) {
   const queryClient = useQueryClient();
@@ -356,29 +358,29 @@ export function useTranscribe() {
 }
 
 // ---------------------------------------------------------------------------
-// Shorts
+// Saved clips (16:9 cut-downs and 9:16 shorts)
 // ---------------------------------------------------------------------------
 
-export function useShorts(projectId: string | null) {
+export function useClips(projectId: string | null) {
   return useQuery({
-    queryKey: ["shorts", projectId ?? "none"],
-    queryFn: () => callTool<{ shorts: ShortSummary[] }>("list_shorts", { project_id: projectId }),
+    queryKey: ["clips", projectId ?? "none"],
+    queryFn: () => callTool<{ clips: SavedClipSummary[] }>("list_clips", { project_id: projectId }),
     enabled: projectId !== null,
-    select: (r) => r.shorts,
+    select: (r) => r.clips,
   });
 }
 
-export function useShortCandidates(projectId: string | null) {
+export function useClipCandidates(projectId: string | null) {
   return useQuery({
-    queryKey: ["short-candidates", projectId ?? "none"],
+    queryKey: ["clip-candidates", projectId ?? "none"],
     queryFn: () =>
-      callTool<{ candidates: ShortCandidate[] }>("get_short_candidates", { project_id: projectId }),
+      callTool<{ candidates: ClipCandidate[] }>("get_clip_candidates", { project_id: projectId }),
     enabled: projectId !== null,
     select: (r) => r.candidates,
   });
 }
 
-export interface FindShortsArgs extends Record<string, unknown> {
+export interface FindClipsArgs extends Record<string, unknown> {
   project_id: string;
   count?: number;
   min_s?: number;
@@ -387,34 +389,44 @@ export interface FindShortsArgs extends Record<string, unknown> {
   theme?: string;
 }
 
-export function useFindShorts() {
-  return useEditMutation<FindShortsArgs, { candidates: ShortCandidate[]; method: string; theme: string | null }>(
-    "find_shorts",
-    ["short-candidates"],
+export function useFindClips() {
+  return useEditMutation<FindClipsArgs, { candidates: ClipCandidate[]; method: string; theme: string | null }>(
+    "find_clips",
+    ["clip-candidates"],
   );
 }
 
-export function useCreateShort() {
-  return useEditMutation<
-    { project_id: string; rank?: number; candidate_id?: string; start?: number; end?: number; title?: string },
-    { short: ShortSummary }
-  >("create_short", ["shorts", "short-candidates"]);
+export interface CreateClipArgs extends Record<string, unknown> {
+  project_id: string;
+  rank?: number;
+  candidate_id?: string;
+  segment_ids?: string[];
+  ranges?: SourceRange[];
+  title?: string;
+  format?: ClipFormat;
 }
 
-export function useUpdateShort() {
-  return useEditMutation<
-    { project_id: string; short_id: string; title?: string; start?: number; end?: number },
-    { short: ShortSummary }
-  >("update_short", ["shorts"]);
+export function useCreateClip() {
+  return useEditMutation<CreateClipArgs, { clip: SavedClipSummary }>("create_clip", [
+    "clips",
+    "clip-candidates",
+  ]);
 }
 
-export function useDeleteShort() {
-  return useEditMutation<{ project_id: string; short_id: string }, unknown>("delete_short", ["shorts"]);
+export function useUpdateClip() {
+  return useEditMutation<
+    { project_id: string; clip_id: string; title?: string; format?: ClipFormat; crop_x?: number },
+    { clip: SavedClipSummary }
+  >("update_clip", ["clips"]);
 }
 
-export function useExportShort() {
+export function useDeleteClip() {
+  return useEditMutation<{ project_id: string; clip_id: string }, unknown>("delete_clip", ["clips"]);
+}
+
+export function useExportClip() {
   return useEditMutation<
-    { project_id: string; short_id: string; target: ExportTarget; out_path: string },
+    { project_id: string; clip_id: string; target: ExportTarget; out_path: string },
     ExportResult
-  >("export_short", []);
+  >("export_clip", []);
 }

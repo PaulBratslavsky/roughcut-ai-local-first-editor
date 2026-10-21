@@ -51,6 +51,9 @@ pub struct RenderJob<'a> {
     pub audio_offset_s: f64,
     /// Dual-capture compositing: the synced screen file + how to frame it.
     pub screen: Option<(&'a Media, &'a crate::model::Layout)>,
+    /// Render 9:16 (1080×1920): a full-height crop of the frame, positioned
+    /// across it at this fraction (0 = left, 0.5 = centred, 1 = right).
+    pub vertical_crop_x: Option<f64>,
 }
 
 #[async_trait]
@@ -318,7 +321,18 @@ impl VideoEngine for FfmpegCli {
         for i in 0..clips.len() {
             filter.push_str(&format!("[v{i}][a{i}]"));
         }
-        filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
+        if let Some(x) = job.vertical_crop_x {
+            // Reframe once, after the cuts: one crop for the whole clip.
+            filter.push_str(&format!(
+                "concat=n={}:v=1:a=1[vcat][a];\
+                 [vcat]crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*{x:.4}:y=0,\
+                 scale=1080:1920,setsar=1[v]",
+                clips.len(),
+                x = x.clamp(0.0, 1.0),
+            ));
+        } else {
+            filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
+        }
         let mut cmd = ffmpeg_cmd()?;
         cmd.args(["-y", "-nostats", "-progress", "pipe:1", "-i", &media.file_path]);
         if let Some((screen, _)) = compositing {

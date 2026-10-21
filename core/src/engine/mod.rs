@@ -11,14 +11,14 @@
 //! - [`semantic`] — embedding index + cosine search
 //! - [`confirm`] — user approval of externally-driven destructive ops
 
+mod clips;
 mod confirm;
 mod edits;
 mod media;
 mod projects;
 mod semantic;
-mod shorts;
 
-pub use shorts::ShortSource;
+pub use clips::{ClipChanges, ClipSource};
 
 use crate::adapters::{
     AutoTranscriber, AutoVideoEngine, Embedder, InferenceClient, MockTranscriber,

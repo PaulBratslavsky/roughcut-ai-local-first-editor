@@ -68,14 +68,18 @@ fn system_prompt(project_id: Uuid) -> String {
          ferry segment ids yourself, do not run generate_rough_cut before or \
          after (it only removes fillers and cannot hit a duration), and do not \
          keep cutting past the target. \
-         SHORTS: when the user asks for shorts, reels, TikToks, or short clips \
-         for social media — optionally about a topic — call find_shorts ONCE, \
-         with theme set to the topic in a few words if they named one. It \
-         returns ranked candidates (they also appear in the Shorts tab). To turn \
-         one into a short, call create_short with rank (1 = the top candidate). \
-         A shorts request NEVER cuts the main video: do not call cut tools for \
-         it. ('Make it shorter' or 'make it short' is a length request, not \
-         shorts.) \
+         CLIPS AND SHORTS: a saved clip is a separate edit made from pieces of \
+         this video — 16:9 (format landscape) or a 9:16 short (format vertical). \
+         When the user asks you to FIND shorts, reels, TikToks, or clips — \
+         optionally about a topic — call find_clips ONCE, with theme set to the \
+         topic in a few words if they named one; it returns ranked candidates \
+         (also shown in the Clips tab). To save one, call create_clip with rank \
+         (1 = the top candidate). When they name the parts themselves ('make a \
+         clip of the intro and the part about pricing'), call create_clip ONCE \
+         with all those segment_ids (and format vertical if they want a short). \
+         Clip requests NEVER cut the main video: do not call cut tools for them, \
+         and trim_clip / split_clip edit the main timeline, not saved clips. \
+         ('Make it shorter' or 'make it short' is a length request, not a clip.) \
          Every change is non-destructive and undoable. When you are done, reply \
          with a one-sentence summary of what you changed instead of calling more \
          tools. \
@@ -260,9 +264,9 @@ pub async fn run_instruction_with(
     // which are silence-only or run their own coherence pass.) Drives the
     // once-per-turn "does this still flow?" advisory after the model finishes.
     let mut narrative_cut_this_turn = false;
-    // Found or created shorts this turn: the receipt points at the Shorts tab
+    // Found or saved clips this turn: the receipt points at the Clips tab
     // instead of claiming nothing happened.
-    let mut shorts_this_turn = false;
+    let mut clips_this_turn = false;
     for step in 0..MAX_STEPS {
         step_text(
             editor,
@@ -342,8 +346,8 @@ pub async fn run_instruction_with(
                     Some(err) => format!(
                         "{text}\n\n[No changes were applied — the last edit failed: {err}]"
                     ),
-                    None if shorts_this_turn => {
-                        format!("{text}\n\n[Main video unchanged — see the Shorts tab.]")
+                    None if clips_this_turn => {
+                        format!("{text}\n\n[Main video unchanged — see the Clips tab.]")
                     }
                     None => format!("{text}\n\n[No changes were applied.]"),
                 }
@@ -359,7 +363,7 @@ pub async fn run_instruction_with(
         }
         messages.push(msg);
         let mut round_mutated = false;
-        // Shorts work is real output even though it never touches the main
+        // Clip work is real output even though it never touches the main
         // cut — it must not trip the read-loop guard, whose nudge says "cut".
         let mut round_produced = false;
         let mut last_error: Option<String> = None;
@@ -445,9 +449,9 @@ pub async fn run_instruction_with(
                         // Only successes advance the act/read accounting and
                         // enter the repeat cache as plain results.
                         round_mutated |= is_mutating(&name);
-                        if matches!(name.as_str(), "find_shorts" | "create_short") {
+                        if matches!(name.as_str(), "find_clips" | "create_clip") {
                             round_produced = true;
-                            shorts_this_turn = true;
+                            clips_this_turn = true;
                         }
                         if matches!(name.as_str(), "cut_by_transcript" | "cut_range" | "apply_edits")
                         {
@@ -573,7 +577,7 @@ async fn run_instruction_offline(
         step_text(editor, project_id, 1, "final", summary.clone());
         return Ok(InstructionOutcome { actions, summary });
     }
-    // Shorts BEFORE cut: "cut me a few shorts about X" must find shorts, not
+    // Shorts BEFORE cut: "cut me a few shorts about X" must find clips, not
     // cut a sentence out of the main video.
     if wants_shorts(&lower) {
         let theme = shorts_theme(&lower);
@@ -582,23 +586,23 @@ async fn run_instruction_offline(
             project_id,
             1,
             "tool_call",
-            Some("find_shorts".into()),
+            Some("find_clips".into()),
             Some(json!({ "theme": theme })),
             None,
             None,
         );
-        let opts = crate::shorts::FindOptions { theme: theme.clone(), ..Default::default() };
-        let summary = match crate::shorts::find_shorts(editor, project_id, opts).await {
+        let opts = crate::clip_finder::FindOptions { theme: theme.clone(), ..Default::default() };
+        let summary = match crate::clip_finder::find_clips(editor, project_id, opts).await {
             Ok(found) if !found.is_empty() => format!(
-                "Found {} short candidate(s){} — the best is “{}” ({:.0}s). They're in the \
-                 Shorts tab; the main video is untouched.",
+                "Found {} clip candidate(s){} — the best is “{}” ({:.0}s). They're in the \
+                 Clips tab; the main video is untouched.",
                 found.len(),
                 theme.as_deref().map(|t| format!(" about “{t}”")).unwrap_or_default(),
                 found[0].title,
                 found[0].duration,
             ),
-            Ok(_) => "No short candidates found in the current cut.".to_string(),
-            Err(e) => format!("Couldn't find shorts: {e}"),
+            Ok(_) => "No clip candidates found in the current cut.".to_string(),
+            Err(e) => format!("Couldn't find clips: {e}"),
         };
         step_text(editor, project_id, 2, "final", summary.clone());
         return Ok(InstructionOutcome { actions: vec![], summary });

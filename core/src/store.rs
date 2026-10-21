@@ -130,7 +130,9 @@ impl Store for SqliteStore {
                 r.get(0)
             })
             .map_err(|_| CoreError::NotFound(format!("project {id}")))?;
-        Ok(serde_json::from_str(&doc)?)
+        let mut project: Project = serde_json::from_str(&doc)?;
+        project.upgrade();
+        Ok(project)
     }
 
     fn delete_project(&self, id: Uuid) -> Result<()> {
