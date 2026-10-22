@@ -1473,8 +1473,8 @@ input, select { font: inherit; }
 
 .ghost-btn {
   background: transparent;
-  color: #cfd3da;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 0;
   padding: 7px 15px;
   font-weight: 600;
