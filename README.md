@@ -44,13 +44,17 @@ macOS 11+ (Apple Silicon or Intel).
 
 ```bash
 git clone https://github.com/PaulBratslavsky/roughcut-ai-local-first-editor.git
-cd roughcut-ai-local-first-editor/frontend && npm install && cd ../app/src-tauri
-npx --yes @tauri-apps/cli@^2 build
-# → target/release/bundle/dmg/ (workspace root)
+cd roughcut-ai-local-first-editor/frontend && npm install && cd ..
+scripts/build-macos-app.sh --bundles app,dmg
+# → target/release/bundle/{macos,dmg}/ (workspace root)
 ```
 
 Building needs [Rust](https://rustup.rs) 1.85+, Node 20+, and `cmake`
-(whisper.cpp is compiled in-process).
+(whisper.cpp is compiled in-process). The script uses the same link flags as
+the release build. It also signs the app with a `RoughCut Local Signing`
+code-signing identity when your keychain has one, so macOS Screen Recording,
+camera and mic permissions survive rebuilds. Unsigned builds have to be
+granted again after every rebuild.
 
 ### First-run setup
 
