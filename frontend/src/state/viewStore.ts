@@ -71,6 +71,8 @@ export interface ViewState {
   /** The clip being assembled in the transcript ("Add to clip"): pieces in
    *  source order, not yet saved. */
   clipDraft: Range[];
+  /** The saved 9:16 clip whose crop the preview is framing (drag to move). */
+  cropClipId: string | null;
 }
 
 export const viewStore = new Store<ViewState>({
@@ -89,6 +91,7 @@ export const viewStore = new Store<ViewState>({
   activeTab: "tools",
   audition: null,
   clipDraft: [],
+  cropClipId: null,
   ...loadPrefs(),
 });
 
@@ -115,9 +118,12 @@ export function setProjectId(projectId: string | null): void {
       selectedSegmentIds: [],
       audition: null,
       clipDraft: [],
+      cropClipId: null,
     };
   });
 }
+/** Show (or hide, with null) a saved clip's 9:16 crop over the preview. */
+export const setCropClip = (cropClipId: string | null) => patch({ cropClipId });
 export const setScreen = (screen: AppScreen) => patch({ screen });
 export const setPlayhead = (playhead: number) => patch({ playhead: Math.max(0, playhead) });
 

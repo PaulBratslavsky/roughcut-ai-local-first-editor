@@ -9,7 +9,12 @@ use crate::model::{
 };
 use crate::time::snap_to_frame;
 use chrono::Utc;
+use serde::Serialize;
 use uuid::Uuid;
+
+/// Frames a face pass looks at, at most, and how wide each grab is.
+const FACE_SAMPLES: usize = 12;
+const FACE_FRAME_WIDTH: u32 = 640;
 
 /// What a clip is cut from: a `find_clips` candidate, or pieces of the source.
 pub enum ClipSource {
@@ -172,6 +177,114 @@ impl Editor {
     }
 }
 
+/// What a face pass found for one clip.
+#[derive(Debug, Clone, Serialize)]
+pub struct FaceCrop {
+    pub clip: SavedClipSummary,
+    /// The crop it set; None when too few frames showed a face (crop unchanged).
+    pub crop_x: Option<f64>,
+    pub frames_sampled: usize,
+    pub frames_with_face: usize,
+}
+
+impl Editor {
+    /// Point a clip's 9:16 crop at the speaker: sample frames across its kept
+    /// footage, find the faces, centre the crop on the median speaker
+    /// position. Leaves the crop alone when it can't see a face.
+    pub async fn center_clip_on_face(&self, project_id: Uuid, clip_id: Uuid) -> Result<FaceCrop> {
+        self.face_crop(project_id, clip_id, None).await
+    }
+
+    /// The same pass in the background, for a clip that just became 9:16. It
+    /// only moves the crop if nobody changed it meanwhile (a drag in the
+    /// preview wins). Failures are silent: the clip keeps its crop.
+    pub fn auto_center_clip(&self, project_id: Uuid, clip_id: Uuid) {
+        let Ok(clip) = self.get_clip(project_id, clip_id) else { return };
+        let editor = self.clone();
+        tokio::spawn(async move {
+            let _ = editor.face_crop(project_id, clip_id, Some(clip.crop_x)).await;
+        });
+    }
+
+    async fn face_crop(&self, project_id: Uuid, clip_id: Uuid, expect: Option<f64>) -> Result<FaceCrop> {
+        use crate::adapters::face;
+        let clip = self.get_clip(project_id, clip_id)?;
+        let project = self.with_project(project_id, |p, _| Ok(p.clone()))?;
+        if project.screen_media.is_some() {
+            // The 9:16 crop applies to the composite (screen + camera
+            // bubble), which isn't a frame we can grab from one file.
+            return Err(CoreError::InvalidArg(
+                "this project lays a camera bubble over a screen recording, so the face can't be found \
+                 automatically: drag the 9:16 crop in the preview instead"
+                    .into(),
+            ));
+        }
+        let media = project
+            .media
+            .clone()
+            .ok_or_else(|| CoreError::InvalidArg("the project has no media to look at".into()))?;
+        let kept: Vec<(f64, f64)> =
+            clip.timeline.included_clips().map(|c| (c.source_in, c.source_out)).collect();
+        let times = face::sample_times(&kept, FACE_SAMPLES);
+
+        let dir = crate::store::data_dir().join("cache").join("faces").join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&dir)?;
+        let found = self.find_faces(&media, &times, &dir).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let (frames, size) = found?;
+
+        let (w, h) = size.unwrap_or((media.width, media.height));
+        let crop_x = face::crop_x_for_faces(&frames, w, h);
+        let frames_with_face = frames.iter().filter(|f| face::subject(f).is_some()).count();
+        let clip = match crop_x {
+            Some(x) => self.set_crop_if(project_id, clip_id, x, expect)?,
+            None => clip.summary(),
+        };
+        Ok(FaceCrop { clip, crop_x, frames_sampled: frames.len(), frames_with_face })
+    }
+
+    /// Grab a frame at each time and run face detection on it. Also returns
+    /// the grabbed frame size (what the render will crop).
+    async fn find_faces(
+        &self,
+        media: &crate::model::Media,
+        times: &[f64],
+        dir: &std::path::Path,
+    ) -> Result<(Vec<Vec<crate::adapters::face::FaceBox>>, Option<(u32, u32)>)> {
+        use crate::adapters::face;
+        let mut frames = Vec::with_capacity(times.len());
+        let mut size = None;
+        for (i, &t) in times.iter().enumerate() {
+            let path = dir.join(format!("frame_{i:02}.png"));
+            self.video().extract_frame(media, t, FACE_FRAME_WIDTH, &path.to_string_lossy()).await?;
+            if size.is_none() {
+                size = face::png_size(&path).ok();
+            }
+            let faces = tokio::task::spawn_blocking(move || face::detect_faces(&path))
+                .await
+                .map_err(|e| CoreError::Other(format!("face detection task failed: {e}")))??;
+            frames.push(faces);
+        }
+        Ok((frames, size))
+    }
+
+    /// Set a clip's crop, unless `expect` is given and the crop has moved
+    /// away from it since (then the clip is returned unchanged).
+    fn set_crop_if(&self, project_id: Uuid, clip_id: Uuid, x: f64, expect: Option<f64>) -> Result<SavedClipSummary> {
+        self.update_project_meta(project_id, |p| {
+            let clip = p
+                .saved_clips
+                .iter_mut()
+                .find(|c| c.id == clip_id)
+                .ok_or_else(|| CoreError::NotFound(format!("clip {clip_id}")))?;
+            if expect.map_or(true, |e| (clip.crop_x - e).abs() < 1e-9) {
+                clip.crop_x = x.clamp(0.0, 1.0);
+            }
+            Ok(clip.summary())
+        })
+    }
+}
+
 /// Partial update for [`Editor::update_clip`]; `None` leaves a field alone.
 #[derive(Default)]
 pub struct ClipChanges {
@@ -220,4 +333,27 @@ fn set_ranges(p: &Project, clip: &mut SavedClip, ranges: &[SourceRange]) -> Resu
     clip.ranges = merged;
     clip.timeline = timeline;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn background_face_pass_never_overrides_a_hand_set_crop() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        let ranges = vec![SourceRange { start: 10.0, end: 40.0 }];
+        let c = e.create_clip(p.id, ClipSource::Ranges(ranges), None, Some(ClipFormat::Vertical)).unwrap();
+        assert_eq!(c.crop_x, 0.5);
+
+        // The pass started at 0.5; the user dragged the crop to 0.2 meanwhile.
+        e.update_clip(p.id, c.id, ClipChanges { crop_x: Some(0.2), ..Default::default() }).unwrap();
+        assert_eq!(e.set_crop_if(p.id, c.id, 0.66, Some(0.5)).unwrap().crop_x, 0.2);
+
+        // Untouched since the pass started: it lands. The explicit button
+        // (no expectation) always lands.
+        assert_eq!(e.set_crop_if(p.id, c.id, 0.3, Some(0.2)).unwrap().crop_x, 0.3);
+        assert_eq!(e.set_crop_if(p.id, c.id, 0.66, None).unwrap().crop_x, 0.66);
+    }
 }

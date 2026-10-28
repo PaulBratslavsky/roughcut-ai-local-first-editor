@@ -66,6 +66,9 @@ pub trait VideoEngine: Send + Sync {
         -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
     async fn extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()>;
+    /// One still frame at `at` seconds, `width` px wide (height keeps the
+    /// aspect), written as PNG to `out_path`. Face finding samples these.
+    async fn extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()>;
     /// Waveform peaks + thumbnail filmstrip, generated once and cached in
     /// `<data dir>/cache/<media id>/`.
     async fn media_assets(&self, media: &Media) -> Result<MediaAssets>;
@@ -392,6 +395,16 @@ impl VideoEngine for FfmpegCli {
         Ok(())
     }
 
+    async fn extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()> {
+        let mut cmd = ffmpeg_cmd()?;
+        cmd.args([
+            "-y", "-ss", &format!("{:.3}", at.max(0.0)), "-i", &media.file_path,
+            "-frames:v", "1", "-vf", &format!("scale={width}:-2"), out_path,
+        ]);
+        Self::run(&mut cmd, "ffmpeg frame grab").await?;
+        Ok(())
+    }
+
     async fn media_assets(&self, media: &Media) -> Result<MediaAssets> {
         // Cache by file identity (path + size + mtime), NOT media id: every
         // project pointing at the same footage — duplicates, re-imports,
@@ -674,6 +687,10 @@ impl VideoEngine for MockVideoEngine {
         Err(CoreError::Unavailable("audio extraction needs ffmpeg on PATH".into()))
     }
 
+    async fn extract_frame(&self, _m: &Media, _at: f64, _w: u32, _o: &str) -> Result<()> {
+        Err(CoreError::Unavailable("frame grabs need ffmpeg on PATH (demo mode active)".into()))
+    }
+
     async fn media_assets(&self, _media: &Media) -> Result<MediaAssets> {
         // No real audio/video to derive from — the frontend falls back to its
         // synthetic waveform.
@@ -713,6 +730,14 @@ impl VideoEngine for AutoVideoEngine {
             FfmpegCli.extract_audio_wav(media, out_path).await
         } else {
             MockVideoEngine.extract_audio_wav(media, out_path).await
+        }
+    }
+
+    async fn extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()> {
+        if crate::capabilities::probe().media_ready() {
+            FfmpegCli.extract_frame(media, at, width, out_path).await
+        } else {
+            MockVideoEngine.extract_frame(media, at, width, out_path).await
         }
     }
 

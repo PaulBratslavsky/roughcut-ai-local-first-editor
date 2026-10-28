@@ -18,7 +18,8 @@ import {
   useUpdateClip,
 } from "../ipc/queries";
 import type { ClipCandidate, ClipFormat, ExportTarget, ProgressEvent, SavedClipSummary } from "../ipc/types";
-import { previewRanges, seekTo } from "../state/viewStore";
+import { previewRanges, seekTo, setCropClip, togglePreviewCollapsed, viewStore } from "../state/viewStore";
+import { useStore } from "@tanstack/react-store";
 import { EXPORT_TARGETS } from "./ExportMenu";
 
 const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
@@ -294,6 +295,15 @@ function SavedClipRow({
   };
 
   const pieces = clip.ranges.length;
+  const framing = useStore(viewStore, (s) => s.cropClipId === clip.id);
+
+  // Show this short's 9:16 window over the preview, on one of its frames.
+  const toggleCrop = () => {
+    if (framing) return setCropClip(null);
+    if (viewStore.state.previewCollapsed) togglePreviewCollapsed();
+    seekTo(clip.start);
+    setCropClip(clip.id);
+  };
 
   return (
     <div className="clip-row">
@@ -351,6 +361,15 @@ function SavedClipRow({
         <button className="ghost-btn" onClick={() => previewRanges(clip.ranges)} title="Play the clip">
           ▶
         </button>
+        {clip.format === "vertical" && (
+          <button
+            className={`ghost-btn${framing ? " active" : ""}`}
+            onClick={toggleCrop}
+            title="Frame the 9:16 crop over the preview: drag it, or centre it on the speaker"
+          >
+            crop
+          </button>
+        )}
         <button
           className="ghost-btn"
           onClick={() => {

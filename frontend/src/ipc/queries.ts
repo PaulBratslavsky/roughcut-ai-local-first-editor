@@ -420,6 +420,20 @@ export function useUpdateClip() {
   >("update_clip", ["clips"]);
 }
 
+/** What a face pass found: `crop_x` null = no confident face, crop unchanged. */
+export interface FaceCropResult {
+  clip: SavedClipSummary;
+  crop_x: number | null;
+  frames_sampled: number;
+  frames_with_face: number;
+}
+
+export function useCenterClipOnFace() {
+  return useEditMutation<{ project_id: string; clip_id: string }, FaceCropResult>("center_clip_on_face", [
+    "clips",
+  ]);
+}
+
 export function useDeleteClip() {
   return useEditMutation<{ project_id: string; clip_id: string }, unknown>("delete_clip", ["clips"]);
 }

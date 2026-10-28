@@ -943,6 +943,7 @@ input, select { font: inherit; }
   transition: opacity 0.15s ease;
   pointer-events: none;
   cursor: default;
+  z-index: 3; /* above the 9:16 crop guide: scrub while framing */
 }
 .preview-frame:hover .preview-overlay {
   opacity: 1;
@@ -1074,6 +1075,63 @@ input, select { font: inherit; }
   color: var(--accent-contrast);
 }
 .time-sep { color: var(--text-muted); margin: 0 2px; }
+
+/* 9:16 crop framing over the picture. It sits on video, so it uses fixed
+   light-on-dark values like the other overlays, not theme tokens. */
+.crop-guide {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: default;
+  z-index: 2;
+}
+.crop-window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.6);
+  outline: 1px solid rgba(255, 255, 255, 0.9);
+  outline-offset: -1px;
+  cursor: grab;
+  touch-action: none;
+}
+.crop-window.dragging { cursor: grabbing; outline-color: #fff; }
+.crop-label {
+  position: absolute;
+  left: 6px;
+  top: 38px; /* under the crop bar */
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0 5px;
+}
+.crop-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #e8eaed;
+  background: rgba(0, 0, 0, 0.72);
+}
+.crop-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
+.crop-note { flex: 1; min-width: 0; color: #8e939c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crop-btn {
+  font: inherit;
+  font-size: 11px;
+  color: #e8eaed;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+.crop-btn:hover:not(:disabled) { background: #e8eaed; border-color: #e8eaed; color: #0c0d0f; }
 
 /* --------------------------------------------------- tools: inspector card */
 
@@ -2181,5 +2239,6 @@ input, select { font: inherit; }
 .clip-reason { color: var(--text-muted); display: flex; align-items: baseline; gap: 8px; }
 .clip-actions { position: relative; flex-shrink: 0; display: flex; gap: 4px; }
 .clip-actions .ghost-btn { padding: 3px 8px; }
+.clip-actions .ghost-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .clip-delete:hover { background: transparent; border-color: var(--danger); color: var(--danger); }
 .clip-actions .export-dropdown.up { top: auto; bottom: calc(100% + 6px); }

@@ -38,6 +38,11 @@ ts-bindings = ["dep:ts-rs"]
 # ~10x longer and reads as a hang. Target-gated: metal exists only on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
+# Face finding for 9:16 reframing: Apple's Vision framework, on-device. Same
+# objc2 generation Tauri already pulls in.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSURL"] }
+objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNDetectFaceRectanglesRequest", "VNObservation", "VNTypes", "objc2-core-foundation"] }
 
 [dev-dependencies]
 tempfile = "3"
