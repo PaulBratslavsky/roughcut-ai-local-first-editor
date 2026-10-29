@@ -109,7 +109,7 @@ impl Editor {
         Ok(outcome)
     }
 
-    fn persist_journal(&self, project_id: Uuid, undo: &[JournalEntry], redo: &[JournalEntry]) -> Result<()> {
+    pub(super) fn persist_journal(&self, project_id: Uuid, undo: &[JournalEntry], redo: &[JournalEntry]) -> Result<()> {
         let doc = serde_json::json!({ "undo": undo, "redo": redo }).to_string();
         self.inner.store.set_kv(&format!("journal:{project_id}"), &doc)
     }

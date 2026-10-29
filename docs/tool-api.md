@@ -66,8 +66,8 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 (undoable) tagged with `source: "ui" | "local_ai" | "mcp_client"`.
 
 ### Ingest & transcription
-- `append_media { project_id, file_path } -> { media, note }` — lossless concat to the END of the source (new file; originals untouched; cuts keep timestamps; re-run `transcribe` after)
-- `import_media { file_path, project_id? } -> Media` (with `project_id`, attaches the media to that project)
+- `append_media { project_id, file_path } -> { media, note }` — lossless concat to the END of the source (new file; originals untouched; cuts keep timestamps; undo history and checkpoints are extended to cover the new footage; the append itself is not undoable; re-run `transcribe` after)
+- `import_media { file_path, project_id? } -> Media` — probes the file. With `project_id`: a project with no media gets it and a fresh timeline; a project whose video moved is relinked to the same video at a new path (matching duration, size, and frame rate keeps cuts, history, transcript, and clips); a different video is refused (`invalid_argument` — create a new project or use `append_media`)
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
 
 ### Analysis

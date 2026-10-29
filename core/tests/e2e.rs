@@ -1216,3 +1216,25 @@ async fn clips_from_several_pieces_in_either_format() {
     let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
     assert_eq!(tl["cut_count"], 0);
 }
+
+#[tokio::test]
+async fn import_into_a_project_relinks_the_same_video_and_keeps_the_edit() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "moved", "file_path": "/demo/old/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": 10.0, "end": 20.0 })).await;
+
+    // The fixture probe reports the same video for any path: a relink.
+    let media = call(
+        &editor,
+        "import_media",
+        json!({ "project_id": pid, "file_path": "/demo/new/footage.mp4" }),
+    )
+    .await;
+    assert_eq!(media["file_path"], "/demo/new/footage.mp4");
+    assert_eq!(media["id"], p["media"]["id"], "relink keeps the media id");
+    let timeline = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(timeline["cut_count"], 1, "the cut survives the relink");
+    let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
+    assert!(undone["action"].is_object(), "and so does the undo history");
+}

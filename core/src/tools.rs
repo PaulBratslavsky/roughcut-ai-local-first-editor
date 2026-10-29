@@ -1135,7 +1135,7 @@ macro_rules! tool {
 }
 
 static REGISTRY: &[ToolSpec] = &[
-    tool!("import_media", "Probe and attach a local video file. Returns media metadata.",
+    tool!("import_media", "Probe a local video file and return its metadata. With project_id, attach it to that project: a project with no media gets it (and a fresh timeline); a project whose video was moved can be relinked to the same video at a new path (same duration, size, frame rate — cuts, history, and transcript are kept). A different video is refused: create a new project, or use append_media.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["file_path"]),
         agent: false, meta: false, h_import_media),
     tool!("transcribe", "Transcribe the project's media on-device into time-aligned text.",
@@ -1201,9 +1201,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_audio_offset", "A/V sync nudge, seconds (clamped to ±2). POSITIVE delays audio — the fix when you hear words before lips move (mics start before cameras warm up). Applied non-destructively at preview and export; not an undoable edit.",
         || obj(json!({"project_id": pid_schema(), "offset_s": {"type": "number"}}), &["project_id", "offset_s"]),
         agent: false, meta: false, h_set_audio_offset),
-    tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Re-run transcribe afterwards to caption the appended span.",
+    tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Undo history and checkpoints are extended to cover the new footage; the append itself is not an undoable edit. Re-run transcribe afterwards to caption the appended span.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
-        agent: false, meta: false, mutating: true, h_append_media),
+        agent: false, meta: false, h_append_media),
     tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one on-device model pass per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the on-device beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
