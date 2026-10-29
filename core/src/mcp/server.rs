@@ -27,6 +27,13 @@ pub struct EndpointInfo {
 /// token and the current endpoint to `<data dir>/mcp.json` so the stdio shim
 /// can find the running app.
 pub async fn start(editor: Editor) -> Result<EndpointInfo> {
+    start_with(editor, Some(&crate::store::data_dir().join("mcp.json"))).await
+}
+
+/// [`start`] with the discovery file chosen by the caller: `None` writes no
+/// file. Tests use that, so a test server never overwrites the real app's
+/// `mcp.json` (which would leave the shim pointing at a dead endpoint).
+pub async fn start_with(editor: Editor, discovery_file: Option<&std::path::Path>) -> Result<EndpointInfo> {
     let token = match editor.store().get_kv("mcp_token")? {
         Some(t) => t,
         None => {
@@ -56,11 +63,12 @@ pub async fn start(editor: Editor) -> Result<EndpointInfo> {
     let url = format!("http://127.0.0.1:{port}/mcp");
 
     let info = EndpointInfo { url: url.clone(), token: token.clone() };
-    let endpoint_file = crate::store::data_dir().join("mcp.json");
-    if let Some(parent) = endpoint_file.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(endpoint_file) = discovery_file {
+        if let Some(parent) = endpoint_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(endpoint_file, serde_json::to_string_pretty(&json!(&info))?)?;
     }
-    std::fs::write(&endpoint_file, serde_json::to_string_pretty(&json!(&info))?)?;
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {

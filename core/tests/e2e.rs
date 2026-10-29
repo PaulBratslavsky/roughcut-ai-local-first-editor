@@ -138,7 +138,8 @@ async fn poc_loop_through_the_tool_registry() {
 #[tokio::test]
 async fn mcp_server_drives_an_edit_over_http() {
     let editor = Editor::test_instance();
-    let info = roughcut_core::mcp::server::start(editor.clone()).await.unwrap();
+    // No discovery file: a test server must never overwrite the real app's mcp.json.
+    let info = roughcut_core::mcp::server::start_with(editor.clone(), None).await.unwrap();
     let client = reqwest::Client::new();
 
     let rpc = |method: &str, params: Value, id: i64| {
