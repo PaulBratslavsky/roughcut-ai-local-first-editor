@@ -25,8 +25,8 @@ args=(--bundles app)
 identity="${APPLE_SIGNING_IDENTITY:-RoughCut Local Signing}"
 if security find-identity -p codesigning | grep -qF "\"$identity\""; then
   export APPLE_SIGNING_IDENTITY="$identity"
-  # Keep hardened runtime off, as in ad-hoc builds. Turning it on would need
-  # camera/mic entitlements, which only notarized releases require.
+  # Keep hardened runtime off, as in ad-hoc builds. Signed releases turn it on;
+  # app/src-tauri/Entitlements.plist then keeps the camera and mic usable.
   args+=(--config '{"bundle":{"macOS":{"hardenedRuntime":false}}}')
   echo "Signing with \"$identity\"" >&2
 else
