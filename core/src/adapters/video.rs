@@ -219,23 +219,8 @@ impl VideoEngine for FfmpegCli {
         // audio gets a 20ms fade at both edges so joins never click — video
         // stays a hard cut, timing is untouched.
         let mut filter = String::new();
-        // Global A/V sync nudge, applied ONCE before the per-clip trims:
-        // positive = delay audio (silence pad), negative = audio starts
-        // |offset| early (trim). The per-clip atrims read the shifted stream.
-        let audio_src = if audio_offset_s.abs() > 0.001 {
-            if audio_offset_s > 0.0 {
-                let ms = (audio_offset_s * 1000.0).round() as i64;
-                filter.push_str(&format!("[0:a]adelay={ms}:all=1[ash];"));
-            } else {
-                filter.push_str(&format!(
-                    "[0:a]atrim=start={:.3},asetpts=PTS-STARTPTS[ash];",
-                    -audio_offset_s
-                ));
-            }
-            "[ash]"
-        } else {
-            "[0:a]"
-        };
+        let (audio_graph, audio_srcs) = audio_sources(audio_offset_s, clips.len());
+        filter.push_str(&audio_graph);
         // Video source per clip: raw camera, or the composed frame.
         let video_src: String = if let Some((screen, layout)) = compositing {
             let w = (screen.width.max(2) / 2 * 2) as i64;
@@ -318,7 +303,7 @@ impl VideoEngine for FfmpegCli {
                 in_ = c.source_in,
                 out = c.source_out,
                 fo = (dur - fade).max(0.0),
-                audio_src = audio_src,
+                audio_src = audio_srcs[i],
             ));
         }
         for i in 0..clips.len() {
@@ -337,7 +322,7 @@ impl VideoEngine for FfmpegCli {
             filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
         }
         let mut cmd = ffmpeg_cmd()?;
-        cmd.args(["-y", "-nostats", "-progress", "pipe:1", "-i", &media.file_path]);
+        cmd.args(["-y", "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", &media.file_path]);
         if let Some((screen, _)) = compositing {
             cmd.args(["-i", &screen.file_path]);
         }
@@ -373,10 +358,13 @@ impl VideoEngine for FfmpegCli {
             let _ = t.await; // drain the tail
         }
         if !out.status.success() {
-            return Err(CoreError::Other(format!(
-                "ffmpeg render failed: {}",
-                String::from_utf8_lossy(&out.stderr).chars().take(800).collect::<String>()
-            )));
+            // ffmpeg reports the cause last: keep the tail, not the head.
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let tail: String = {
+                let chars: Vec<char> = stderr.trim_end().chars().collect();
+                chars[chars.len().saturating_sub(800)..].iter().collect()
+            };
+            return Err(CoreError::Other(format!("ffmpeg render failed: {tail}")));
         }
         crate::events::send(
             sink,
@@ -750,9 +738,52 @@ impl VideoEngine for AutoVideoEngine {
     }
 }
 
+/// The per-clip audio inputs for a render, plus the filtergraph prefix that
+/// produces them. The global A/V sync nudge is applied ONCE, before the
+/// per-clip trims: positive = delay audio (silence pad), negative = audio
+/// starts |offset| early (trim).
+///
+/// The shifted stream is a filter output, and an output label must be read by
+/// exactly one filter: reusing it once per clip makes ffmpeg feed every clip
+/// after the first audio from the wrong place. So it is `asplit` into one copy
+/// per clip. The raw input `[0:a]` may be read any number of times.
+fn audio_sources(audio_offset_s: f64, clips: usize) -> (String, Vec<String>) {
+    if audio_offset_s.abs() <= 0.001 {
+        return (String::new(), vec!["[0:a]".to_string(); clips]);
+    }
+    let mut graph = if audio_offset_s > 0.0 {
+        let ms = (audio_offset_s * 1000.0).round() as i64;
+        format!("[0:a]adelay={ms}:all=1[ash];")
+    } else {
+        format!("[0:a]atrim=start={:.3},asetpts=PTS-STARTPTS[ash];", -audio_offset_s)
+    };
+    let labels: Vec<String> = (0..clips).map(|i| format!("[as{i}]")).collect();
+    graph.push_str(&format!("[ash]asplit={}{};", clips, labels.concat()));
+    (graph, labels)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compute_peaks;
+    use super::{audio_sources, compute_peaks};
+
+    #[test]
+    fn shifted_audio_is_split_so_every_clip_reads_its_own_copy() {
+        // No offset: every clip reads the raw input, nothing to split.
+        let (graph, srcs) = audio_sources(0.0, 3);
+        assert!(graph.is_empty());
+        assert_eq!(srcs, vec!["[0:a]"; 3]);
+
+        // With an offset each clip gets a distinct label from one asplit —
+        // a filter output label can be consumed only once.
+        for offset in [0.2, -0.15] {
+            let (graph, srcs) = audio_sources(offset, 3);
+            assert!(graph.contains("[ash]asplit=3[as0][as1][as2];"), "{graph}");
+            assert_eq!(srcs, vec!["[as0]", "[as1]", "[as2]"]);
+            assert_eq!(graph.matches("[ash]").count(), 2, "produced once, read once: {graph}");
+        }
+        assert!(audio_sources(0.2, 1).0.contains("adelay=200"));
+        assert!(audio_sources(-0.15, 1).0.contains("atrim=start=0.150"));
+    }
 
     #[test]
     fn peaks_bucket_max_and_scale() {
