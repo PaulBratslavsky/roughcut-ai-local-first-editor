@@ -249,12 +249,12 @@ export function EmptyState() {
             />
           </div>
           {isTauri ? (
-            <button className="ghost-btn demo-btn" onClick={() => setScreen("recorder")}>
+            <button className="ghost-btn" onClick={() => setScreen("recorder")}>
               ● or record something new
             </button>
           ) : (
             <button
-              className="primary-btn demo-btn"
+              className="primary-btn"
               onClick={() => void start("i-quit-rough-draft", "/demo/talking-head.mp4")}
             >
               Use demo footage
