@@ -141,6 +141,9 @@ receive results or file paths.
   - `abort_on_exit()` is the app-exit hook.
 - Devices and permission: `list_devices() -> Result<CaptureDevices>`,
   `screen_permission() -> bool`, `request_screen_permission() -> bool`.
+- Display preview: `screen_preview(display_index) -> Result<Vec<u8>>`
+  (`[width u32 LE][height u32 LE][RGBA…]`, empty when nothing new),
+  `stop_screen_preview()`.
 - Library: `list_recordings() -> Result<Vec<RecordingFile>>`,
   `combine_recordings(paths: &[String]) -> Result<String>`,
   `delete_recording(path: &str) -> Result<()>`.
@@ -157,6 +160,9 @@ receive results or file paths.
   `finish(self) -> Result<()>` (blocking). `TakeSpec` names the video source
   (`VideoSource::Camera(id)` or `::Display(id)`), the microphone, the optional
   overlay display, and the output paths.
+- Display preview: `preview_frame(display_id) -> Result<Option<PreviewFrame>>`
+  (newest frame since the last call, RGBA, ≤ `PREVIEW_MAX_WIDTH` = 640 px
+  wide), `preview_stop()`.
 - Pure helpers (unit-tested): `pick_mode`, `target_fps`, `encode_size`,
   `bitrate`, `label_displays`.
 
@@ -335,6 +341,13 @@ There are no child directories with contracts.
   camera another app runs at 60 fps records at 30.
 - `ROUGHCUT_CAPTURE_DEBUG=1` traces sample timestamps and encoder drops to
   stderr.
+- **Display preview.** One `AVCaptureScreenInput` session at 8 fps for the
+  selected display, BGRA, downsampled in Rust (each output pixel averages four
+  samples). No scale factor: with one set, the screen input delivered a single
+  frame and stopped. The preview refuses to run while any take is starting or
+  running (`LIVE_TAKES`), switches session when the display changes, and stops
+  on `preview_stop`, when a take starts, or after 3 s without a poll (a
+  watchdog thread).
 - Bitrates: camera 0.1 bit/pixel/frame at 30 fps clamped to 4–16 Mbps;
   displays 0.06 clamped to 6–14 Mbps. Encoded sizes are even and fit within
   3840×2160 (or 2160×3840).
@@ -465,7 +478,9 @@ There are no child directories with contracts.
   `record.rs` (take numbering, concat arguments)). `tests/e2e.rs` exercises
   `MockVideoEngine`, `MockTranscriber` and `MockEmbedder` offline.
 - Capture on real hardware: `cargo run -p roughcut-core --example
-  native_check` (camera, pause/resume, dual, display; also `record_smoke`,
+  native_check` (camera, pause/resume, dual, display), `preview_check`
+  (display preview, switching, off during a take; `PREVIEW_DUMP=<file.ppm>`
+  saves a frame); also `record_smoke`,
   `takes_smoke`, `screen_smoke`, `dual_smoke`,
   `crash_smoke`). macOS attributes their camera/mic/screen requests to the
   app that launched the terminal, which needs those permissions.

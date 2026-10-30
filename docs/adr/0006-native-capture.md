@@ -68,5 +68,8 @@ already use). One path for every recording; no ffmpeg capture fallback.
   for camera and microphone (`app/src-tauri/Entitlements.plist`, on branch
   `fix/release-entitlements` until it merges) are required
   for signed release builds.
+- Native capture also made a live display preview cheap: the recorder shows
+  the selected display (8 fps, ≤ 640 px) before recording, over a raw-bytes
+  Tauri command. It stops whenever a take starts.
 - The smoke examples (`core/examples/*_smoke.rs`) exercise the native path;
   `crash_smoke` now SIGKILLs a child copy of itself mid-take.

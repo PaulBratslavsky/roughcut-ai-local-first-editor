@@ -1,10 +1,11 @@
-// The recorder screen: camera, display, or both, plus a mic. The live
-// preview runs on the webview's getUserMedia; the core captures natively
+// The recorder screen: camera, display, or both, plus a mic. The camera
+// preview runs on the webview's getUserMedia; the display preview polls the
+// core's native capture (ScreenPreview). The core records natively
 // (AVFoundation, ADR-0006), sharing the camera with the preview and with
-// other apps. If the preview track dies when recording starts, we say so
+// other apps. If the camera preview dies when recording starts, we say so
 // instead of looking frozen.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
@@ -19,6 +20,8 @@ import {
   recordDevices,
   recordPause,
   recordResume,
+  recordScreenPreview,
+  recordScreenPreviewStop,
   recordStart,
   recordStatus,
   recordStop,
@@ -120,6 +123,52 @@ function MicMeter({ micName }: { micName?: string }) {
         {state === "starting" ? "mic…" : quiet ? "speak to test the mic" : "mic ✓"}
       </span>
     </span>
+  );
+}
+
+/** Live picture of the display about to be recorded: polls the core's
+ *  native preview (~8 fps) and paints it on a canvas. Until the first frame
+ *  (or without Screen Recording permission) the `fallback` shows instead. */
+function ScreenPreview({ screen, fallback }: { screen: number; fallback: ReactNode }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setLive(false);
+    const tick = async () => {
+      try {
+        const buf = await recordScreenPreview(screen);
+        const canvas = canvasRef.current;
+        if (!stopped && buf && buf.byteLength > 8 && canvas) {
+          const head = new DataView(buf);
+          const w = head.getUint32(0, true);
+          const h = head.getUint32(4, true);
+          if (buf.byteLength >= 8 + w * h * 4) {
+            if (canvas.width !== w) canvas.width = w;
+            if (canvas.height !== h) canvas.height = h;
+            const pixels = new Uint8ClampedArray(buf, 8, w * h * 4);
+            canvas.getContext("2d")?.putImageData(new ImageData(pixels, w, h), 0, 0);
+            setLive(true);
+          }
+        }
+      } catch {
+        if (!stopped) setLive(false); // no permission yet: keep the fallback
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), 125);
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      void recordScreenPreviewStop().catch(() => {});
+    };
+  }, [screen]);
+  return (
+    <>
+      <canvas ref={canvasRef} className="screen-live" hidden={!live} />
+      {!live && fallback}
+    </>
   );
 }
 
@@ -624,9 +673,14 @@ export function RecorderPanel() {
         {source === "both" && !previewFile && (
           <>
             <div className="screen-backdrop">
-              <span>
-                {screenName ?? "the display"} records here (with cursor)
-              </span>
+              {phase === "setup" && screen != null ? (
+                <ScreenPreview
+                  screen={screen}
+                  fallback={<span>{screenName ?? "the display"} records here (with cursor)</span>}
+                />
+              ) : (
+                <span>{screenName ?? "the display"} records here (with cursor)</span>
+              )}
             </div>
             {(["tl", "tr", "bl", "br"] as const).map((c) => (
               <button
@@ -672,13 +726,22 @@ export function RecorderPanel() {
             playsInline
           />
         ) : source === "screen" && phase !== "recording" && phase !== "paused" ? (
-          <div className="recorder-screen-ph">
-            <span>{screenName ?? "the display"} will be captured (cursor included)</span>
-            <span className="recorder-screen-sub">
-              no live preview for screens — the first screen take asks for the
-              Screen Recording permission (System Settings ▸ Privacy &amp; Security)
-            </span>
-          </div>
+          (() => {
+            const placeholder = (
+              <div className="recorder-screen-ph">
+                <span>{screenName ?? "the display"} will be captured (cursor included)</span>
+                <span className="recorder-screen-sub">
+                  the live preview appears once RoughCut has Screen Recording permission
+                  (System Settings ▸ Privacy &amp; Security)
+                </span>
+              </div>
+            );
+            return phase === "setup" && screen != null ? (
+              <ScreenPreview screen={screen} fallback={placeholder} />
+            ) : (
+              placeholder
+            );
+          })()
         ) : (
           <video
             ref={videoRef}

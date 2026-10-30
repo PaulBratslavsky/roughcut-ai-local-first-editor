@@ -191,6 +191,20 @@ export async function listRecordings(): Promise<RecordingFile[]> {
   return invoke<RecordingFile[]>("list_recordings");
 }
 
+/** Newest display-preview frame: `[width u32 LE][height u32 LE][RGBA…]`,
+ *  or an empty buffer when there's nothing new. null in the browser build
+ *  (no capture there). The core starts the preview on first call. */
+export async function recordScreenPreview(display: number): Promise<ArrayBuffer | null> {
+  if (!isTauri) return null;
+  return invoke<ArrayBuffer>("record_screen_preview", { display });
+}
+
+/** Stop the display preview (the core also stops it after 3 s unpolled). */
+export async function recordScreenPreviewStop(): Promise<void> {
+  if (!isTauri) return;
+  return invoke("record_screen_preview_stop");
+}
+
 /** Screen Recording TCC status (true off-macOS). */
 export async function screenPermissionStatus(): Promise<boolean> {
   if (!isTauri) return true;

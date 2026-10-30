@@ -153,7 +153,19 @@ pub fn label_displays(ds: &[DisplayGeom]) -> Vec<String> {
         .collect()
 }
 
-pub use imp::{cameras, displays, microphones, LiveTake};
+/// One downscaled display frame for the recorder's preview, RGBA.
+#[derive(Debug, Clone)]
+pub struct PreviewFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Preview frames are at most this wide (the stage is ~1000 px; a
+/// half-resolution picture reads fine and keeps IPC small).
+pub const PREVIEW_MAX_WIDTH: u32 = 640;
+
+pub use imp::{cameras, displays, microphones, preview_frame, preview_stop, LiveTake};
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -755,9 +767,14 @@ mod imp {
     // a time.
     unsafe impl Send for State {}
 
+    /// Where a delegate's samples go.
+    enum Target {
+        Take(Stream, Arc<Shared>),
+        Preview(Arc<PreviewSink>),
+    }
+
     struct DelegateIvars {
-        stream: Stream,
-        shared: Arc<Shared>,
+        target: Target,
     }
 
     define_class!(
@@ -779,13 +796,14 @@ mod imp {
                 sample: &CMSampleBuffer,
                 _connection: &AVCaptureConnection,
             ) {
-                let ivars = self.ivars();
+                let target = &self.ivars().target;
                 // Never unwind into AVFoundation's queue.
-                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ivars.shared.on_sample(ivars.stream, sample)
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match target {
+                    Target::Take(stream, shared) => shared.on_sample(*stream, sample),
+                    Target::Preview(sink) => sink.on_sample(sample),
                 }));
-                if ok.is_err() {
-                    ivars.shared.fail("internal error while recording".into());
+                if let (Err(_), Target::Take(_, shared)) = (ok, target) {
+                    shared.fail("internal error while recording".into());
                 }
             }
         }
@@ -794,8 +812,8 @@ mod imp {
     );
 
     impl CaptureDelegate {
-        fn new(stream: Stream, shared: Arc<Shared>) -> Retained<Self> {
-            let this = Self::alloc().set_ivars(DelegateIvars { stream, shared });
+        fn new(target: Target) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(DelegateIvars { target });
             unsafe { msg_send![super(this), init] }
         }
     }
@@ -812,6 +830,27 @@ mod imp {
         shared: Arc<Shared>,
         camera_primary: bool,
         done: bool,
+        /// Counts this take as live (the preview stays off meanwhile).
+        _live: LiveCount,
+    }
+
+    /// Takes starting or running. The display preview refuses to run while
+    /// any is, so it never competes with a recording for the display.
+    static LIVE_TAKES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    struct LiveCount;
+
+    impl LiveCount {
+        fn new() -> Self {
+            LIVE_TAKES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            LiveCount
+        }
+    }
+
+    impl Drop for LiveCount {
+        fn drop(&mut self) {
+            LIVE_TAKES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     // SAFETY: AVCaptureSession start/stop and notification removal are
@@ -826,6 +865,8 @@ mod imp {
         }
 
         fn start_inner(spec: TakeSpec) -> Result<LiveTake> {
+            let live = LiveCount::new();
+            preview_stop();
             let camera_primary = matches!(spec.video, VideoSource::Camera(_));
             if camera_primary {
                 ensure_access(MEDIA_VIDEO, "camera", "Camera")?;
@@ -866,6 +907,7 @@ mod imp {
                 shared: Arc::new(Shared(Mutex::new(state))),
                 camera_primary,
                 done: false,
+                _live: live,
             };
 
             // Primary session: the video source + the microphone.
@@ -945,7 +987,7 @@ mod imp {
         fn add_video_output(&mut self, session: &AVCaptureSession, stream: Stream) -> Result<()> {
             let output = unsafe { AVCaptureVideoDataOutput::new() };
             let queue = DispatchQueue::new(&format!("dev.localfirst.roughcut.capture.{stream:?}"), None);
-            let delegate = CaptureDelegate::new(stream, self.shared.clone());
+            let delegate = CaptureDelegate::new(Target::Take(stream, self.shared.clone()));
             let settings = dict(vec![("PixelFormatType", int(PIXEL_420V as i64))]);
             guarded("video output setup", || unsafe {
                 output.setVideoSettings(Some(&*settings));
@@ -965,7 +1007,7 @@ mod imp {
         fn add_audio_output(&mut self, session: &AVCaptureSession) -> Result<()> {
             let output = unsafe { AVCaptureAudioDataOutput::new() };
             let queue = DispatchQueue::new("dev.localfirst.roughcut.capture.Audio", None);
-            let delegate = CaptureDelegate::new(Stream::Audio, self.shared.clone());
+            let delegate = CaptureDelegate::new(Target::Take(Stream::Audio, self.shared.clone()));
             // Mono 48 kHz float: the MacBook mic array reports THREE
             // channels, and 3-channel AAC plays silent outside ffmpeg.
             let settings = dict(vec![
@@ -1096,6 +1138,203 @@ mod imp {
         Ok(())
     }
 
+    // ---- display preview -------------------------------------------------
+
+    #[link(name = "CoreMedia", kind = "framework")]
+    extern "C" {
+        fn CMSampleBufferGetImageBuffer(sample: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    extern "C" {
+        fn CVPixelBufferLockBaseAddress(buffer: *mut std::ffi::c_void, flags: u64) -> i32;
+        fn CVPixelBufferUnlockBaseAddress(buffer: *mut std::ffi::c_void, flags: u64) -> i32;
+        fn CVPixelBufferGetBaseAddress(buffer: *mut std::ffi::c_void) -> *mut u8;
+        fn CVPixelBufferGetBytesPerRow(buffer: *mut std::ffi::c_void) -> usize;
+        fn CVPixelBufferGetWidth(buffer: *mut std::ffi::c_void) -> usize;
+        fn CVPixelBufferGetHeight(buffer: *mut std::ffi::c_void) -> usize;
+        fn CVPixelBufferGetPixelFormatType(buffer: *mut std::ffi::c_void) -> u32;
+    }
+
+    const PIXEL_BGRA: u32 = 1_111_970_369; // kCVPixelFormatType_32BGRA
+    const LOCK_READ_ONLY: u64 = 1; // kCVPixelBufferLock_ReadOnly
+    /// The preview stops when nobody has asked for a frame for this long
+    /// (the recorder closed without saying so).
+    const PREVIEW_IDLE: Duration = Duration::from_secs(3);
+
+    /// Holds the newest frame until the recorder picks it up.
+    struct PreviewSink {
+        latest: Mutex<Option<PreviewFrame>>,
+    }
+
+    impl PreviewSink {
+        fn on_sample(&self, sample: &CMSampleBuffer) {
+            if debug() {
+                eprintln!("[preview] frame at {:.3}s", seconds(unsafe { sample.presentation_time_stamp() }));
+            }
+            if let Some(frame) = unsafe { rgba_frame(sample) } {
+                *self.latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
+            }
+        }
+    }
+
+    /// Copy a BGRA sample into an RGBA frame no wider than
+    /// PREVIEW_MAX_WIDTH. Each output pixel averages four samples spread
+    /// over its block — cheap, and text stays readable.
+    unsafe fn rgba_frame(sample: &CMSampleBuffer) -> Option<PreviewFrame> {
+        let buffer = CMSampleBufferGetImageBuffer(sample as *const CMSampleBuffer as *const std::ffi::c_void);
+        if buffer.is_null() || CVPixelBufferGetPixelFormatType(buffer) != PIXEL_BGRA {
+            return None;
+        }
+        if CVPixelBufferLockBaseAddress(buffer, LOCK_READ_ONLY) != 0 {
+            return None;
+        }
+        let (w, h) = (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer));
+        let stride = CVPixelBufferGetBytesPerRow(buffer);
+        let base = CVPixelBufferGetBaseAddress(buffer);
+        let frame = if base.is_null() || w == 0 || h == 0 {
+            None
+        } else {
+            let step = w.div_ceil(PREVIEW_MAX_WIDTH as usize).max(1);
+            let (ow, oh) = (w / step, h / step);
+            let src = std::slice::from_raw_parts(base, stride * h);
+            let half = step / 2;
+            let at = |x: usize, y: usize, c: usize| src[y * stride + x * 4 + c] as u32;
+            let mut rgba = Vec::with_capacity(ow * oh * 4);
+            for y in 0..oh {
+                let (y0, y1) = (y * step, y * step + half);
+                for x in 0..ow {
+                    let (x0, x1) = (x * step, x * step + half);
+                    let avg = |c| ((at(x0, y0, c) + at(x1, y0, c) + at(x0, y1, c) + at(x1, y1, c)) / 4) as u8;
+                    rgba.extend_from_slice(&[avg(2), avg(1), avg(0), 255]);
+                }
+            }
+            Some(PreviewFrame { width: ow as u32, height: oh as u32, rgba })
+        };
+        CVPixelBufferUnlockBaseAddress(buffer, LOCK_READ_ONLY);
+        frame
+    }
+
+    struct Preview {
+        display: u32,
+        session: Retained<AVCaptureSession>,
+        sink: Arc<PreviewSink>,
+        last_poll: Instant,
+        _output: Retained<AnyObject>,
+        _delegate: Retained<CaptureDelegate>,
+        _queue: DispatchRetained<DispatchQueue>,
+    }
+
+    // SAFETY: only start/stop are called on the session, which are
+    // thread-safe; the rest is retained.
+    unsafe impl Send for Preview {}
+
+    impl Preview {
+        fn start(display: u32) -> Result<Preview> {
+            let session = unsafe { AVCaptureSession::new() };
+            let input = display_input(display)?;
+            // Full-size frames, downsampled in rgba_frame: with a scale
+            // factor set, AVCaptureScreenInput delivers one frame and stops
+            // (measured on macOS 26).
+            unsafe { input.setMinFrameDuration(CMTime::new(1, 8)) };
+            add_input(&session, &input, "display")?;
+            let output = unsafe { AVCaptureVideoDataOutput::new() };
+            let queue = DispatchQueue::new("dev.localfirst.roughcut.preview", None);
+            let sink = Arc::new(PreviewSink { latest: Mutex::new(None) });
+            let delegate = CaptureDelegate::new(Target::Preview(sink.clone()));
+            let settings = dict(vec![("PixelFormatType", int(PIXEL_BGRA as i64))]);
+            guarded("preview output setup", || unsafe {
+                output.setVideoSettings(Some(&*settings));
+                output.setAlwaysDiscardsLateVideoFrames(true);
+                output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(&*delegate)), Some(&*queue));
+            })?;
+            if !unsafe { session.canAddOutput(&output) } {
+                return Err(CoreError::Other("couldn't attach the preview output".into()));
+            }
+            unsafe { session.addOutput(&output) };
+            guarded("starting the display preview", || unsafe { session.startRunning() })?;
+            Ok(Preview {
+                display,
+                session,
+                sink,
+                last_poll: Instant::now(),
+                _output: obj(output),
+                _delegate: delegate,
+                _queue: queue,
+            })
+        }
+
+        fn stop(self) {
+            unsafe { self.session.stopRunning() };
+        }
+    }
+
+    fn preview_slot() -> &'static Mutex<Option<Preview>> {
+        static SLOT: std::sync::OnceLock<Mutex<Option<Preview>>> = std::sync::OnceLock::new();
+        SLOT.get_or_init(Default::default)
+    }
+
+    /// The newest preview frame of `display` since the last call (None =
+    /// nothing new yet). Starts the preview on first use and switches it
+    /// when the display changes. Off while a take is starting or running.
+    pub fn preview_frame(display: u32) -> Result<Option<PreviewFrame>> {
+        if LIVE_TAKES.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            preview_stop();
+            return Ok(None);
+        }
+        autoreleasepool(|_| {
+            let mut slot = preview_slot().lock().unwrap_or_else(|p| p.into_inner());
+            if slot.as_ref().is_some_and(|p| p.display != display) {
+                if let Some(old) = slot.take() {
+                    old.stop();
+                }
+            }
+            if slot.is_none() {
+                if !unsafe { CGPreflightScreenCaptureAccess() } {
+                    return Err(unavailable("Screen Recording isn't allowed for RoughCut yet"));
+                }
+                *slot = Some(Preview::start(display)?);
+                spawn_preview_watchdog();
+            }
+            let Some(preview) = slot.as_mut() else { return Ok(None) };
+            preview.last_poll = Instant::now();
+            let frame = preview.sink.latest.lock().unwrap_or_else(|p| p.into_inner()).take();
+            Ok(frame)
+        })
+    }
+
+    /// Stop the display preview (recorder closed, source switched).
+    pub fn preview_stop() {
+        let preview = preview_slot().lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(preview) = preview {
+            autoreleasepool(|_| preview.stop());
+        }
+    }
+
+    /// Stops a preview nobody is polling any more. One watchdog at a time;
+    /// it exits with the preview.
+    fn spawn_preview_watchdog() {
+        static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let mut slot = preview_slot().lock().unwrap_or_else(|p| p.into_inner());
+            let idle = match slot.as_ref() {
+                None => true,
+                Some(p) => p.last_poll.elapsed() > PREVIEW_IDLE,
+            };
+            if idle {
+                if let Some(preview) = slot.take() {
+                    autoreleasepool(|_| preview.stop());
+                }
+                RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        });
+    }
+
     fn display_input(display: u32) -> Result<Retained<AVCaptureScreenInput>> {
         let input = unsafe { AVCaptureScreenInput::initWithDisplayID(AVCaptureScreenInput::alloc(), display) }
             .ok_or_else(|| unavailable("that display isn't connected any more. Pick another one."))?;
@@ -1187,6 +1426,12 @@ mod imp {
     pub fn displays() -> Vec<Display> {
         vec![]
     }
+
+    pub fn preview_frame(_display: u32) -> Result<Option<PreviewFrame>> {
+        Err(CoreError::Unavailable("display preview is only available on macOS".into()))
+    }
+
+    pub fn preview_stop() {}
 
     pub struct LiveTake;
 

@@ -179,6 +179,41 @@ async fn resolve(video_index: u32, microphone: u32, is_screen: bool, screen_inde
     })
 }
 
+/// The recorder's live display preview: the newest frame of the display at
+/// `display_index` as `[width u32 LE][height u32 LE][RGBA…]`, or empty when
+/// there's nothing new (or a take is starting/running — the preview never
+/// competes with a recording). Starts the preview on first call; it stops
+/// on `stop_screen_preview`, when a take starts, or after 3 s unpolled.
+pub async fn screen_preview(display_index: u32) -> Result<Vec<u8>> {
+    let cached = device_cache().lock().unwrap().as_ref().map(|(_, d)| d.clone());
+    let devices = match cached {
+        Some(d) => d,
+        None => list_devices().await?,
+    };
+    let display: u32 = devices
+        .screens
+        .iter()
+        .find(|s| s.index == display_index)
+        .and_then(|s| s.id.parse().ok())
+        .ok_or_else(|| CoreError::InvalidArg(format!("no display #{display_index}")))?;
+    let frame = tokio::task::spawn_blocking(move || capture::preview_frame(display))
+        .await
+        .map_err(|e| CoreError::Other(format!("display preview: {e}")))??;
+    Ok(frame.map(encode_preview).unwrap_or_default())
+}
+
+fn encode_preview(frame: capture::PreviewFrame) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + frame.rgba.len());
+    out.extend_from_slice(&frame.width.to_le_bytes());
+    out.extend_from_slice(&frame.height.to_le_bytes());
+    out.extend_from_slice(&frame.rgba);
+    out
+}
+
+pub async fn stop_screen_preview() {
+    let _ = tokio::task::spawn_blocking(capture::preview_stop).await;
+}
+
 /// One take's output file(s): camera/primary always, screen when dual.
 #[derive(Clone)]
 struct Take {
@@ -844,6 +879,13 @@ pub fn abort_on_exit() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_frames_carry_their_size() {
+        let out = encode_preview(capture::PreviewFrame { width: 2, height: 1, rgba: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+        assert_eq!(&out[..8], &[2, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&out[8..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
 
     #[test]
     fn take_numbers_parse() {

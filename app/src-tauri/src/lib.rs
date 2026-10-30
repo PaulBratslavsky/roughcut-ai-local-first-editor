@@ -213,6 +213,21 @@ async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
     roughcut_core::adapters::record::combine_recordings(&paths).await.map_err(|e| e.to_json())
 }
 
+/// Newest frame of the display preview, as raw bytes (see
+/// `record::screen_preview`): binary over IPC, no JSON/base64.
+#[tauri::command]
+async fn record_screen_preview(display: u32) -> Result<tauri::ipc::Response, Value> {
+    roughcut_core::adapters::record::screen_preview(display)
+        .await
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn record_screen_preview_stop() {
+    roughcut_core::adapters::record::stop_screen_preview().await
+}
+
 #[tauri::command]
 fn screen_permission_status() -> bool {
     roughcut_core::adapters::record::screen_permission()
@@ -338,6 +353,8 @@ pub fn run() {
             combine_recordings,
             delete_recording,
             attach_screen_media,
+            record_screen_preview,
+            record_screen_preview_stop,
             screen_permission_status,
             request_screen_permission,
             open_privacy_settings
