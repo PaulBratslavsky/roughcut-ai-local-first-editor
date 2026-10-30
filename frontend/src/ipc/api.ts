@@ -162,7 +162,9 @@ export async function attachScreenMedia(projectId: string, filePath: string): Pr
 }
 
 export async function recordStatus(): Promise<RecordingStatus> {
-  if (!isTauri) return { recording: false, paused: false, take: 0, elapsed_s: 0, total_s: 0, out_path: null };
+  if (!isTauri) {
+    return { recording: false, paused: false, take: 0, elapsed_s: 0, total_s: 0, out_path: null, error: null };
+  }
   return invoke<RecordingStatus>("record_status");
 }
 

@@ -1,7 +1,8 @@
-// The recorder screen (M1: camera + mic). Live preview runs on the webview's
-// getUserMedia while ffmpeg owns the actual capture — the M1 spike is
-// whether macOS lets both read the camera at once; if the preview track
-// dies when recording starts, we say so instead of looking frozen.
+// The recorder screen: camera, display, or both, plus a mic. The live
+// preview runs on the webview's getUserMedia; the core captures natively
+// (AVFoundation, ADR-0006), sharing the camera with the preview and with
+// other apps. If the preview track dies when recording starts, we say so
+// instead of looking frozen.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -300,12 +301,13 @@ export function RecorderPanel() {
       } else if (st.paused) {
         setTake(st.take || 1);
         setDoneTakesS(st.total_s);
+        if (st.error) setError(`the last take stopped: ${st.error} — takes so far are kept`);
         setPhase("paused");
       }
     }).catch(() => {});
   }, []);
 
-  // Device list (ffmpeg's avfoundation indexes — the source of truth).
+  // Device list from the core; indexes go back to it on start.
   useEffect(() => {
     void recordDevices()
       .then((d) => {
@@ -321,11 +323,12 @@ export function RecorderPanel() {
       .catch((e) => setError(errText(e)));
   }, []);
 
-  // Live preview: match the selected ffmpeg device to a webview device by
-  // LABEL (separate namespaces; names align in practice). The spike
+  // Live preview: match the selected device to a webview device by LABEL
+  // (separate namespaces; both are AVFoundation names, so they align). The spike
   // instrumentation: if the track dies while recording, report it.
   const cameraName =
     source !== "screen" ? devices?.cameras.find((c) => c.index === camera)?.name : undefined;
+  const screenName = devices?.screens.find((s) => s.index === screen)?.name;
   useEffect(() => {
     let cancelled = false;
     setPreviewNote(null);
@@ -413,7 +416,9 @@ export function RecorderPanel() {
         if (s.paused) {
           // Backend salvaged a dead child as a paused session — offer
           // resume/finish instead of pretending nothing was recorded.
-          setError("the capture process stopped — takes so far are kept; resume or finish");
+          setError(
+            `the take stopped: ${s.error ?? "the capture ended unexpectedly"} — takes so far are kept; resume or finish`,
+          );
           setDoneTakesS(s.total_s);
           setTake(s.take || 1);
           setPhase("paused");
@@ -458,8 +463,9 @@ export function RecorderPanel() {
       clearInterval(t);
       countdownRef.current = null;
       if (!aliveRef.current) return;
-      // Start before the "0" frame: ffmpeg's camera warm-up (~2s) overlaps
-      // the tail of the countdown instead of eating the take's first words.
+      // Start before the "0" frame: camera warm-up overlaps the tail of the
+      // countdown instead of eating the take's first words (start resolves
+      // once every stream is delivering).
       recordStart(video, mic, source === "screen", source === "both" ? (screen ?? undefined) : undefined)
         .then(() => {
           setElapsed(0);
@@ -619,7 +625,7 @@ export function RecorderPanel() {
           <>
             <div className="screen-backdrop">
               <span>
-                display {screen ?? "?"} records here (with cursor)
+                {screenName ?? "the display"} records here (with cursor)
               </span>
             </div>
             {(["tl", "tr", "bl", "br"] as const).map((c) => (
@@ -667,7 +673,7 @@ export function RecorderPanel() {
           />
         ) : source === "screen" && phase !== "recording" && phase !== "paused" ? (
           <div className="recorder-screen-ph">
-            <span>display {screen ?? "?"} will be captured (cursor included)</span>
+            <span>{screenName ?? "the display"} will be captured (cursor included)</span>
             <span className="recorder-screen-sub">
               no live preview for screens — the first screen take asks for the
               Screen Recording permission (System Settings ▸ Privacy &amp; Security)

@@ -117,7 +117,8 @@ app. The full surface is documented in [`docs/tool-api.md`](docs/tool-api.md).
 ### Record in the app
 
 RoughCut records as well as edits: camera, screen, or both at once
-(presentation mode — two synced files, one ffmpeg process). Takes are
+(presentation mode — two synced files, captured natively and shared
+with other apps using the camera, like OBS). Takes are
 crash-safe fragmented MP4; pause for a break and the takes stitch
 losslessly on finish. Dual recordings composite live — screen full-frame
 with your face as a round or rounded bubble in any corner, resizable,

@@ -1,24 +1,26 @@
-//! Capture: record camera + mic through ffmpeg's avfoundation input.
-//! M1 scope — camera-only sessions; the same session machinery grows screen
-//! (M2) and dual capture (M3). One active session at a time; liveness is
-//! honest (try_wait, same lesson as the managed LLM sidecar).
+//! Recording sessions: takes, pause/resume, finish, and the recordings
+//! library. Capture itself is native (`super::capture`, ADR-0006); ffmpeg
+//! only stitches takes and evens out mic levels at the end. One active
+//! session at a time; liveness is honest (a dead take reports why).
 
+use super::capture::{self, LiveTake, TakeSpec, VideoSource};
 use crate::error::{CoreError, Result};
-use crate::events::{ProgressTask, SharedSink};
+use crate::events::{send, CoreEvent, ProgressTask, SharedSink};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Mutex;
-use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-bindings", ts(export))]
 #[derive(Debug, Clone, Serialize)]
 pub struct CaptureDevice {
+    /// Position in its list; what the recorder passes back to start.
     pub index: u32,
+    /// Stable identity: AVCaptureDevice uniqueID, or the display ID.
+    pub id: String,
     pub name: String,
-    /// avfoundation lists displays as video devices ("Capture screen N").
     pub is_screen: bool,
 }
 
@@ -36,7 +38,7 @@ pub struct CaptureDevices {
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingStatus {
     pub recording: bool,
-    /// Paused between takes (session alive, no ffmpeg running).
+    /// Paused between takes (session alive, nothing capturing).
     pub paused: bool,
     /// 1-based current/most recent take number.
     pub take: u32,
@@ -45,6 +47,9 @@ pub struct RecordingStatus {
     /// Seconds across all finished takes + the current one.
     pub total_s: f64,
     pub out_path: Option<String>,
+    /// Why the last take stopped on its own (device unplugged, camera taken
+    /// over, disk full). None after a normal pause.
+    pub error: Option<String>,
 }
 
 /// One file in ~/Movies/RoughCut — the recordings library.
@@ -60,8 +65,8 @@ pub struct RecordingFile {
     pub duration_s: f64,
 }
 
-/// Screen Recording TCC, asked directly (ffmpeg can't tell us — denied
-/// capture just delivers zero frames forever).
+/// Screen Recording TCC, asked directly (a denied capture just delivers no
+/// frames).
 #[cfg(target_os = "macos")]
 mod tcc {
     #[link(name = "CoreGraphics", kind = "framework")]
@@ -93,63 +98,36 @@ pub fn request_screen_permission() -> bool {
     true
 }
 
-/// Parse `ffmpeg -f avfoundation -list_devices true -i ""` stderr.
-/// (ffmpeg exits non-zero for this invocation by design — the listing IS
-/// the output.)
-pub fn parse_devices(stderr: &str) -> CaptureDevices {
-    let mut cameras = vec![];
-    let mut screens = vec![];
-    let mut microphones = vec![];
-    let mut section = "";
-    for line in stderr.lines() {
-        if line.contains("AVFoundation video devices") {
-            section = "video";
-            continue;
-        }
-        if line.contains("AVFoundation audio devices") {
-            section = "audio";
-            continue;
-        }
-        let Some(idx_start) = line.find("] [") else { continue };
-        let rest = &line[idx_start + 3..];
-        let Some(close) = rest.find(']') else { continue };
-        let Ok(index) = rest[..close].parse::<u32>() else { continue };
-        let name = rest[close + 1..].trim().to_string();
-        if name.is_empty() {
-            continue;
-        }
-        let is_screen = name.starts_with("Capture screen");
-        let dev = CaptureDevice { index, name, is_screen };
-        match section {
-            "video" if is_screen => screens.push(dev),
-            "video" => cameras.push(dev),
-            "audio" => microphones.push(dev),
-            _ => {}
-        }
-    }
-    CaptureDevices { cameras, screens, microphones }
+fn to_devices(list: Vec<capture::Device>) -> Vec<CaptureDevice> {
+    list.into_iter()
+        .enumerate()
+        .map(|(i, d)| CaptureDevice { index: i as u32, id: d.id, name: d.name, is_screen: false })
+        .collect()
 }
 
-/// Enumerate devices (cached ~20s — the Setup panel polls).
+/// Enumerate devices. Cheap (no subprocess), but the Setup panel polls, so
+/// a listing is reused for a few seconds. The last listing is also what a
+/// start request's indexes refer to.
 pub async fn list_devices() -> Result<CaptureDevices> {
     {
         let cache = device_cache().lock().unwrap();
         if let Some((at, devices)) = cache.as_ref() {
-            if at.elapsed().as_secs() < 20 {
+            if at.elapsed().as_secs() < 5 {
                 return Ok(devices.clone());
             }
         }
     }
-    let ffmpeg = super::video::ffmpeg_path()
-        .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
-    let out = Command::new(ffmpeg)
-        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| CoreError::Unavailable(format!("ffmpeg device list: {e}")))?;
-    let devices = parse_devices(&String::from_utf8_lossy(&out.stderr));
+    let devices = tokio::task::spawn_blocking(|| CaptureDevices {
+        cameras: to_devices(capture::cameras()),
+        microphones: to_devices(capture::microphones()),
+        screens: capture::displays()
+            .into_iter()
+            .enumerate()
+            .map(|(i, d)| CaptureDevice { index: i as u32, id: d.id.to_string(), name: d.name, is_screen: true })
+            .collect(),
+    })
+    .await
+    .map_err(|e| CoreError::Other(format!("device listing: {e}")))?;
     *device_cache().lock().unwrap() = Some((std::time::Instant::now(), devices.clone()));
     Ok(devices)
 }
@@ -161,6 +139,46 @@ fn device_cache() -> &'static Mutex<Option<(std::time::Instant, CaptureDevices)>
     C.get_or_init(Default::default)
 }
 
+/// The devices a session records, resolved once at start (indexes can
+/// shift when something is plugged in; IDs don't).
+#[derive(Debug, Clone)]
+struct Devices {
+    video: VideoSource,
+    microphone: String,
+    overlay: Option<u32>,
+}
+
+/// Map the recorder's list indexes to device IDs, using the listing the UI
+/// was shown (or a fresh one if there is none).
+async fn resolve(video_index: u32, microphone: u32, is_screen: bool, screen_index: Option<u32>) -> Result<Devices> {
+    let cached = device_cache().lock().unwrap().as_ref().map(|(_, d)| d.clone());
+    let d = match cached {
+        Some(d) => d,
+        None => list_devices().await?,
+    };
+    let pick = |list: &[CaptureDevice], index: u32, what: &str| {
+        list.iter()
+            .find(|x| x.index == index)
+            .map(|x| x.id.clone())
+            .ok_or_else(|| CoreError::InvalidArg(format!("no {what} #{index} — refresh the device list")))
+    };
+    let display = |index: u32| -> Result<u32> {
+        pick(&d.screens, index, "display")?
+            .parse()
+            .map_err(|_| CoreError::InvalidArg("bad display id".into()))
+    };
+    let video = if is_screen {
+        VideoSource::Display(display(video_index)?)
+    } else {
+        VideoSource::Camera(pick(&d.cameras, video_index, "camera")?)
+    };
+    Ok(Devices {
+        video,
+        microphone: pick(&d.microphones, microphone, "microphone")?,
+        overlay: screen_index.map(display).transpose()?,
+    })
+}
+
 /// One take's output file(s): camera/primary always, screen when dual.
 #[derive(Clone)]
 struct Take {
@@ -168,26 +186,33 @@ struct Take {
     screen: Option<PathBuf>,
 }
 
+impl Take {
+    fn numbered(base: &str, n: usize, dual: bool) -> Take {
+        Take {
+            primary: recordings_dir().join(format!("{base}-take{n}.mp4")),
+            screen: dual.then(|| recordings_dir().join(format!("{base}-screen-take{n}.mp4"))),
+        }
+    }
+}
+
 struct Session {
-    /// None while paused between takes.
-    child: Option<Child>,
-    /// A pause/stop is finalizing the current take (child taken, await in
-    /// flight) — resume/stop must wait instead of interleaving.
+    /// The take being captured. None while paused between takes.
+    live: Option<LiveTake>,
+    /// A pause/stop is finalizing the current take — resume/stop must wait
+    /// instead of interleaving.
     transitioning: bool,
     started: std::time::Instant,
-    /// Wall seconds accumulated in finished takes.
+    /// Seconds recorded in finished takes.
     finished_s: f64,
     /// Finished takes, in order.
     takes: Vec<Take>,
-    /// The take being written by the current child.
+    /// The take being written by `live`.
     current: Take,
-    video_index: u32,
-    microphone: u32,
-    is_screen: bool,
-    /// Dual capture: ALSO record this display alongside the camera.
-    screen_index: Option<u32>,
+    devices: Devices,
     /// Base name (no extension) all takes share.
     base: String,
+    /// Why the most recent take stopped on its own.
+    last_error: Option<String>,
 }
 
 /// What a finished session hands back.
@@ -222,7 +247,8 @@ fn check_disk_space(dir: &std::path::Path) -> Result<()> {
     let free_gb = avail_kb as f64 / 1_048_576.0;
     if free_gb < 2.0 {
         return Err(CoreError::Unavailable(format!(
-            "only {free_gb:.1} GB free on disk — free up space before recording              (a minute of capture is roughly 50-100 MB)"
+            "only {free_gb:.1} GB free on disk — free up space before recording \
+             (a minute of capture is roughly 50-150 MB)"
         )));
     }
     Ok(())
@@ -232,228 +258,34 @@ fn recordings_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Movies/RoughCut")
 }
 
-/// A capture mode the device actually supports.
-#[derive(Debug, Clone, Copy)]
-struct Mode {
-    w: u32,
-    h: u32,
-    fps_min: f64,
-    fps_max: f64,
+/// Start capturing one take. Waits until every stream is delivering, so a
+/// device that can't be used fails HERE with a reason, not as a dead take.
+async fn start_take(sink: &SharedSink, devices: &Devices, take: &Take) -> Result<LiveTake> {
+    let spec = TakeSpec {
+        video: devices.video.clone(),
+        microphone: devices.microphone.clone(),
+        overlay: devices.overlay,
+        primary_path: take.primary.clone(),
+        screen_path: take.screen.clone(),
+    };
+    let live = tokio::task::spawn_blocking(move || LiveTake::start(spec))
+        .await
+        .map_err(|e| CoreError::Other(format!("capture start: {e}")))??;
+    send(sink, CoreEvent::progress(ProgressTask::Recording, None, 0.0, "recording…"));
+    Ok(live)
 }
 
-/// avfoundation only lists a camera's modes in the ERROR for an impossible
-/// request — so ask for 9999x9999 and parse the refusal. Cached per index.
-async fn probe_modes(camera: u32) -> Vec<Mode> {
-    {
-        let cache = mode_cache().lock().unwrap();
-        if let Some(modes) = cache.get(&camera) {
-            return modes.clone();
-        }
-    }
-    let Some(ffmpeg) = super::video::ffmpeg_path() else { return vec![] };
-    let out = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-f", "avfoundation",
-            "-video_size", "9999x9999",
-            "-i", &format!("{camera}:none"),
-            "-t", "0.1",
-            "-f", "null", "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-    let mut modes = vec![];
-    if let Ok(out) = out {
-        for line in String::from_utf8_lossy(&out.stderr).lines() {
-            // "  1920x1080@[60.000000 60.000000]fps"
-            let line = line.trim();
-            let Some((dims, rest)) = line.split_once("@[") else { continue };
-            let dims = dims.rsplit(' ').next().unwrap_or(dims);
-            let Some((w, h)) = dims.split_once('x') else { continue };
-            let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse()) else { continue };
-            let Some(range) = rest.strip_suffix("]fps") else { continue };
-            let mut parts = range.split_whitespace();
-            let (Some(lo), Some(hi)) = (parts.next(), parts.next()) else { continue };
-            let (Ok(fps_min), Ok(fps_max)) = (lo.parse(), hi.parse()) else { continue };
-            modes.push(Mode { w, h, fps_min, fps_max });
-        }
-    }
-    mode_cache().lock().unwrap().insert(camera, modes.clone());
-    modes
-}
-
-fn mode_cache() -> &'static Mutex<std::collections::HashMap<u32, Vec<Mode>>> {
-    static C: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, Vec<Mode>>>> =
-        std::sync::OnceLock::new();
-    C.get_or_init(Default::default)
-}
-
-/// Best mode for a talking head: true landscape beats square beats portrait
-/// (cameras offer square Center-Stage modes whose AREA beats 1080p), then
-/// closest to 16:9, then largest. fps clamps toward 30 — 60fps doubles file
-/// size for no spoken-video gain.
-fn pick_mode(modes: &[Mode]) -> Option<(Mode, f64)> {
-    let best = modes.iter().max_by_key(|m| {
-        let landscape = (m.w > m.h) as u64;
-        let aspect = m.w as f64 / m.h.max(1) as f64;
-        // 0 deviation = perfect 16:9; subtract from a big constant so
-        // closer-to-16:9 ranks higher inside an integer key.
-        let aspect_rank = 1_000_000u64.saturating_sub((aspect - 16.0 / 9.0).abs().mul_add(100_000.0, 0.0) as u64);
-        (landscape, aspect_rank, m.w as u64 * m.h as u64)
-    })?;
-    let fps = 30.0_f64.clamp(best.fps_min, best.fps_max);
-    Some((*best, fps))
-}
-
-/// Spawn one ffmpeg take. One process even for dual capture — both inputs
-/// share the process clock, so camera and screen files stay in sync without
-/// any alignment pass. Output 1 = primary (camera or screen) with mic;
-/// output 2 (dual only) = screen, video-only.
-async fn spawn_take(
-    sink: &SharedSink,
-    video_index: u32,
-    microphone: u32,
-    is_screen: bool,
-    screen_index: Option<u32>,
-    take: &Take,
-) -> Result<Child> {
-    let ffmpeg = super::video::ffmpeg_path()
-        .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
-    let mut args: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-nostats".into(),
-        "-f".into(), "avfoundation".into(),
-    ];
-    if is_screen {
-        // Displays have no mode list; 30fps capture + the cursor. Retina
-        // dims can be odd — h264 needs even, hence the crop filter below.
-        args.push("-capture_cursor".into());
-        args.push("1".into());
-        args.push("-framerate".into());
-        args.push("30".into());
-    } else if let Some((mode, fps)) = pick_mode(&probe_modes(video_index).await) {
-        // Cameras lie about defaults (a 1920x1080-only camera fell back to
-        // 1080x1920 portrait when asked for an unsupported rate) — request
-        // a mode the device actually advertises.
-        args.push("-framerate".into());
-        args.push(format!("{fps}"));
-        args.push("-video_size".into());
-        args.push(format!("{}x{}", mode.w, mode.h));
-    } else {
-        args.push("-framerate".into());
-        args.push("30".into());
-    }
-    args.push("-i".into());
-    args.push(format!("{video_index}:{microphone}"));
-
-    // Dual: the display as a SECOND input of the same process.
-    if let Some(screen) = screen_index {
-        args.extend([
-            "-f".into(), "avfoundation".into(),
-            "-capture_cursor".into(), "1".into(),
-            "-framerate".into(), "30".into(),
-            "-i".into(), format!("{screen}:none"),
-        ]);
-    }
-
-    // Output 1: primary. Even-dims crop when the primary IS a screen.
-    if is_screen {
-        args.extend(["-vf".into(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".into()]);
-    }
-    args.extend([
-        "-map".into(), "0:v".into(),
-        "-map".into(), "0:a".into(),
-        // Mic gain: macOS default input levels are WHISPER-quiet (live
-        // capture measured 2.4% peak speech). Dynamic normalization lifts
-        // voice to a usable level at record time, like every screen
-        // recorder's mic boost.
-        "-af".into(), "dynaudnorm=f=300:g=11".into(),
-        // Mono, explicitly: the MacBook mic array reports THREE channels
-        // and CoreAudio/WebKit refuse 3-channel AAC outright — recordings
-        // played silent everywhere outside ffmpeg.
-        "-ac".into(), "1".into(),
-        "-c:v".into(), "h264_videotoolbox".into(),
-        "-b:v".into(), "6M".into(),
-        "-pix_fmt".into(), "yuv420p".into(),
-        "-c:a".into(), "aac".into(),
-        "-b:a".into(), "192k".into(),
-        // Fragmented MP4: the index is written incrementally, so a
-        // crash/kill mid-take loses nothing already on disk. finish()
-        // normalizes takes into a clean faststart MP4.
-        "-movflags".into(), "+frag_keyframe+empty_moov".into(),
-        "-progress".into(), "pipe:1".into(),
-        take.primary.to_string_lossy().into_owned(),
-    ]);
-    // Output 2: the screen, video-only.
-    if screen_index.is_some() {
-        let screen_out = take
-            .screen
-            .as_ref()
-            .ok_or_else(|| CoreError::Other("dual take missing screen path".into()))?;
-        args.extend([
-            "-map".into(), "1:v".into(),
-            "-vf".into(), "crop=trunc(iw/2)*2:trunc(ih/2)*2".into(),
-            "-c:v".into(), "h264_videotoolbox".into(),
-            "-b:v".into(), "8M".into(),
-            "-pix_fmt".into(), "yuv420p".into(),
-            "-movflags".into(), "+frag_keyframe+empty_moov".into(),
-            screen_out.to_string_lossy().into_owned(),
-        ]);
-    }
-
-    let mut child = Command::new(ffmpeg)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| CoreError::Unavailable(format!("ffmpeg capture: {e}")))?;
-    if let Some(stdout) = child.stdout.take() {
-        crate::progress::stream_progress(
-            stdout,
-            sink.clone(),
-            ProgressTask::Recording,
-            None,
-            crate::progress::Delimiter::Newline,
-            move |line| {
-                let us = line.strip_prefix("out_time_us=")?.parse::<f64>().ok()?;
-                let s = us / 1_000_000.0;
-                Some((0.0, format!("recording… {:.0}:{:02.0}", (s / 60.0).floor(), s % 60.0)))
-            },
-        );
-    }
-    Ok(child)
-}
-
-/// Gracefully finalize a take ('q' lets ffmpeg write the moov index).
-async fn finalize_take(mut child: Child) -> Result<()> {
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(b"q\n").await;
-        let _ = stdin.flush().await;
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(CoreError::Other(format!("ffmpeg capture exited with {status}"))),
-        Ok(Err(e)) => Err(CoreError::Other(format!("ffmpeg capture: {e}"))),
-        Err(_) => {
-            let _ = child.start_kill();
-            Err(CoreError::Other(
-                "capture did not finalize within 10s — killed. If this was a SCREEN \
-                 recording, check System Settings ▸ Privacy & Security ▸ Screen Recording \
-                 includes RoughCut (macOS silently delivers no frames otherwise)."
-                    .into(),
-            ))
-        }
-    }
+/// Close a take's files (blocking work, off the async runtime).
+async fn finish_take(live: LiveTake) -> Result<()> {
+    tokio::task::spawn_blocking(move || live.finish())
+        .await
+        .map_err(|e| CoreError::Other(format!("capture finish: {e}")))?
 }
 
 /// Start a recording session (take 1). First runs trigger the macOS
-/// camera+mic (or screen-recording) permission prompts attributed to the
-/// app. One session at a time. `screen_index` = dual capture: that display
-/// records alongside the camera, two synced files per take.
+/// camera+mic (or screen-recording) permission prompts. One session at a
+/// time. `screen_index` = dual capture: that display records alongside the
+/// camera, two synced files per take.
 pub async fn start_capture_full(
     sink: &SharedSink,
     video_index: u32,
@@ -461,20 +293,21 @@ pub async fn start_capture_full(
     is_screen: bool,
     screen_index: Option<u32>,
 ) -> Result<String> {
-    {
+    let stale = {
         let mut guard = active().lock().unwrap();
-        if let Some(session) = guard.as_mut() {
-            let alive = session
-                .child
-                .as_mut()
-                .map(|c| c.try_wait().ok().flatten().is_none())
-                .unwrap_or(true); // paused sessions count as active
-            if alive {
-                return Err(CoreError::InvalidArg("a recording is already running".into()));
-            }
-            *guard = None;
+        match guard.as_ref() {
+            // A dead take is replaced; paused or live sessions count as active.
+            Some(s) if s.live.as_ref().is_some_and(|l| l.failure().is_some()) => guard.take(),
+            Some(_) => return Err(CoreError::InvalidArg("a recording is already running".into())),
+            None => None,
+        }
+    };
+    if let Some(mut stale) = stale {
+        if let Some(live) = stale.live.take() {
+            let _ = finish_take(live).await;
         }
     }
+    let devices = resolve(video_index, microphone, is_screen, screen_index).await?;
     let dir = recordings_dir();
     std::fs::create_dir_all(&dir)?;
     check_disk_space(&dir)?;
@@ -486,26 +319,34 @@ pub async fn start_capture_full(
         "recording"
     };
     let base = format!("{kind}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
-    let current = Take {
-        primary: dir.join(format!("{base}-take1.mp4")),
-        screen: screen_index.map(|_| dir.join(format!("{base}-screen-take1.mp4"))),
-    };
-    let child =
-        spawn_take(sink, video_index, microphone, is_screen, screen_index, &current).await?;
+    let current = Take::numbered(&base, 1, devices.overlay.is_some());
+    let live = start_take(sink, &devices, &current).await?;
     let primary = current.primary.to_string_lossy().into_owned();
-    *active().lock().unwrap() = Some(Session {
-        child: Some(child),
-        transitioning: false,
-        started: std::time::Instant::now(),
-        finished_s: 0.0,
-        takes: vec![],
-        current,
-        video_index,
-        microphone,
-        is_screen,
-        screen_index,
-        base,
-    });
+    // The lock was released while the take started; another start may have
+    // won. (No guard may live across an await: commands must be Send.)
+    let rejected = {
+        let mut guard = active().lock().unwrap();
+        if guard.is_some() {
+            Some(live)
+        } else {
+            *guard = Some(Session {
+                live: Some(live),
+                transitioning: false,
+                started: std::time::Instant::now(),
+                finished_s: 0.0,
+                takes: vec![],
+                current,
+                devices,
+                base,
+                last_error: None,
+            });
+            None
+        }
+    };
+    if let Some(live) = rejected {
+        let _ = finish_take(live).await;
+        return Err(CoreError::InvalidArg("a recording is already running".into()));
+    }
     Ok(primary)
 }
 
@@ -524,8 +365,9 @@ pub async fn start_camera(sink: &SharedSink, camera: u32, microphone: u32) -> Re
 }
 
 /// Pause: finalize the current take; the session stays alive for resume().
+/// Also how a take that died on its own gets closed and kept.
 pub async fn pause() -> Result<RecordingStatus> {
-    let (child, elapsed) = {
+    let (live, current) = {
         let mut guard = active().lock().unwrap();
         let session = guard
             .as_mut()
@@ -533,39 +375,45 @@ pub async fn pause() -> Result<RecordingStatus> {
         if session.transitioning {
             return Err(CoreError::InvalidArg("a pause/stop is already in flight".into()));
         }
-        let child = session
-            .child
+        let live = session
+            .live
             .take()
             .ok_or_else(|| CoreError::InvalidArg("already paused".into()))?;
         session.transitioning = true;
-        (child, session.started.elapsed().as_secs_f64())
+        (live, session.current.clone())
     };
-    let result = finalize_take(child).await;
+    let died = live.failure();
+    let recorded = live.duration_s();
+    let result = finish_take(live).await;
     let mut guard = active().lock().unwrap();
     if let Some(session) = guard.as_mut() {
-        session.finished_s += elapsed;
-        let mut take = session.current.clone();
-        // A take whose screen output never materialized (TCC denied, device
-        // gone) degrades to camera-only instead of poisoning the final
-        // screen concat.
-        if let Some(scr) = &take.screen {
-            if !scr.is_file() {
-                take.screen = None;
-            }
+        session.finished_s += recorded;
+        let mut take = current;
+        // A take whose screen file never materialized degrades to
+        // camera-only instead of poisoning the final screen concat.
+        if take.screen.as_ref().is_some_and(|s| !s.is_file()) {
+            take.screen = None;
         }
         if result.is_ok() && take.primary.is_file() {
             session.takes.push(take);
         }
         session.transitioning = false;
+        if died.is_some() {
+            session.last_error = died.clone();
+        }
     }
-    result?;
     drop(guard);
+    // A take that died is already reported via status(); closing it is the
+    // point of this call, so its finish error isn't news.
+    if died.is_none() {
+        result?;
+    }
     Ok(status())
 }
 
-/// Resume after pause: a new take file, same devices.
+/// Resume after pause (or after a take died): a new take file, same devices.
 pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
-    let (camera, microphone, is_screen, screen_index, next) = {
+    let dead = {
         let guard = active().lock().unwrap();
         let session = guard
             .as_ref()
@@ -573,39 +421,71 @@ pub async fn resume(sink: &SharedSink) -> Result<RecordingStatus> {
         if session.transitioning {
             return Err(CoreError::InvalidArg("a pause/stop is still finalizing".into()));
         }
-        if session.child.is_some() {
-            return Err(CoreError::InvalidArg("not paused".into()));
+        match &session.live {
+            Some(live) if live.failure().is_none() => {
+                return Err(CoreError::InvalidArg("not paused".into()))
+            }
+            Some(_) => true,
+            None => false,
         }
-        let n = session.takes.len() + 1 + 1; // finished + the new one
-        (
-            session.video_index,
-            session.microphone,
-            session.is_screen,
-            session.screen_index,
-            Take {
-                primary: recordings_dir().join(format!("{}-take{}.mp4", session.base, n)),
-                screen: session
-                    .screen_index
-                    .map(|_| recordings_dir().join(format!("{}-screen-take{}.mp4", session.base, n))),
-            },
-        )
     };
-    let child = spawn_take(sink, camera, microphone, is_screen, screen_index, &next).await?;
-    {
-        let mut guard = active().lock().unwrap();
+    if dead {
+        pause().await?;
+    }
+    let (devices, next) = {
+        let guard = active().lock().unwrap();
         let session = guard
-            .as_mut()
-            .ok_or_else(|| CoreError::InvalidArg("session vanished during resume".into()))?;
-        session.child = Some(child);
-        session.current = next;
-        session.started = std::time::Instant::now();
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidArg("no recording session".into()))?;
+        // Name past every take so far, kept or not.
+        let n = session.takes.len().max(take_number(&session.current)) + 1;
+        (session.devices.clone(), Take::numbered(&session.base, n, session.devices.overlay.is_some()))
+    };
+    let live = match start_take(sink, &devices, &next).await {
+        Ok(live) => live,
+        Err(e) => {
+            if let Some(session) = active().lock().unwrap().as_mut() {
+                session.last_error = Some(e.to_string());
+            }
+            return Err(e);
+        }
+    };
+    // The lock was released while the take started: another resume (or a
+    // stop) may have won the race. Never orphan a running capture.
+    let rejected = {
+        let mut guard = active().lock().unwrap();
+        match guard.as_mut() {
+            None => Some((live, "session vanished during resume")),
+            Some(s) if s.live.is_some() => Some((live, "not paused")),
+            Some(session) => {
+                session.live = Some(live);
+                session.current = next;
+                session.started = std::time::Instant::now();
+                session.last_error = None;
+                None
+            }
+        }
+    };
+    if let Some((live, why)) = rejected {
+        let _ = finish_take(live).await;
+        return Err(CoreError::InvalidArg(why.into()));
     }
     Ok(status())
 }
 
+/// "…-take3.mp4" → 3.
+fn take_number(take: &Take) -> usize {
+    take.primary
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit("-take").next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
 pub fn status() -> RecordingStatus {
-    let mut guard = active().lock().unwrap();
-    let Some(session) = guard.as_mut() else {
+    let guard = active().lock().unwrap();
+    let Some(session) = guard.as_ref() else {
         return RecordingStatus {
             recording: false,
             paused: false,
@@ -613,95 +493,95 @@ pub fn status() -> RecordingStatus {
             elapsed_s: 0.0,
             total_s: 0.0,
             out_path: None,
+            error: None,
         };
     };
-    let take = (session.takes.len() + 1) as u32;
-    match session.child.as_mut() {
+    let out_path = Some(session.current.primary.to_string_lossy().into_owned());
+    match &session.live {
         None => RecordingStatus {
             recording: false,
             paused: true,
             take: session.takes.len() as u32,
             elapsed_s: 0.0,
             total_s: session.finished_s,
-            out_path: Some(session.current.primary.to_string_lossy().into_owned()),
+            out_path,
+            error: session.last_error.clone(),
         },
-        Some(child) => match child.try_wait() {
-            Ok(None) => {
+        Some(live) => match live.failure() {
+            None => {
                 let elapsed = session.started.elapsed().as_secs_f64();
                 RecordingStatus {
                     recording: true,
                     paused: false,
-                    take,
+                    take: (session.takes.len() + 1) as u32,
                     elapsed_s: elapsed,
                     total_s: session.finished_s + elapsed,
-                    out_path: Some(session.current.primary.to_string_lossy().into_owned()),
+                    out_path,
+                    error: None,
                 }
             }
-            _ => {
-                // Child died (disk full, device yanked, crash). Do NOT reap:
-                // finished takes are salvageable — present as paused so the
-                // user can resume (new take) or finish (stitch what exists).
-                session.child = None;
-                let mut take = session.current.clone();
-                if let Some(scr) = &take.screen {
-                    if !scr.is_file() {
-                        take.screen = None;
-                    }
-                }
-                if take.primary.is_file() {
-                    session.takes.push(take);
-                }
-                RecordingStatus {
-                    recording: false,
-                    paused: true,
-                    take: session.takes.len() as u32,
-                    elapsed_s: 0.0,
-                    total_s: session.finished_s,
-                    out_path: Some(session.current.primary.to_string_lossy().into_owned()),
-                }
-            }
+            // The take died (device gone, camera taken over, disk full).
+            // What it wrote is kept: present as paused so the user can
+            // resume (new take) or finish (stitch what exists). The next
+            // pause/resume/stop closes its file.
+            Some(why) => RecordingStatus {
+                recording: false,
+                paused: true,
+                take: (session.takes.len() + 1) as u32,
+                elapsed_s: 0.0,
+                total_s: session.finished_s + live.duration_s(),
+                out_path,
+                error: Some(why),
+            },
         },
     }
 }
 
 /// Finish the session: finalize the current take (if recording), then
-/// stream-copy concat every take into ONE file per stream. Take files stay
-/// in the library either way.
+/// concat every take into ONE file per stream. Take files stay in the
+/// library either way.
 pub async fn stop() -> Result<RecordingOutcome> {
-    let session_exists = active().lock().unwrap().is_some();
-    if !session_exists {
-        return Err(CoreError::InvalidArg("no recording is running".into()));
-    }
-    // Finalize the in-flight take (no-op when paused). A finalize failure
-    // must NOT abort: finished takes are still worth stitching.
-    let recording = active().lock().unwrap().as_ref().map(|s| s.child.is_some()).unwrap_or(false);
+    let capturing = {
+        let guard = active().lock().unwrap();
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidArg("no recording is running".into()))?;
+        // Taking the session now would drop the take a pause is closing.
+        if session.transitioning {
+            return Err(CoreError::InvalidArg("a pause is still finalizing — try again".into()));
+        }
+        session.live.is_some()
+    };
+    // Finalize the in-flight take. A finalize failure must NOT abort:
+    // finished takes are still worth stitching.
     let mut finalize_note: Option<String> = None;
-    if recording {
+    if capturing {
         if let Err(e) = pause().await {
             finalize_note = Some(e.to_string());
         }
     }
-    let (takes, base) = {
+    let (takes, base, last_error) = {
         let mut guard = active().lock().unwrap();
         let session = guard.take().ok_or_else(|| CoreError::InvalidArg("session vanished".into()))?;
-        (session.takes, session.base)
+        (session.takes, session.base, session.last_error)
     };
     if takes.is_empty() {
-        return Err(CoreError::Other(match finalize_note {
-            Some(note) => format!("capture produced no usable takes ({note})"),
-            None => "capture produced no usable takes".into(),
+        let note = finalize_note.or(last_error);
+        return Err(CoreError::Other(match note {
+            Some(note) => format!("nothing usable was recorded ({note})"),
+            None => "nothing usable was recorded".into(),
         }));
     }
-    // Primary stream (always): concat normalizes fragmented takes too.
+    // Primary stream (always), mic levels evened out.
     let primaries: Vec<PathBuf> = takes.iter().map(|t| t.primary.clone()).collect();
     let out = recordings_dir().join(format!("{base}.mp4"));
-    concat(&primaries, &out).await?;
+    concat(&primaries, &out, AudioPass::Normalize).await?;
     // Screen stream (dual sessions). A screen-side failure degrades to a
     // camera-only outcome — never discard a good primary over the overlay.
     let screens: Vec<PathBuf> = takes.iter().filter_map(|t| t.screen.clone()).collect();
     let screen_path = if screens.len() == takes.len() && !screens.is_empty() {
         let sout = recordings_dir().join(format!("{base}-screen.mp4"));
-        match concat(&screens, &sout).await {
+        match concat(&screens, &sout, AudioPass::Copy).await {
             Ok(()) => Some(sout.to_string_lossy().into_owned()),
             Err(_) => None,
         }
@@ -711,45 +591,135 @@ pub async fn stop() -> Result<RecordingOutcome> {
     Ok(RecordingOutcome { path: out.to_string_lossy().into_owned(), screen_path })
 }
 
-/// Lossless concat (`-f concat -c copy`) — instant, and safe because every
-/// input came from the same encoder settings. For library combines we
-/// verify codec/dimensions first.
-async fn concat(inputs: &[PathBuf], out: &PathBuf) -> Result<()> {
+/// What concat does to the audio track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AudioPass {
+    /// Stream copy (library combines, video-only screen files).
+    Copy,
+    /// Re-encode through a dynamic normalizer: macOS default input levels
+    /// are whisper-quiet (live capture measured 2.4% peak speech), so lift
+    /// voice to a usable level, like every screen recorder's mic boost.
+    Normalize,
+}
+
+const NORMALIZE: &str = "dynaudnorm=f=300:g=11";
+
+/// Concat takes into one file. Same-size takes stream-copy the video
+/// (instant); takes of different sizes (another app changed the camera's
+/// format between takes) are scaled to the first take's size and
+/// re-encoded, since stream-copied mixed sizes play broken.
+async fn concat(inputs: &[PathBuf], out: &PathBuf, audio: AudioPass) -> Result<()> {
     let ffmpeg = super::video::ffmpeg_path()
         .ok_or_else(|| CoreError::Unavailable("ffmpeg not found".into()))?;
+    let mut sizes = vec![];
+    for input in inputs {
+        sizes.push(probe_video_size(input).await);
+    }
+    let first = sizes.first().copied().flatten();
+    let uniform = sizes.iter().all(|s| *s == first);
+    let has_audio = audio == AudioPass::Normalize;
     let list_path = std::env::temp_dir().join(format!(
         "roughcut-concat-{}.txt",
         uuid::Uuid::new_v4().simple()
     ));
-    let list: String = inputs
-        .iter()
-        .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
-        .collect();
-    std::fs::write(&list_path, list)?;
+    let args = match (uniform, first) {
+        (false, Some((w, h))) => reencode_args(inputs, out, (w, h), has_audio),
+        _ => {
+            let list: String = inputs
+                .iter()
+                .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
+                .collect();
+            std::fs::write(&list_path, list)?;
+            copy_args(&list_path, out, audio)
+        }
+    };
     let result = Command::new(ffmpeg)
-        .args([
-            "-hide_banner", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", &list_path.to_string_lossy(),
-            "-c", "copy",
-            "-movflags", "+faststart",
-            &out.to_string_lossy(),
-        ])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| CoreError::Other(format!("concat: {e}")))?;
+        .map_err(|e| CoreError::Other(format!("concat: {e}")));
     let _ = std::fs::remove_file(&list_path);
+    let result = result?;
     if !result.status.success() {
-        return Err(CoreError::Other(format!(
-            "concat failed: {}",
-            String::from_utf8_lossy(&result.stderr).chars().take(400).collect::<String>()
-        )));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let tail: String = stderr.chars().rev().take(400).collect::<String>().chars().rev().collect();
+        return Err(CoreError::Other(format!("concat failed: {tail}")));
     }
     Ok(())
+}
+
+/// `-f concat` stream copy, optionally re-encoding audio through the
+/// normalizer.
+fn copy_args(list: &std::path::Path, out: &std::path::Path, audio: AudioPass) -> Vec<String> {
+    let mut args: Vec<String> = ["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    args.push(list.to_string_lossy().into_owned());
+    match audio {
+        AudioPass::Copy => args.extend(["-c", "copy"].map(String::from)),
+        AudioPass::Normalize => args.extend(
+            ["-map", "0:v", "-map", "0:a", "-c:v", "copy", "-af", NORMALIZE, "-ac", "1", "-c:a", "aac", "-b:a", "192k"]
+                .map(String::from),
+        ),
+    }
+    args.extend(["-movflags", "+faststart"].map(String::from));
+    args.push(out.to_string_lossy().into_owned());
+    args
+}
+
+/// Mixed-size takes: scale/pad each to `size`, concat, re-encode.
+fn reencode_args(inputs: &[PathBuf], out: &std::path::Path, size: (u32, u32), has_audio: bool) -> Vec<String> {
+    let (w, h) = size;
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-y".into()];
+    for input in inputs {
+        args.push("-i".into());
+        args.push(input.to_string_lossy().into_owned());
+    }
+    let mut graph = String::new();
+    let mut joined = String::new();
+    for i in 0..inputs.len() {
+        graph.push_str(&format!(
+            "[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,\
+             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v{i}];"
+        ));
+        joined.push_str(&format!("[v{i}]"));
+        if has_audio {
+            joined.push_str(&format!("[{i}:a]"));
+        }
+    }
+    let n = inputs.len();
+    if has_audio {
+        graph.push_str(&format!("{joined}concat=n={n}:v=1:a=1[v][a0];[a0]{NORMALIZE}[a]"));
+    } else {
+        graph.push_str(&format!("{joined}concat=n={n}:v=1:a=0[v]"));
+    }
+    args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into()]);
+    if has_audio {
+        args.extend(["-map", "[a]", "-ac", "1", "-c:a", "aac", "-b:a", "192k"].map(String::from));
+    }
+    args.extend(
+        ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+            .map(String::from),
+    );
+    args.push(out.to_string_lossy().into_owned());
+    args
+}
+
+async fn probe_video_size(path: &PathBuf) -> Option<(u32, u32)> {
+    let ffprobe = super::video::ffprobe_path()?;
+    let out = Command::new(ffprobe)
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (w, h) = text.trim().split_once(',')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 /// The recordings library: every mp4 in ~/Movies/RoughCut, newest first.
@@ -842,7 +812,7 @@ pub async fn combine_recordings(paths: &[String]) -> Result<String> {
         "combined-{}.mp4",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     ));
-    concat(&inputs, &out).await?;
+    concat(&inputs, &out, AudioPass::Copy).await?;
     Ok(out.to_string_lossy().into_owned())
 }
 
@@ -861,39 +831,53 @@ pub fn delete_recording(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Kill any live capture (app exit hook) — better a truncated file than a
-/// zombie ffmpeg holding the camera.
+/// App exit: close any live take properly — its file stays playable.
 pub fn abort_on_exit() {
-    if let Some(mut session) = active().lock().unwrap().take() {
-        if let Some(child) = session.child.as_mut() {
-            let _ = child.start_kill();
+    let session = active().lock().unwrap().take();
+    if let Some(mut session) = session {
+        if let Some(live) = session.live.take() {
+            let _ = live.finish();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_devices;
+    use super::*;
 
     #[test]
-    fn parses_real_avfoundation_listing() {
-        let stderr = r#"[AVFoundation indev @ 0x84cc18140] AVFoundation video devices:
-[AVFoundation indev @ 0x84cc18140] [0] OBS Virtual Camera
-[AVFoundation indev @ 0x84cc18140] [1] MacBook Pro Camera
-[AVFoundation indev @ 0x84cc18140] [2] iphone (6) Camera
-[AVFoundation indev @ 0x84cc18140] [3] MacBook Pro Desk View Camera
-[AVFoundation indev @ 0x84cc18140] [5] Capture screen 0
-[AVFoundation indev @ 0x84cc18140] AVFoundation audio devices:
-[AVFoundation indev @ 0x84cc18140] [0] iphone (6) Microphone
-[AVFoundation indev @ 0x84cc18140] [1] MacBook Pro Microphone
-[in#0 @ 0x84cc18000] Error opening input: Input/output error"#;
-        let d = parse_devices(stderr);
-        assert_eq!(d.cameras.len(), 4);
-        assert_eq!(d.cameras[1].name, "MacBook Pro Camera");
-        assert_eq!(d.screens.len(), 1);
-        assert!(d.screens[0].is_screen);
-        assert_eq!(d.screens[0].index, 5);
-        assert_eq!(d.microphones.len(), 2);
-        assert_eq!(d.microphones[1].index, 1);
+    fn take_numbers_parse() {
+        let t = Take::numbered("presentation-20261029-170000", 3, true);
+        assert_eq!(take_number(&t), 3);
+        assert!(t.screen.unwrap().ends_with("presentation-20261029-170000-screen-take3.mp4"));
+        assert!(Take::numbered("recording-x", 1, false).screen.is_none());
+    }
+
+    #[test]
+    fn copy_concat_normalizes_only_when_asked() {
+        let list = std::path::Path::new("/tmp/list.txt");
+        let out = std::path::Path::new("/tmp/out.mp4");
+        let copy = copy_args(list, out, AudioPass::Copy).join(" ");
+        assert!(copy.contains("-c copy"));
+        assert!(!copy.contains("dynaudnorm"));
+        let norm = copy_args(list, out, AudioPass::Normalize).join(" ");
+        assert!(norm.contains("-c:v copy"));
+        assert!(norm.contains("-af dynaudnorm=f=300:g=11 -ac 1 -c:a aac"));
+        assert!(norm.ends_with("+faststart /tmp/out.mp4"));
+    }
+
+    #[test]
+    fn mixed_size_takes_are_scaled_and_reencoded() {
+        let inputs = vec![PathBuf::from("/a/t1.mp4"), PathBuf::from("/a/t2.mp4")];
+        let out = std::path::Path::new("/a/out.mp4");
+        let args = reencode_args(&inputs, out, (1920, 1080), true);
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("[1:v]scale=1920:1080:force_original_aspect_ratio=decrease"));
+        assert!(graph.contains("[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[v][a0];[a0]dynaudnorm"));
+        assert!(args.join(" ").contains("-map [a] -ac 1 -c:a aac"));
+        let video_only = reencode_args(&inputs, out, (1920, 1080), false);
+        let graph = &video_only[video_only.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.ends_with("[v0][v1]concat=n=2:v=1:a=0[v]"));
+        assert!(!video_only.contains(&"[a]".to_string()));
     }
 }

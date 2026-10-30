@@ -38,7 +38,7 @@ function RecordingRow() {
             for camera &amp; mic permission on the first recording
           </span>
         ) : (
-          <span className="setup-detail">device check needs ffmpeg</span>
+          <span className="setup-detail">couldn't list capture devices</span>
         )}
       </div>
     </div>
