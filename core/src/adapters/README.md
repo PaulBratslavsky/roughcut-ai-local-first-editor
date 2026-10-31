@@ -25,7 +25,8 @@ receive results or file paths.
 | `inference.rs` | Chat completions / tool calls | `OpenAiCompatClient` (OpenAI-compatible HTTP) | — (no mock here) |
 | `embed.rs` | Text embeddings for semantic search | `OllamaEmbedder` (OpenAI-compatible HTTP) | `MockEmbedder` |
 | `face.rs` | Face finding and 9:16 crop math | Apple Vision (`#[cfg(target_os = "macos")]`) | Off macOS: `CoreError::Unavailable` |
-| `record.rs` | Camera / screen / dual capture sessions and the recordings library | ffmpeg `avfoundation` + `h264_videotoolbox` | — (macOS only at runtime) |
+| `capture.rs` | Native capture of one take: devices, camera mode, AVFoundation sessions, H.264 writers | AVFoundation + AVAssetWriter (`#[cfg(target_os = "macos")]`) | Off macOS: empty device lists, `start` is `CoreError::Unavailable` |
+| `record.rs` | Recording sessions (takes, pause/resume, finish) and the recordings library | `capture.rs`; ffmpeg only to concat takes and normalize mic audio | — (macOS only at runtime) |
 
 ## Interface
 
@@ -142,13 +143,31 @@ receive results or file paths.
     `status() -> RecordingStatus`, `stop() -> Result<RecordingOutcome>`.
   - `abort_on_exit()` is the app-exit hook.
 - Devices and permission: `list_devices() -> Result<CaptureDevices>`,
-  `parse_devices(&str) -> CaptureDevices` (pure),
   `screen_permission() -> bool`, `request_screen_permission() -> bool`.
+- Display preview: `screen_preview(display_index) -> Result<Vec<u8>>`
+  (`[width u32 LE][height u32 LE][RGBA…]`, empty when nothing new),
+  `stop_screen_preview()`.
 - Library: `list_recordings() -> Result<Vec<RecordingFile>>`,
   `combine_recordings(paths: &[String]) -> Result<String>`,
   `delete_recording(path: &str) -> Result<()>`.
 - Serializable DTOs (`ts_rs::TS` under `ts-bindings`): `CaptureDevice`,
   `CaptureDevices`, `RecordingStatus`, `RecordingFile`, `RecordingOutcome`.
+
+### `capture.rs`
+
+- Devices: `cameras() -> Vec<Device>`, `microphones() -> Vec<Device>`
+  (`id` = AVCaptureDevice uniqueID), `displays() -> Vec<Display>`
+  (`id` = CGDirectDisplayID, `name` from `label_displays`).
+- One take: `LiveTake::start(TakeSpec) -> Result<LiveTake>` (blocking),
+  `failure(&self) -> Option<String>`, `duration_s(&self) -> f64`,
+  `finish(self) -> Result<()>` (blocking). `TakeSpec` names the video source
+  (`VideoSource::Camera(id)` or `::Display(id)`), the microphone, the optional
+  overlay display, and the output paths.
+- Display preview: `preview_frame(display_id) -> Result<Option<PreviewFrame>>`
+  (newest frame since the last call, RGBA, ≤ `PREVIEW_MAX_WIDTH` = 640 px
+  wide), `preview_stop()`.
+- Pure helpers (unit-tested): `pick_mode`, `target_fps`, `encode_size`,
+  `bitrate`, `label_displays`.
 
 There are no child directories with contracts.
 
@@ -318,78 +337,105 @@ There are no child directories with contracts.
   requires a UTF-8 path. Off macOS it always returns
   `CoreError::Unavailable("face detection needs macOS (Apple Vision)")`.
 
-### Capture (`record.rs`)
+### Capture (`capture.rs`, `record.rs`)
 
+- Capture is native (ADR-0006): one `AVCaptureSession` for the video source +
+  microphone, a second for the display in dual sessions, and one
+  `AVAssetWriter` per output file (H.264 via the hardware encoder, mono AAC
+  48 kHz, fragmented MP4 every 2 s so a crash keeps what was written).
+- **Camera mode.** If `lockForConfiguration` succeeds, `pick_mode` chooses the
+  format (landscape, then closest to 16:9, then largest area; among equal
+  sizes the frame-rate range closest to 30 fps) and the lock is released once
+  the session runs. If another app holds the lock (OBS with a custom-format
+  source), the camera is shared at its current format. Recording never needs
+  the lock.
+- **Sync.** All streams carry host-clock timestamps. Writers are created on
+  each stream's first video frame and all start at `t0` = the latest first
+  frame across video streams; earlier samples (video and audio) are dropped.
+- **Start is honest.** `LiveTake::start` checks camera/mic authorization
+  (prompting once when undetermined) and Screen Recording, then waits up to
+  8 s for every stream to deliver. A source that doesn't fails the start with a
+  reason; a take that never started leaves no files.
+- **Failure.** `failure()` reports AVCaptureSession runtime errors, writer
+  errors, and stalls (no camera video or no microphone audio for 5 s; display
+  frames are not watched).
+- **Timestamps.** Samples more than 10 s away from the host clock's "now" are
+  dropped (a UVC camera shared with OBS delivered a first frame stamped 0).
+  Video is capped at ~30 fps (frames closer than 30 ms are skipped), so a
+  camera another app runs at 60 fps records at 30.
+- `ROUGHCUT_CAPTURE_DEBUG=1` traces sample timestamps and encoder drops to
+  stderr.
+- **Display preview.** One `AVCaptureScreenInput` session at 8 fps for the
+  selected display, BGRA, downsampled in Rust (each output pixel averages four
+  samples). No scale factor: with one set, the screen input delivered a single
+  frame and stopped. The preview refuses to run while any take is starting or
+  running (`LIVE_TAKES`), switches session when the display changes, and stops
+  on `preview_stop`, when a take starts, or after 3 s without a poll (a
+  watchdog thread).
+- Bitrates: camera 0.1 bit/pixel/frame at 30 fps clamped to 4–16 Mbps;
+  displays 0.06 clamped to 6–14 Mbps. Encoded sizes are even and fit within
+  3840×2160 (or 2160×3840).
 - **At most one session**, held in the global `active()` mutex.
   `start_capture_full` refuses with `InvalidArg("a recording is already running")`
-  while a session is live **or paused**. A session whose ffmpeg child has
-  exited is dropped and replaced; its take files stay on disk.
+  while a session is live **or paused**. A session whose take has failed is
+  closed (its file kept) and replaced.
+- Start indexes refer to the last `list_devices()` listing (fetched if there is
+  none) and are resolved to device IDs once per session, so `resume` reopens
+  the same devices even if indexes shift.
 - `start_capture_full` checks free disk space with `df -Pk` and needs at least
   2.0 GB. The check is best-effort: parse failures pass. `resume` does not
   re-check.
 - File naming: `base = "{presentation|screen|recording}-{Local %Y%m%d-%H%M%S}"`.
   - Takes are `{base}-take{n}.mp4`, plus `{base}-screen-take{n}.mp4` for dual
-    sessions.
+    sessions, numbered consecutively.
   - `stop` writes `{base}.mp4` and, for dual sessions, `{base}-screen.mp4`.
   - Take files are never deleted.
-- `pause` and `resume` both refuse while `transitioning` (a pause is still
+- `pause`, `resume` and `stop` refuse while `transitioning` (a pause is still
   finalizing). `pause` errors with `"no recording is running"` or
   `"already paused"`. `resume` errors with `"no recording session"` or
   `"not paused"`.
-- `finalize_take` writes `q\n` to ffmpeg's stdin and waits up to 10 s. On
-  timeout it calls `start_kill()` and returns an error that points at the macOS
-  Screen Recording privacy setting.
-- `pause` pushes a take only when finalize succeeded **and** the primary file
-  exists. A missing screen file degrades that take to camera-only.
-- `status()` is not read-only. If the child has died, it records the take
-  (when the primary file exists) and reports the session as paused so the user
-  can resume or stop.
+- `pause` closes the take (`finish`) and pushes it when finish succeeded
+  **and** the primary file exists. A missing screen file degrades that take to
+  camera-only. A take that had already failed is closed the same way; its
+  failure becomes `RecordingStatus.error` and its finish error is not raised.
+- `status()` is read-only. A failed take reports `paused: true` with `error`
+  set; the next `pause`, `resume` or `stop` closes it. `resume` re-checks the
+  session after starting the new take and closes it rather than orphaning it.
 - `stop` always removes the session. A finalize error does not abort it.
-  - With no usable takes: `CoreError::Other("capture produced no usable takes ...")`.
+  - With no usable takes: `CoreError::Other("nothing usable was recorded ...")`,
+    carrying the finalize note or the last take's failure.
   - The screen stream is concatenated only when **every** take has a screen
     file. A screen concat failure degrades to `screen_path: None`.
-- Concatenation is lossless (`-f concat -safe 0 -c copy -movflags +faststart`).
-  `combine_recordings` requires at least 2 existing files whose ffprobe stream
-  signatures (`codec_type,codec_name,width,height,channels`) match exactly.
-  The inputs may be anywhere. The output goes to `~/Movies/RoughCut`, which
-  `combine_recordings` does not create.
+- Concatenation:
+  - Same-size takes: `-f concat -safe 0`, video stream-copied. The primary
+    stream's audio is re-encoded through `dynaudnorm=f=300:g=11` (mono AAC
+    192k); screen files and `combine_recordings` copy everything.
+  - Takes of different sizes (another app changed the camera format between
+    takes) are scaled/padded to the first take's size and re-encoded with
+    `h264_videotoolbox`.
+  - `combine_recordings` requires at least 2 existing files whose ffprobe
+    stream signatures (`codec_type,codec_name,width,height,channels`) match
+    exactly. The inputs may be anywhere. The output goes to
+    `~/Movies/RoughCut`, which `combine_recordings` does not create.
 - `delete_recording` only deletes canonical paths inside `~/Movies/RoughCut`
   (otherwise `InvalidArg("not a RoughCut recording")`). It is idempotent: a
   path that is already gone returns `Ok`.
 - `list_recordings` returns up to 50 `*.mp4` files in `~/Movies/RoughCut`,
   newest mtime first.
-- Camera mode choice (`pick_mode`) prefers, in order: landscape, closest to
-  16:9, largest area. fps is `30.clamp(fps_min, fps_max)`. Screens capture at
-  30 fps with the cursor and an even-dimension crop. Output 1 always maps
-  `0:a`, so a microphone is required.
-- Capture code is not `cfg`-gated, but it uses `avfoundation` and
-  `h264_videotoolbox`, so it only works on macOS. Elsewhere it fails at runtime.
-  `screen_permission()` / `request_screen_permission()` return `true` off macOS.
+- Off macOS, device lists are empty and starting fails with
+  `CoreError::Unavailable`. `screen_permission()` / `request_screen_permission()`
+  return `true` off macOS.
 
 ### Known hazards (from reading the code; not covered by tests)
 
 - `render_mp4` uses `[k:a]` without checking that the source has an audio
   stream.
-- `record::resume` numbers the next take `takes.len() + 1 + 1`, so after
-  take 1 the next file is `-take3.mp4`. This also disagrees with
-  `status().take`.
-- `record::stop` does not check `transitioning`. A `stop` that races an
-  in-flight `pause` can drop the take being finalized.
-- `start_capture_full` and `resume` release the session lock while
-  `spawn_take` runs. Concurrent calls can each spawn ffmpeg, and the last write
-  wins, orphaning the other child.
-- Recording progress emits the `"recording… M:SS"` message about once per take.
-  The parser always reports fraction `0.0`, and `crate::progress::stream_progress`
-  only emits when the integer percent changes.
-- `pick_mode` calls `f64::clamp`, which panics if a probed `fps_min > fps_max`.
-- A dead capture's take can be discarded. If ffmpeg has already exited
-  non-zero and `status()` has not run since, `pause` (and `stop`, through
-  `pause`) gets a finalize error and does not push the take, although its file
-  is on disk. `status()` would have recorded it.
-- Capture outputs are opened without `-y`. A take path that already exists
-  (after a failed finalize, `resume` reuses the same take number; two sessions
-  started in the same second share a `base`) can leave ffmpeg waiting at its
-  overwrite prompt on stdin while `status()` reports recording.
+- Recording progress emits one `"recording…"` event per take; the recorder UI
+  keeps its own clock.
+- Two sessions started in the same second share a `base`; AVAssetWriter
+  refuses an existing path, so the second start fails instead of overwriting.
+- Display capture uses `AVCaptureScreenInput` (deprecated in favor of
+  ScreenCaptureKit, still functional; measured at a steady 30 fps on macOS 26).
 
 ## Side Effects
 
@@ -397,10 +443,10 @@ There are no child directories with contracts.
   - `video.rs`: `ffprobe` (probe, audio channel count); `ffmpeg` (render,
     16 kHz WAV extract, frame grab, thumbnails, peaks decode to `pipe:1`,
     playable remux).
-  - `record.rs`: `ffmpeg -f avfoundation` (device listing, mode probing,
-    capture); `ffmpeg -f concat -safe 0 … -c copy` (`stop`,
-    `combine_recordings`); `ffprobe` (durations, combine signatures); `df -Pk`
-    (blocking `std::process`).
+  - `record.rs`: `ffmpeg -f concat -safe 0 …` (`stop`, `combine_recordings`;
+    re-encoding when take sizes differ); `ffprobe` (durations, video sizes,
+    combine signatures); `df -Pk` (blocking `std::process`). Capture itself
+    spawns nothing.
   - `transcribe.rs`: `whisper-cli`; `which whisper-cli` (blocking
     `std::process`, also run inside every `capabilities::probe()`).
 - **Filesystem writes.**
@@ -423,9 +469,9 @@ There are no child directories with contracts.
   `~/Movies/RoughCut` and `crate::store::data_dir()`), and `TMPDIR` (via
   `std::env::temp_dir()`, for the concat list).
 - **Global state.**
-  - `record.rs`: `active()` session (`Mutex<Option<Session>>`, holding the live
-    ffmpeg `Child`); `device_cache()` (20 s TTL); `mode_cache()` (per camera,
-    no TTL, empty results cached).
+  - `record.rs`: `active()` session (`Mutex<Option<Session>>`, holding the
+    `LiveTake`); `device_cache()` (5 s TTL, also the listing start indexes
+    refer to).
   - `video.rs`: `ensure_playable_copy`'s `IN_FLIGHT` set.
 - **Events.** `crate::events::send` emits `CoreEvent::progress` with
   `ProgressTask::Export` (render), `ProgressTask::Transcribe` (`WhisperRs`,
@@ -434,18 +480,33 @@ There are no child directories with contracts.
   - Apple Vision through `objc2-vision`: `VNDetectFaceRectanglesRequest`.
   - CoreGraphics TCC FFI: `CGPreflightScreenCaptureAccess`,
     `CGRequestScreenCaptureAccess` (the latter shows a one-time system prompt).
-  - The first `avfoundation` capture triggers camera, microphone and
-    screen-recording permission prompts.
-- **Process lifetime.** `abort_on_exit` kills a live capture child without
-  finalizing it, leaving a fragmented take on disk. `finalize_take` kills
-  ffmpeg after its 10 s timeout.
+  - AVFoundation through `objc2-av-foundation` (`capture.rs`):
+    `AVCaptureDeviceDiscoverySession`, `AVCaptureSession`,
+    `AVCaptureDeviceInput`, `AVCaptureScreenInput`, video/audio data outputs,
+    `AVAssetWriter`. Delegates run on private serial dispatch queues.
+  - CoreGraphics display FFI: `CGGetActiveDisplayList`, `CGDisplayBounds`,
+    `CGDisplayCopyDisplayMode` (pixel size), `CGDisplayIsBuiltin`.
+  - The first capture asks for camera and microphone access
+    (`requestAccessForMediaType`) when macOS hasn't asked yet.
+- **Process lifetime.** `abort_on_exit` finishes a live take (its file is
+  complete). If the app is killed instead, the take keeps everything up to
+  its last 2 s fragment. Dropping a `LiveTake` without `finish` keeps what
+  was written, or deletes the files if the take never started.
 
 ## Verification
 
 - Run (from the workspace root `/Users/paul/fable`): `cargo test -p roughcut-core`
 - This module's unit tests only: `cargo test -p roughcut-core --lib adapters::`
-  (pure tests in `embed.rs`, `face.rs`, `video.rs` (`compute_peaks`), and
-  `record.rs` (`parse_devices`)). `tests/e2e.rs` exercises `MockVideoEngine`,
-  `MockTranscriber` and `MockEmbedder` offline.
+  (pure tests in `embed.rs`, `face.rs`, `video.rs` (`compute_peaks`),
+  `capture.rs` (mode choice, encode size, bitrate, display labels) and
+  `record.rs` (take numbering, concat arguments)). `tests/e2e.rs` exercises
+  `MockVideoEngine`, `MockTranscriber` and `MockEmbedder` offline.
+- Capture on real hardware: `cargo run -p roughcut-core --example
+  native_check` (camera, pause/resume, dual, display), `preview_check`
+  (display preview, switching, off during a take; `PREVIEW_DUMP=<file.ppm>`
+  saves a frame); also `record_smoke`,
+  `takes_smoke`, `screen_smoke`, `dual_smoke`,
+  `crash_smoke`). macOS attributes their camera/mic/screen requests to the
+  app that launched the terminal, which needs those permissions.
 - `WhisperRs` compiles only with `--features whisper-native`, which the default
   test run leaves out.

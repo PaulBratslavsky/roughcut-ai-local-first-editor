@@ -2,7 +2,7 @@
 
 export type RecordingStatus = { recording: boolean, 
 /**
- * Paused between takes (session alive, no ffmpeg running).
+ * Paused between takes (session alive, nothing capturing).
  */
 paused: boolean, 
 /**
@@ -16,4 +16,9 @@ elapsed_s: number,
 /**
  * Seconds across all finished takes + the current one.
  */
-total_s: number, out_path: string | null, };
+total_s: number, out_path: string | null, 
+/**
+ * Why the last take stopped on its own (device unplugged, camera taken
+ * over, disk full). None after a normal pause.
+ */
+error: string | null, };

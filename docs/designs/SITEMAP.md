@@ -35,6 +35,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | [ADR-0003](../adr/0003-generated-frontend-types.md) | 2026-06-10 | Paul Bratslavsky | core/model, frontend/ipc | Frontend model types are generated from Rust (ts-rs). |
 | [ADR-0004](../adr/0004-provisioning-outside-the-tool-registry.md) | 2026-06-10 | Paul Bratslavsky | core/tools, app | Model/toolchain provisioning stays outside the tool registry. |
 | [ADR-0005](../adr/0005-online-editor-architecture.md) | 2026-10-03 | Paul Bratslavsky | all | Proposed: the path to an online (browser-hosted) editor. |
+| [ADR-0006](../adr/0006-native-capture.md) | 2026-10-29 | Paul Bratslavsky | core/adapters/capture, record | Native AVFoundation capture replaces ffmpeg capture, so recording works while OBS or another app holds the camera. |
 | [architecture-audit.md](../architecture-audit.md) | 2026-09-30 | Paul Bratslavsky | all | Full architecture audit across every tier. |
 | [refactor-checklist.md](../refactor-checklist.md) | 2026-06-16 | Paul Bratslavsky | core | Deepening `core/src`: the refactor checklist and its status. |
 | [export-validation.md](../export-validation.md) | 2026-06-10 | Paul Bratslavsky | core/export | NLE export validation against real editors. |

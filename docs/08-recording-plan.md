@@ -46,11 +46,13 @@ until MP4 export.
    screen are two files. Layout (camera / screen / pip + shape + size +
    corner) is project metadata. Non-destructive principle applied to capture
    — and the foundation for v2's per-segment layout switching.
-2. **Capture = one ffmpeg process, two avfoundation inputs, two outputs.**
-   Shared start clock (sync by construction), `h264_videotoolbox` hardware
-   encoding (CPU stays free while presenting), no new dependencies, fits the
-   VideoEngine adapter pattern. ScreenCaptureKit is the v2 upgrade, not the
-   v1 risk.
+2. **Capture = native AVFoundation, one session per source, one writer per
+   file** ([ADR-0006](adr/0006-native-capture.md), 2026-10). Originally one
+   ffmpeg process with two avfoundation inputs; replaced because ffmpeg
+   insists on locking the camera's configuration and fails whenever another
+   app (OBS) holds that lock. Sync is still by construction: host-clock
+   timestamps, every writer starts at the same source time. Hardware H.264
+   via AVAssetWriter; ffmpeg only concatenates takes.
 3. **Mic audio lives in the camera file and is the master track** — it is
    what whisper transcribes, and cuts derived from it apply to both tracks
    (same clock). System-audio capture needs a loopback driver: v2.
@@ -62,9 +64,9 @@ until MP4 export.
   size: S|M|L, corner: BottomRight (only option in v1) }` — an EditOp
   (`set_layout`) so it's undoable and reachable by chat/MCP like everything
   else.
-- `core/src/adapters/record.rs`: device enumeration
-  (`ffmpeg -f avfoundation -list_devices true -i ""`), `start_recording(opts)
-  -> RecordingHandle`, `stop()`. Progress/elapsed via the existing
+- `core/src/adapters/record.rs`: device enumeration (AVFoundation discovery
+  since ADR-0006; originally `ffmpeg -f avfoundation -list_devices`),
+  `start_recording(opts) -> RecordingHandle`, `stop()`. Progress/elapsed via the existing
   ProgressTask enum (`recording`).
 - Permissions in `capabilities`/Setup: camera, mic, screen-recording TCC
   status + prompt triggers ("Recording" row, same pattern as ffmpeg/whisper).

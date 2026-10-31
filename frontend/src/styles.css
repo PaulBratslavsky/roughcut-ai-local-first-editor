@@ -1876,6 +1876,15 @@ input, select { font: inherit; }
   text-align: center;
 }
 .recorder-screen-sub { font-size: 11px; }
+/* Live display preview: fills the stage (screen mode) or the dual-mode
+   backdrop, letterboxed. */
+.screen-live {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
 
 /* audio sync slider */
 .audio-sync-row { display: flex; align-items: center; gap: 10px; }

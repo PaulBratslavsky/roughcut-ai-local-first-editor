@@ -40,8 +40,16 @@ ts-bindings = ["dep:ts-rs"]
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # Face finding for 9:16 reframing: Apple's Vision framework, on-device. Same
 # objc2 generation Tauri already pulls in.
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSURL"] }
+# `exception`: AVFoundation reports bad configuration by throwing; catch it
+# instead of aborting the app.
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSNotification", "NSOperation", "NSProcessInfo", "NSString", "NSURL", "NSValue"] }
+# Recording (adapters/capture.rs): AVFoundation capture sessions + the
+# hardware H.264 encoder via AVAssetWriter. See ADR-0006.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media", "AVAssetWriter", "AVAssetWriterInput", "AVCaptureAudioDataOutput", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureVideoDataOutput", "AVMediaFormat"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTime"] }
+block2 = "0.6"
+dispatch2 = "0.3"
 objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNRequest", "VNRequestHandler", "VNDetectFaceRectanglesRequest", "VNObservation", "VNTypes", "objc2-core-foundation"] }
 
 [dev-dependencies]
