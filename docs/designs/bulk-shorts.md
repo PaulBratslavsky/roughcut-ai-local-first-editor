@@ -485,6 +485,12 @@ fresh-eyes code reviews of the core and the frontend:
     candidate's preview draws a fixed, centred 9:16 guide (`PreviewPanel`'s
     `shortsGuide`, shown only for a candidate's audition). Shared clip
     helpers moved to `panels/clipUtil.ts`.
+*   **Terminal drawer** (added after Phase 1, at the owner's request): a
+    collapsible "terminal" under the player on the Shorts screen, so Claude
+    Code can be run against the app while the cards and saved clips update
+    live. It shows the app's one shell (`state/terminalSession.ts`), the same
+    session as the editor's Terminal tab; switching tabs or screens no longer
+    kills it, only "Restart" does.
 *   **Not measured yet** (needs a real video and the on-device model): scan
     time on a 45-minute video, make time, and peak memory on a 4K render.
 

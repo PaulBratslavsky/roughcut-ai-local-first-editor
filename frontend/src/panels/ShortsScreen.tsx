@@ -48,7 +48,9 @@ import { CandidateCard } from "./CandidateCard";
 import { errText, slugify, useSecondsSince } from "./clipUtil";
 import { PreviewPanel } from "./PreviewPanel";
 import { SavedClipRow } from "./SavedClipRow";
+import { TerminalPanel } from "./TerminalPanel";
 import { TopBar } from "./TopBar";
+import { toggleShortsTerminal, viewStore } from "../state/viewStore";
 
 /** "Scan for shorts" (count and threshold are starting values to tune). */
 const SCAN = { scan: true, count: 40, min_score: 40, multi_moment: true } as const;
@@ -129,6 +131,7 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
   const exporting = useIsMutating({ mutationKey: clipRunKeys.export(projectId) }) > 0;
 
   const s = useStore(shortsStore, (all) => all[projectId] ?? EMPTY_SHORTS);
+  const terminalOpen = useStore(viewStore, (v) => v.shortsTerminalOpen);
   const elapsed = useSecondsSince(scanning ? s.scanStartedAt : null);
   const picked = useMemo(() => new Set(s.picked), [s.picked]);
   const ticked = useMemo(() => new Set(s.ticked), [s.ticked]);
@@ -201,6 +204,23 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
             Click a card's picture to play it here · Space plays / pauses. While a card plays, the centred 9:16
             window shows where its short starts; making it frames the crop on the speaker.
           </p>
+          {/* The app's one shell (the editor's Terminal tab shows the same
+              session): run Claude Code here and watch the cards update. */}
+          <div className={`shorts-terminal${terminalOpen ? " open" : ""}`}>
+            <button
+              className="shorts-terminal-toggle"
+              onClick={toggleShortsTerminal}
+              aria-expanded={terminalOpen}
+              title="The same shell as the editor's Terminal tab — closing it keeps it running"
+            >
+              <span className="shorts-terminal-caret" aria-hidden>
+                {terminalOpen ? "▾" : "▸"}
+              </span>
+              terminal
+              <span className="shorts-terminal-hint">ask Claude Code to make or change shorts</span>
+            </button>
+            {terminalOpen && <TerminalPanel />}
+          </div>
         </section>
 
         <section className="shorts-main">

@@ -12,10 +12,16 @@ interface PersistedPrefs {
   showCuts: boolean;
   skipCuts: boolean;
   previewCollapsed: boolean;
+  shortsTerminalOpen: boolean;
 }
 
 function loadPrefs(): PersistedPrefs {
-  const defaults: PersistedPrefs = { showCuts: true, skipCuts: true, previewCollapsed: false };
+  const defaults: PersistedPrefs = {
+    showCuts: true,
+    skipCuts: true,
+    previewCollapsed: false,
+    shortsTerminalOpen: false,
+  };
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
     if (raw) return { ...defaults, ...(JSON.parse(raw) as Partial<PersistedPrefs>) };
@@ -33,6 +39,7 @@ function savePrefs(s: PersistedPrefs): void {
         showCuts: s.showCuts,
         skipCuts: s.skipCuts,
         previewCollapsed: s.previewCollapsed,
+        shortsTerminalOpen: s.shortsTerminalOpen,
       }),
     );
   } catch {
@@ -66,6 +73,8 @@ export interface ViewState {
   activeTab: ActiveTab;
   /** Collapse the video picture to give the tabs room (audio keeps playing). */
   previewCollapsed: boolean;
+  /** The Shorts screen's terminal drawer (under the player) is open. */
+  shortsTerminalOpen: boolean;
   /** Auditioning a clip: play these pieces back to back, then pause. Gaps
    *  between pieces are skipped. Cleared by any seek. */
   audition: Range[] | null;
@@ -232,6 +241,10 @@ export const setSkipCuts = (skipCuts: boolean) => {
 export const setActiveTab = (activeTab: ActiveTab) => patch({ activeTab });
 export const togglePreviewCollapsed = () => {
   patch({ previewCollapsed: !viewStore.state.previewCollapsed });
+  savePrefs(viewStore.state);
+};
+export const toggleShortsTerminal = () => {
+  patch({ shortsTerminalOpen: !viewStore.state.shortsTerminalOpen });
   savePrefs(viewStore.state);
 };
 export const setSelectedClipId = (selectedClipId: string | null) => patch({ selectedClipId });
