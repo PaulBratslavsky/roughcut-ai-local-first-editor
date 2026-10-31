@@ -30,6 +30,9 @@ export type { SavedClipSummary } from "./generated/SavedClipSummary";
 export type { ClipCandidate } from "./generated/ClipCandidate";
 export type { ClipFormat } from "./generated/ClipFormat";
 export type { SourceRange } from "./generated/SourceRange";
+export type { PlaySpan } from "./generated/PlaySpan";
+export type { ClipBatchError } from "./generated/ClipBatchError";
+export type { ClipExportResult } from "./generated/ClipExportResult";
 
 import type { Clip } from "./generated/Clip";
 import type { EditAction } from "./generated/EditAction";

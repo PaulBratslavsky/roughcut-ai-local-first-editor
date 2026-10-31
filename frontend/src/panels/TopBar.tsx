@@ -1,11 +1,13 @@
-// Top chrome: project switcher, new-video button, undo/redo, export menu.
+// Top chrome: project switcher, new-video button, the Shorts / Editor
+// screen switch, undo/redo, export menu.
 
 import { useState } from "react";
+import { useStore } from "@tanstack/react-store";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
-import { setProjectId, setScreen } from "../state/viewStore";
+import { setProjectId, setScreen, viewStore } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
 import { currentTheme, toggleTheme } from "../theme";
@@ -25,6 +27,7 @@ export function TopBar({
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
+  const onShorts = useStore(viewStore, (s) => s.screen === "shorts");
 
   const [newOpen, setNewOpen] = useState(false);
   const onNewVideo = async () => {
@@ -137,6 +140,13 @@ export function TopBar({
         </button>
       </div>
       <div className="topbar-right">
+        <button
+          className="screen-btn"
+          title={onShorts ? "Back to the editor" : "Scan the video for shorts and make them in bulk"}
+          onClick={() => setScreen(onShorts ? "editor" : "shorts")}
+        >
+          {onShorts ? "Editor" : "Shorts"}
+        </button>
         <button
           className="icon-btn"
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}

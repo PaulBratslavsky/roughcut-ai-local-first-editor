@@ -842,11 +842,13 @@ handler!(h_find_clips, |e, a, _s| {
         min_s: arg_f64_opt(a, "min_s")?.unwrap_or(defaults.min_s),
         max_s: arg_f64_opt(a, "max_s")?.unwrap_or(defaults.max_s),
         theme: a["theme"].as_str().map(str::to_string),
+        scan: a["scan"].as_bool().unwrap_or(false),
+        min_score: arg_f64_opt(a, "min_score")?,
+        multi_moment: a["multi_moment"].as_bool().unwrap_or(false),
     };
-    let candidates = crate::clip_finder::find_clips(e, arg_uuid(a, "project_id")?, opts).await?;
-    let method = candidates.first().map(|c| c.method.clone()).unwrap_or_default();
-    let theme = candidates.first().and_then(|c| c.theme.clone());
-    Ok(json!({ "candidates": candidates, "method": method, "theme": theme }))
+    let theme = opts.theme.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+    let found = crate::clip_finder::find_clips(e, arg_uuid(a, "project_id")?, opts).await?;
+    Ok(json!({ "candidates": found.candidates, "method": found.method, "theme": theme }))
 });
 
 handler!(h_get_clip_candidates, |e, a, _s| {
@@ -933,6 +935,16 @@ handler!(h_create_clip, |e, a, _s| {
     Ok(json!({ "clip": clip }))
 });
 
+handler!(h_create_clips, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let ids = arg_uuid_vec(a, "candidate_ids")?;
+    if ids.is_empty() {
+        return Err(CoreError::InvalidArg("candidate_ids is empty: pass the ids of the candidates to make".into()));
+    }
+    let (clips, errors) = e.create_clips(project_id, &ids, arg_clip_format(a)?).await?;
+    Ok(json!({ "clips": clips, "errors": errors }))
+});
+
 handler!(h_list_clips, |e, a, _s| {
     Ok(json!({ "clips": e.list_clips(arg_uuid(a, "project_id")?)? }))
 });
@@ -984,6 +996,32 @@ handler!(h_export_clip, |e, a, s| {
     }
     let path = e.export_clip(project_id, clip_id, &target, &out_path).await?;
     Ok(json!({ "path": path }))
+});
+
+handler!(h_export_clips, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let clip_ids = arg_uuid_vec(a, "clip_ids")?;
+    let out_dir = arg_str(a, "out_dir")?.to_string();
+    let target = a["target"].as_str().filter(|t| !t.is_empty()).unwrap_or("mp4").to_string();
+    // Check what can be checked before asking the user to approve anything.
+    if clip_ids.is_empty() {
+        return Err(CoreError::InvalidArg("clip_ids is empty: pass the ids of the saved clips to export".into()));
+    }
+    crate::export::check_target(&target)?;
+    if s == ActionSource::McpClient
+        && !e
+            .request_confirmation(&format!(
+                "Export {} clips as {target} to {out_dir}? (requested by an external MCP client)",
+                clip_ids.len()
+            ))
+            .await
+    {
+        return Err(CoreError::Unavailable(
+            "export denied: the user did not approve this externally-requested write".into(),
+        ));
+    }
+    let results = e.export_clips(project_id, &clip_ids, &out_dir, &target).await?;
+    Ok(json!({ "results": results }))
 });
 
 handler!(h_create_project, |e, a, _s| {
@@ -1249,8 +1287,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
-    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Save one with create_clip (rank).",
-        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
+    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, pieces, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8, at most 60), min_s/max_s playable length bounds (default 15-60). scan: true judges moments from every part of the video and skips moments already saved as clips (use with a larger count, e.g. 40); it can take minutes, longer than some clients wait — the list still persists, so read it with get_clip_candidates. min_score drops moments the model scored below it. One run per project at a time. Scored by the on-device model when reachable, else heuristically (method says which). Save one with create_clip (rank), several with create_clips.",
+        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer", "description": "how many to return, 1-60 (default 8)"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}, "scan": {"type": "boolean", "description": "judge moments from every part of the video (slower)"}, "min_score": {"type": "number", "description": "drop moments the model scored below this (0-100)"}, "multi_moment": {"type": "boolean", "description": "also propose shorts made of several pieces (not available yet; ignored)"}}), &["project_id"]),
         agent: true, meta: false, h_find_clips),
     tool!("get_clip_candidates", "The candidates from the latest find_clips run, best first (no recompute).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
@@ -1258,6 +1296,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("create_clip", "Save a CLIP — a standalone edit made of one or more pieces of the video, played back to back, in format landscape (16:9, default for picked pieces) or vertical (9:16 short, default for candidates). Pieces from: rank (1 = top find_clips candidate) or candidate_id; OR segment_ids (whole transcript sentences, any number, from anywhere); OR ranges [{start, end}] in seconds; OR start + end. The clip keeps the current cut's removals inside its pieces, and later main-cut edits don't change it. (Not to be confused with the main timeline's clips that trim_clip / split_clip edit.)",
         || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_clips list, 1 = best"}, "candidate_id": {"type": "string"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id"]),
         agent: true, meta: false, h_create_clip),
+    tool!("create_clips", "Make several find_clips candidates into saved clips at once (vertical 9:16 shorts unless format says otherwise), then frame each short's crop on the speaker before returning. Returns {clips: [SavedClipSummary], errors: [{candidate_id, message}]}: a candidate whose material was cut from the main edit since the scan stays listed and is reported in errors; the rest are still made.",
+        || obj(json!({"project_id": pid_schema(), "candidate_ids": {"type": "array", "items": {"type": "string"}, "description": "ids from find_clips / get_clip_candidates"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id", "candidate_ids"]),
+        agent: true, meta: false, h_create_clips),
     tool!("list_clips", "List saved clips: {id, title, ranges, format, crop_x, start, end, duration, score, reason, hook, created_at}.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_list_clips),
@@ -1273,6 +1314,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "clip_id", "target", "out_path"]),
         agent: false, meta: false, h_export_clip),
+    tool!("export_clips", "Export several saved clips into one folder, one file each, named NN-<title>.<ext> in the order given (never overwrites: an existing name gets -2, -3…). target defaults to mp4 (vertical clips render 1080x1920); any export target works. One failure doesn't stop the rest. Returns {results: [{clip_id, path, error}]} in the order given.",
+        || obj(json!({"project_id": pid_schema(), "clip_ids": {"type": "array", "items": {"type": "string"}}, "out_dir": {"type": "string", "description": "folder to write into (created if missing; ~ expands)"}, "target": {"type": "string", "description": "mp4 (default) | premiere_xml | fcp_xml | resolve_xml | edl | otio | srt | txt"}}), &["project_id", "clip_ids", "out_dir"]),
+        agent: false, meta: false, h_export_clips),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),

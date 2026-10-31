@@ -5,7 +5,8 @@
 use super::Editor;
 use crate::error::{CoreError, Result};
 use crate::model::{
-    ClipCandidate, ClipFormat, Project, SavedClip, SavedClipSummary, SourceRange, EPS,
+    pieces_overlap, ClipBatchError, ClipCandidate, ClipFormat, Project, SavedClip, SavedClipSummary,
+    SourceRange, EPS,
 };
 use crate::time::snap_to_frame;
 use chrono::Utc;
@@ -51,6 +52,38 @@ impl Editor {
         })
     }
 
+    /// Replace the candidates with a finished run's. With `drop_saved`, also
+    /// drop any that are the same moment (sharing more than that fraction) as
+    /// a clip saved now — including one saved while the run was going.
+    /// Returns what was written.
+    pub fn replace_clip_candidates(
+        &self,
+        project_id: Uuid,
+        candidates: Vec<ClipCandidate>,
+        drop_saved: Option<f64>,
+    ) -> Result<Vec<ClipCandidate>> {
+        self.update_project_meta(project_id, |p| {
+            let kept: Vec<ClipCandidate> = candidates
+                .into_iter()
+                .filter(|c| {
+                    drop_saved.map_or(true, |max| {
+                        p.saved_clips.iter().all(|s| pieces_overlap(&c.pieces, &s.ranges) <= max)
+                    })
+                })
+                .collect();
+            p.clip_candidates = kept.clone();
+            Ok(kept)
+        })
+    }
+
+    /// Claim the project's one `find_clips` slot; dropping the guard frees it.
+    pub fn begin_clip_scan(&self, project_id: Uuid) -> Result<ClipScan> {
+        if !self.inner.scans.lock().unwrap().insert(project_id) {
+            return Err(CoreError::InvalidArg("a clip scan is already running for this project".into()));
+        }
+        Ok(ClipScan { editor: self.clone(), project_id })
+    }
+
     pub fn get_clip_candidates(&self, project_id: Uuid) -> Result<Vec<ClipCandidate>> {
         self.with_project(project_id, |p, _| Ok(p.clip_candidates.clone()))
     }
@@ -68,51 +101,83 @@ impl Editor {
         format: Option<ClipFormat>,
     ) -> Result<SavedClipSummary> {
         self.update_project_meta(project_id, |p| {
-            let mut clip = SavedClip {
-                id: Uuid::new_v4(),
-                title: String::new(),
-                ranges: vec![],
-                format: ClipFormat::Landscape,
-                crop_x: 0.5,
-                start: 0.0,
-                end: 0.0,
-                timeline: p.timeline.clone(),
-                score: None,
-                reason: String::new(),
-                hook: String::new(),
-                created_at: Utc::now(),
-            };
-            let ranges = match from {
+            let (mut clip, from_candidate) = match from {
                 ClipSource::Candidate(id) => {
-                    let idx = p
+                    let c = p
                         .clip_candidates
                         .iter()
-                        .position(|c| c.id == id)
+                        .find(|c| c.id == id)
+                        .cloned()
                         .ok_or_else(|| CoreError::NotFound(format!("clip candidate {id}")))?;
-                    let c = p.clip_candidates.remove(idx);
-                    clip.title = c.title;
-                    clip.score = Some(c.score);
-                    clip.reason = c.reason;
-                    clip.hook = c.hook;
-                    clip.format = ClipFormat::Vertical;
-                    vec![SourceRange { start: c.start, end: c.end }]
+                    (clip_from_candidate(p, &c)?, Some(id))
                 }
-                ClipSource::Ranges(ranges) => ranges,
+                ClipSource::Ranges(ranges) => {
+                    let mut clip = blank_clip(p);
+                    set_ranges(p, &mut clip, &ranges)?;
+                    (clip, None)
+                }
             };
-            set_ranges(p, &mut clip, &ranges)?;
             if let Some(f) = format {
                 clip.format = f;
             }
             if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
                 clip.title = t.to_string();
             }
-            if clip.title.is_empty() {
-                clip.title = format!("Clip {}", p.saved_clips.len() + 1);
-            }
-            let summary = clip.summary();
-            p.saved_clips.push(clip);
-            Ok(summary)
+            Ok(add_clip(p, clip, from_candidate))
         })
+    }
+
+    /// Make several candidates into saved clips, then frame each vertical one
+    /// on the speaker before returning (so an export right after never renders
+    /// an unframed crop). A candidate that no longer validates — its material
+    /// was cut from the main edit since the scan — stays listed and is
+    /// reported in the errors; the rest are still made.
+    pub async fn create_clips(
+        &self,
+        project_id: Uuid,
+        candidate_ids: &[Uuid],
+        format: Option<ClipFormat>,
+    ) -> Result<(Vec<SavedClipSummary>, Vec<ClipBatchError>)> {
+        let (made, errors) = self.update_project_meta(project_id, |p| {
+            let mut made: Vec<SavedClipSummary> = vec![];
+            let mut errors: Vec<ClipBatchError> = vec![];
+            for &id in candidate_ids {
+                let Some(c) = p.clip_candidates.iter().find(|c| c.id == id).cloned() else {
+                    errors.push(ClipBatchError {
+                        candidate_id: id,
+                        message: "not in the candidate list (made already, or replaced by a newer scan)".into(),
+                    });
+                    continue;
+                };
+                match clip_from_candidate(p, &c) {
+                    Ok(mut clip) => {
+                        if let Some(f) = format {
+                            clip.format = f;
+                        }
+                        made.push(add_clip(p, clip, Some(id)));
+                    }
+                    Err(e) => errors.push(ClipBatchError { candidate_id: id, message: e.to_string() }),
+                }
+            }
+            Ok((made, errors))
+        })?;
+
+        let vertical: Vec<&SavedClipSummary> = made.iter().filter(|c| c.format == ClipFormat::Vertical).collect();
+        let n = vertical.len();
+        for (i, clip) in vertical.iter().enumerate() {
+            make_progress(self, project_id, i as f64 / n as f64, format!("framing {}/{n}", i + 1));
+            // A clip it can't frame (no confident face, a composited screen
+            // recording, no ffmpeg) keeps its centred crop: not an error.
+            let _ = self.face_crop(project_id, clip.id, Some(clip.crop_x)).await;
+        }
+        if !made.is_empty() {
+            let word = if made.len() == 1 { "short" } else { "shorts" };
+            make_progress(self, project_id, 1.0, format!("made {} {word}", made.len()));
+        }
+        // Re-read: framing moved the crops. A clip deleted meanwhile is
+        // simply gone from the result; the rest of the batch still reports.
+        let made = made.iter().filter_map(|c| self.get_clip(project_id, c.id).ok().map(|clip| clip.summary())).collect();
+        Ok((made, errors))
     }
 
     /// Saved clips in creation order.
@@ -285,6 +350,73 @@ impl Editor {
     }
 }
 
+/// Holds a project's `find_clips` slot (see [`Editor::begin_clip_scan`]).
+pub struct ClipScan {
+    editor: Editor,
+    project_id: Uuid,
+}
+
+impl Drop for ClipScan {
+    fn drop(&mut self) {
+        self.editor.inner.scans.lock().unwrap().remove(&self.project_id);
+    }
+}
+
+fn make_progress(editor: &Editor, project_id: Uuid, fraction: f64, message: String) {
+    crate::events::send(
+        &editor.sink(),
+        crate::events::CoreEvent::progress(crate::events::ProgressTask::MakeClips, Some(project_id), fraction, message),
+    );
+}
+
+/// A clip with nothing in it yet, seeded with the current main cut.
+fn blank_clip(p: &Project) -> SavedClip {
+    SavedClip {
+        id: Uuid::new_v4(),
+        title: String::new(),
+        ranges: vec![],
+        format: ClipFormat::Landscape,
+        crop_x: 0.5,
+        start: 0.0,
+        end: 0.0,
+        timeline: p.timeline.clone(),
+        score: None,
+        reason: String::new(),
+        hook: String::new(),
+        created_at: Utc::now(),
+    }
+}
+
+/// The clip a candidate makes (a vertical short), validated against the
+/// current cut. Doesn't touch the project: the caller adds it and takes the
+/// candidate off the list only once this succeeded.
+fn clip_from_candidate(p: &Project, c: &ClipCandidate) -> Result<SavedClip> {
+    let mut clip = blank_clip(p);
+    clip.title = c.title.clone();
+    clip.score = Some(c.score);
+    clip.reason = c.reason.clone();
+    clip.hook = c.hook.clone();
+    clip.format = ClipFormat::Vertical;
+    let pieces =
+        if c.pieces.is_empty() { vec![SourceRange { start: c.start, end: c.end }] } else { c.pieces.clone() };
+    set_ranges(p, &mut clip, &pieces)?;
+    Ok(clip)
+}
+
+/// Add a validated clip (naming an untitled one) and take the candidate it
+/// came from, if any, off the list.
+fn add_clip(p: &mut Project, mut clip: SavedClip, from_candidate: Option<Uuid>) -> SavedClipSummary {
+    if let Some(id) = from_candidate {
+        p.clip_candidates.retain(|c| c.id != id);
+    }
+    if clip.title.is_empty() {
+        clip.title = format!("Clip {}", p.saved_clips.len() + 1);
+    }
+    let summary = clip.summary();
+    p.saved_clips.push(clip);
+    summary
+}
+
 /// Partial update for [`Editor::update_clip`]; `None` leaves a field alone.
 #[derive(Default)]
 pub struct ClipChanges {
@@ -338,6 +470,57 @@ fn set_ranges(p: &Project, clip: &mut SavedClip, ranges: &[SourceRange]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(start: f64, end: f64) -> ClipCandidate {
+        ClipCandidate {
+            id: Uuid::new_v4(),
+            start,
+            end,
+            pieces: vec![SourceRange { start, end }],
+            duration: end - start,
+            title: "t".into(),
+            hook: "h".into(),
+            reason: "r".into(),
+            score: 50.0,
+            segment_ids: vec![],
+            method: "heuristic".into(),
+            theme: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scan_result_drops_a_moment_saved_while_it_ran() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        // Saved after the scan read the project, before it wrote its list.
+        e.create_clip(p.id, ClipSource::Ranges(vec![SourceRange { start: 10.0, end: 30.0 }]), None, None).unwrap();
+        let found = vec![candidate(12.0, 32.0), candidate(40.0, 60.0)];
+        let kept = e.replace_clip_candidates(p.id, found.clone(), Some(0.3)).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].start, 40.0);
+        assert_eq!(e.get_clip_candidates(p.id).unwrap().len(), 1);
+        // A plain run keeps everything.
+        assert_eq!(e.replace_clip_candidates(p.id, found, None).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_candidate_that_no_longer_validates_stays_listed() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        // Past the end of the source: it can't become a clip.
+        let bad = candidate(1.0e7, 1.0e7 + 20.0);
+        let good = candidate(10.0, 30.0);
+        e.set_clip_candidates(p.id, vec![bad.clone(), good.clone()]).unwrap();
+        assert!(e.create_clip(p.id, ClipSource::Candidate(bad.id), None, None).is_err());
+        assert_eq!(e.get_clip_candidates(p.id).unwrap().len(), 2, "a failed make removes nothing");
+        let (made, errors) = e.create_clips(p.id, &[bad.id, good.id, Uuid::new_v4()], None).await.unwrap();
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].format, ClipFormat::Vertical);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].candidate_id, bad.id);
+        let left = e.get_clip_candidates(p.id).unwrap();
+        assert_eq!(left.iter().map(|c| c.id).collect::<Vec<_>>(), vec![bad.id]);
+    }
 
     #[tokio::test]
     async fn background_face_pass_never_overrides_a_hand_set_crop() {

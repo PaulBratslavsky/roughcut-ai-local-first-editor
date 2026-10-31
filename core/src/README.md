@@ -40,7 +40,7 @@ examples in [`core/examples/`](../examples/README.md).
 | Module | Role | Key public items |
 | --- | --- | --- |
 | `lib.rs` | Crate root | 24 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
-| `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ExternalConnection`, `EPS` |
+| `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `PlaySpan`, `ClipBatchError`, `ClipExportResult`, `pieces_overlap`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ExternalConnection`, `EPS` |
 | `tools.rs` | The tool registry: one `ToolSpec` row per tool, three callers | `ToolSpec`, `ToolDef`, `Caller`, `defs`, `dispatch`, `registry`, `is_mutating`, `Handler`, `HandlerFuture` |
 | `agent.rs` | The chat agent loop and LLM-with-fallback helpers | `run_instruction`, `run_instruction_with`, `InstructionOutcome`, `HistoryTurn`, `clean_transcript`, `generate_chapters`, `Chapter`, `generate_title_description` |
 | `story.rs` | Story beats, cut snapping, flow review, the `story_edit` pipeline | `Outline`, `Beat`, `outline`, `outline_with`, `snap_cut_range`, `FlowReview`, `FlowIssue`, `review_flow`, `review_flow_mode`, `story_edit`, `StoryEditOutcome`, `outline_to_value` |
@@ -78,7 +78,7 @@ in `docs/tool-api.md`.
   Only `string`, `number`, `boolean`, `array`, and `object` types are checked.
 - Handlers receive `caller.source()`, so edits are attributed to the caller;
   `Agent { attribute_to }` separates attribution from permission.
-- `export`, `export_clip`, and `delete_project` ask the user
+- `export`, `export_clip`, `export_clips` (once per batch), and `delete_project` ask the user
   (`Editor::request_confirmation`) when the source is `ActionSource::McpClient`.
 - Adding a tool means adding a row. `core/tests/doc_parity.rs` requires every
   row to be documented in `docs/tool-api.md` and every tool documented there to
@@ -148,15 +148,26 @@ in `docs/tool-api.md`.
   reviews and 2 repairs), stopping early when the flow is coherent, the issue
   count does not fall, nothing is repairable, or the timeline changed. Repairs
   only restore segments the same run cut.
-- `clip_finder::find_clips` clamps `count` to 1–20 and `min_s` to at least
-  3 s (`max_s` to at least `min_s` + 1). It builds windows that start and end
-  on a usable (kept, non-filler, non-throwaway) segment within one beat, and
-  falls back to windows that span beats when none fit. It scores them
-  heuristically, keeps a diverse pool of up to 24 (`POOL_MAX`), and has the
-  model score it in batches of 6 (`BATCH`) by index. Two candidates sharing
-  more than 30% of the shorter one (`MAX_OVERLAP`) are the same moment. With a
-  theme and model scoring, judged candidates under 30 (`MIN_THEMED_SCORE`) are
+- `clip_finder::find_clips` holds the project's one scan slot
+  (`Editor::begin_clip_scan`; a second run errors), clamps `count` to 1–60
+  (`MAX_COUNT`) and `min_s` to at least 3 s (`max_s` to at least `min_s` + 1).
+  It builds windows that start and end on a usable (kept, non-filler,
+  non-throwaway) segment within one beat, and falls back to windows that span
+  beats when none fit. It scores them heuristically, keeps a diverse pool of
+  `max(24, count)` (`POOL_MAX`), and has the model score it in batches of 6
+  (`BATCH`) by index. With `scan` (`build_pool`), the pool is up to 90
+  (`SCAN_POOL`) when a model will score it and uncapped when none is
+  reachable, filled round-robin across beats (every beat's best before any
+  beat's second; a round cut off by the cap keeps its best-scoring windows;
+  `diversify` when the windows span beats). A scan drops windows overlapping
+  a saved clip before scoring and again at the write
+  (`Editor::replace_clip_candidates`); when that leaves nothing, it writes an
+  empty list. It returns `Found { candidates, method }`.
+  Two candidates sharing more than 30% of the shorter one's source seconds
+  (`MAX_OVERLAP`, `model::pieces_overlap`) are the same moment. With a theme
+  and model scoring, judged candidates under 30 (`MIN_THEMED_SCORE`) are
   dropped, but only when at least one judged candidate scores 30 or more.
+  `min_score` drops judged candidates under it.
 
 ### Persistence, events, errors, time
 

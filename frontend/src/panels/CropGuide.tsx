@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { useCenterClipOnFace, useClips, useUpdateClip } from "../ipc/queries";
 import { setCropClip, viewStore } from "../state/viewStore";
-import { errText } from "./ClipsPanel";
+import { errText } from "./clipUtil";
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 

@@ -18,7 +18,7 @@ mod media;
 mod projects;
 mod semantic;
 
-pub use clips::{ClipChanges, ClipSource, FaceCrop};
+pub use clips::{ClipChanges, ClipScan, ClipSource, FaceCrop};
 
 use crate::adapters::{
     AutoTranscriber, AutoVideoEngine, Embedder, InferenceClient, MockTranscriber,
@@ -28,7 +28,7 @@ use crate::error::{CoreError, Result};
 use crate::events::{NullSink, SharedSink};
 use crate::model::*;
 use crate::store::{SqliteStore, Store};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -73,6 +73,8 @@ pub struct Inner {
     /// Transient: raw peaks staged by generate_rough_cut for the very next
     /// apply (RoughCut refines silences against real energy). Consumed once.
     pub(crate) rough_cut_peaks: Mutex<Option<Vec<u8>>>,
+    /// Projects with a `find_clips` run in flight (one at a time each).
+    scans: Mutex<HashSet<Uuid>>,
     state: Mutex<HashMap<Uuid, ProjectState>>,
 }
 
@@ -100,6 +102,7 @@ impl Editor {
                 confirms: Mutex::new(HashMap::new()),
                 require_confirm: std::sync::atomic::AtomicBool::new(false),
                 rough_cut_peaks: Mutex::new(None),
+                scans: Mutex::new(HashSet::new()),
                 state: Mutex::new(HashMap::new()),
             }),
         }

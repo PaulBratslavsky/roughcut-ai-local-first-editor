@@ -4,7 +4,7 @@
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { mockCallTool, mockOn } from "./mockApi";
+import { mockCallTool, mockOn, mockSwitch } from "./mockApi";
 import type { AppEventName, WhisperTier, SetupStatus } from "./types";
 
 export const isTauri: boolean =
@@ -61,7 +61,7 @@ export async function getSetupStatus(): Promise<SetupStatus> {
       { id: "compact", file: "ggml-small-q5_1.bin", approx_mb: 190, downloaded: false, recommended: false },
     ],
     ram_gb: 24,
-    inference_reachable: true,
+    inference_reachable: !mockSwitch("nomodel"),
     inference_endpoint: "http://localhost:11434/v1",
     inference_model: "(browser mock)",
     embedding_model: "nomic-embed-text",

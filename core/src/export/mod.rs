@@ -11,7 +11,10 @@ pub mod xmeml;
 
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
-use crate::model::{Project, Transcript};
+use crate::events::{CoreEvent, EventSink, ProgressTask, SharedSink};
+use crate::model::{ClipExportResult, PlaySpan, Project, Transcript};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub fn xml_escape(s: &str) -> String {
@@ -68,9 +71,15 @@ pub fn default_extension(target: &str) -> &'static str {
     }
 }
 
-/// Expand a leading `~/` — callers (UI, MCP clients) naturally write
-/// `~/Downloads/...`, and an unexpanded tilde becomes a literal directory.
+/// Expand a leading `~/` (or a bare `~`) — callers (UI, MCP clients)
+/// naturally write `~/Downloads/...`, and an unexpanded tilde becomes a
+/// literal directory.
 fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().into_owned();
+        }
+    }
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest).to_string_lossy().into_owned();
@@ -83,7 +92,8 @@ impl Editor {
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
         let (project, transcript) = self.snapshot(project_id)?;
-        self.write_export(&project, transcript.as_ref(), target, out_path, None).await
+        let pieces = vec![project.timeline.play_spans()];
+        self.write_export(&project, transcript.as_ref(), target, out_path, &pieces, None, &self.sink()).await
     }
 
     /// Export one saved clip: the same writers, run over the clip's
@@ -96,34 +106,113 @@ impl Editor {
         target: &str,
         out_path: &str,
     ) -> Result<String> {
+        self.export_clip_with(project_id, clip_id, target, out_path, &self.sink()).await
+    }
+
+    async fn export_clip_with(
+        &self,
+        project_id: Uuid,
+        clip_id: Uuid,
+        target: &str,
+        out_path: &str,
+        sink: &SharedSink,
+    ) -> Result<String> {
         let clip = self.get_clip(project_id, clip_id)?;
         let (mut project, transcript) = self.snapshot(project_id)?;
+        let pieces = clip.piece_spans();
         project.name = format!("{} — {}", project.name, clip.title);
         project.timeline = clip.timeline;
         let vertical = (clip.format == crate::model::ClipFormat::Vertical).then_some(clip.crop_x);
-        self.write_export(&project, transcript.as_ref(), target, out_path, vertical).await
+        self.write_export(&project, transcript.as_ref(), target, out_path, &pieces, vertical, sink).await
     }
 
+    /// Export several saved clips into one folder, one file each, named
+    /// `NN-<title>.<ext>` in the order given. Never overwrites: a name that
+    /// exists gets `-2`, `-3`, …. One clip failing doesn't stop the rest; each
+    /// result carries its path or its error. Progress is one `export_clips`
+    /// task over the whole batch.
+    pub async fn export_clips(
+        &self,
+        project_id: Uuid,
+        clip_ids: &[Uuid],
+        out_dir: &str,
+        target: &str,
+    ) -> Result<Vec<ClipExportResult>> {
+        if clip_ids.is_empty() {
+            return Err(CoreError::InvalidArg("export_clips needs at least one clip id".into()));
+        }
+        check_target(target)?;
+        // An unknown project is one error, not one per clip (and no folder).
+        self.with_project(project_id, |_, _| Ok(()))?;
+        let dir = PathBuf::from(expand_tilde(out_dir));
+        std::fs::create_dir_all(&dir)?;
+        let n = clip_ids.len();
+        let ext = default_extension(target);
+        let mut results = Vec::with_capacity(n);
+        for (i, &clip_id) in clip_ids.iter().enumerate() {
+            let title = match self.get_clip(project_id, clip_id) {
+                Ok(c) => c.title,
+                Err(e) => {
+                    results.push(ClipExportResult { clip_id, path: None, error: Some(e.to_string()) });
+                    continue;
+                }
+            };
+            // Reserved (created empty) before rendering, so two batches into
+            // one folder can't pick the same name.
+            let path = match reserve_path(&dir, &batch_file_name(i + 1, n, &title, ext)) {
+                Ok(p) => p,
+                Err(e) => {
+                    results.push(ClipExportResult { clip_id, path: None, error: Some(e.to_string()) });
+                    continue;
+                }
+            };
+            let sink: SharedSink = Arc::new(BatchSink {
+                inner: self.sink(),
+                project_id,
+                index: i,
+                total: n,
+                title: title.clone(),
+            });
+            batch_progress(&self.sink(), project_id, i as f64 / n as f64, format!("{}/{n} · {title}", i + 1));
+            let out = self.export_clip_with(project_id, clip_id, target, &path.to_string_lossy(), &sink).await;
+            results.push(match out {
+                Ok(path) => ClipExportResult { clip_id, path: Some(path), error: None },
+                Err(e) => {
+                    // The name was ours (reserved above): don't leave a
+                    // placeholder or a half-written file behind.
+                    let _ = std::fs::remove_file(&path);
+                    ClipExportResult { clip_id, path: None, error: Some(e.to_string()) }
+                }
+            });
+        }
+        let ok = results.iter().filter(|r| r.path.is_some()).count();
+        batch_progress(&self.sink(), project_id, 1.0, format!("exported {ok} of {n}"));
+        Ok(results)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn write_export(
         &self,
         project: &Project,
         transcript: Option<&Transcript>,
         target: &str,
         out_path: &str,
+        pieces: &[Vec<PlaySpan>],
         vertical_crop_x: Option<f64>,
+        sink: &SharedSink,
     ) -> Result<String> {
         let out_path = &expand_tilde(out_path);
         if target == "mp4" {
             let media = require_media(project)?.clone();
             let job = crate::adapters::video::RenderJob {
                 media: &media,
-                timeline: &project.timeline,
+                pieces,
                 out_path,
                 audio_offset_s: project.audio_offset_s,
                 screen: project.screen_media.as_ref().map(|m| (m, &project.layout)),
                 vertical_crop_x,
             };
-            self.video().render_mp4(&job, &self.sink()).await?;
+            self.video().render_mp4(&job, sink).await?;
             return Ok(out_path.to_string());
         }
         let content = render_text_target(project, transcript, target)?;
@@ -142,4 +231,147 @@ impl Editor {
         let t = self.get_transcript(project_id)?;
         Ok((p, t))
     }
+}
+
+/// Fail early on a target no writer knows (before creating folders).
+pub fn check_target(target: &str) -> Result<()> {
+    match target {
+        "premiere_xml" | "resolve_xml" | "fcp_xml" | "edl" | "otio" | "srt" | "txt" | "mp4" => Ok(()),
+        other => Err(CoreError::InvalidArg(format!("unknown export target {other}"))),
+    }
+}
+
+/// `NN-<slug>.<ext>`: `NN` is the 1-based position, two digits (three past
+/// 99); the slug is the title in lowercase ASCII letters and digits, every
+/// other run of characters one `-`, at most 40 characters ("clip" if empty).
+fn batch_file_name(position: usize, total: usize, title: &str, ext: &str) -> String {
+    let width = if total > 99 { 3 } else { 2 };
+    format!("{position:0width$}-{}.{ext}", slug(title))
+}
+
+fn slug(title: &str) -> String {
+    let mut out = String::new();
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let mut out: String = out.trim_matches('-').chars().take(40).collect();
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "clip".into()
+    } else {
+        out
+    }
+}
+
+/// Claim `dir/name`, or `dir/<stem>-2.<ext>`, `-3`, … when that exists, by
+/// creating it empty (`create_new` is atomic, so a name is never handed out
+/// twice). The writer then replaces the placeholder.
+fn reserve_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{e}")),
+        None => (name.to_string(), String::new()),
+    };
+    for k in 1.. {
+        let path = if k == 1 { dir.join(name) } else { dir.join(format!("{stem}-{k}{ext}")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("an unused name exists")
+}
+
+fn batch_progress(sink: &SharedSink, project_id: Uuid, fraction: f64, message: String) {
+    crate::events::send(sink, CoreEvent::progress(ProgressTask::ExportClips, Some(project_id), fraction, message));
+}
+
+/// Folds one clip's render progress into the batch's: an `export` event at
+/// fraction `f` for clip `i` of `n` becomes an `export_clips` event at
+/// `(i + f) / n`, its message prefixed with the position and title. The
+/// per-clip "render complete" is dropped (the batch sends its own end), and
+/// every other event passes through.
+struct BatchSink {
+    inner: SharedSink,
+    project_id: Uuid,
+    index: usize,
+    total: usize,
+    title: String,
+}
+
+impl EventSink for BatchSink {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        let is_render = event == "progress" && payload["task"] == "export";
+        if !is_render {
+            return self.inner.emit(event, payload);
+        }
+        let fraction = payload["fraction"].as_f64().unwrap_or(0.0);
+        let message = payload["message"].as_str().unwrap_or("");
+        if fraction >= 1.0 {
+            return;
+        }
+        let n = self.total as f64;
+        batch_progress(
+            &self.inner,
+            self.project_id,
+            ((self.index as f64 + fraction) / n).clamp(0.0, 1.0),
+            format!("{}/{} · {} · {message}", self.index + 1, self.total, self.title),
+        );
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn batch_names_pad_slug_and_never_collide() {
+        assert_eq!(batch_file_name(3, 6, "Why Timelines Are a Trap!", "mp4"), "03-why-timelines-are-a-trap.mp4");
+        assert_eq!(batch_file_name(7, 120, "x", "srt"), "007-x.srt");
+        assert_eq!(batch_file_name(1, 1, "¿Qué? — ", "mp4"), "01-qu.mp4");
+        assert_eq!(batch_file_name(1, 1, "日本語", "mp4"), "01-clip.mp4");
+        let long = "a".repeat(39) + " bcd";
+        assert_eq!(slug(&long), "a".repeat(39), "cut to 40, no trailing dash");
+
+        let dir = std::env::temp_dir().join(format!("roughcut-batch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(reserve_path(&dir, "01-a.mp4").unwrap(), dir.join("01-a.mp4"));
+        assert!(dir.join("01-a.mp4").exists(), "reserved on disk");
+        assert_eq!(reserve_path(&dir, "01-a.mp4").unwrap(), dir.join("01-a-2.mp4"));
+        assert_eq!(reserve_path(&dir, "01-a.mp4").unwrap(), dir.join("01-a-3.mp4"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct Capture(Mutex<Vec<(String, serde_json::Value)>>);
+    impl EventSink for Capture {
+        fn emit(&self, event: &str, payload: serde_json::Value) {
+            self.0.lock().unwrap().push((event.to_string(), payload));
+        }
+    }
+
+    #[test]
+    fn batch_sink_folds_render_progress_into_the_batch() {
+        let capture = Arc::new(Capture(Mutex::new(vec![])));
+        let pid = Uuid::new_v4();
+        let sink: SharedSink =
+            Arc::new(BatchSink { inner: capture.clone(), project_id: pid, index: 1, total: 4, title: "Hook".into() });
+        crate::events::send(&sink, CoreEvent::progress(ProgressTask::Export, None, 0.5, "rendering MP4… 50%"));
+        crate::events::send(&sink, CoreEvent::progress(ProgressTask::Export, None, 1.0, "render complete"));
+        crate::events::send(&sink, CoreEvent::ClipsChanged { project_id: pid });
+        let got = capture.0.lock().unwrap();
+        assert_eq!(got.len(), 2, "render complete is dropped; other events pass");
+        assert_eq!(got[0].1["task"], "export_clips");
+        assert!((got[0].1["fraction"].as_f64().unwrap() - 0.375).abs() < 1e-9);
+        assert_eq!(got[0].1["message"], "2/4 · Hook · rendering MP4… 50%");
+        assert_eq!(got[0].1["project_id"], pid.to_string());
+        assert_eq!(got[1].0, "clips-changed");
+    }
+
 }

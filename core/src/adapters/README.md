@@ -46,7 +46,7 @@ receive results or file paths.
 - `#[async_trait] pub trait VideoEngine: Send + Sync`
   - `probe(&self, file_path: &str) -> Result<Media>`: metadata only, no decode.
   - `render_mp4(&self, job: &RenderJob<'_>, sink: &SharedSink) -> Result<()>`:
-    renders the timeline's included clips and emits `ProgressTask::Export` progress.
+    renders the job's spans in order and emits `ProgressTask::Export` progress.
   - `extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()>`:
     mono 16 kHz WAV (the whisper input).
   - `extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()>`:
@@ -56,9 +56,12 @@ receive results or file paths.
 - `pub struct FfmpegCli`: production `VideoEngine`.
 - `pub struct MockVideoEngine`: demo `VideoEngine`.
 - `pub struct AutoVideoEngine`: per-call selector between the two.
-- `pub struct RenderJob<'a> { media, timeline, out_path, audio_offset_s, screen: Option<(&Media, &crate::model::Layout)>, vertical_crop_x: Option<f64> }`:
-  `screen` is dual-capture compositing; `vertical_crop_x` renders 9:16 at
-  1080×1920 (0 = left, 0.5 = centre, 1 = right).
+- `pub struct RenderJob<'a> { media, pieces: &[Vec<PlaySpan>], out_path, audio_offset_s, screen: Option<(&Media, &crate::model::Layout)>, vertical_crop_x: Option<f64> }`:
+  `pieces` is what plays, grouped by piece, in output order (the main cut is
+  one piece: `Timeline::play_spans()`; a saved clip is
+  `SavedClip::piece_spans()`); `screen` is dual-capture compositing;
+  `vertical_crop_x` renders 9:16 at 1080×1920 (0 = left, 0.5 = centre, 1 =
+  right).
 - `pub struct MediaAssets { peaks_path: Option<String>, peaks_per_second: u32, thumbnails: Vec<ThumbnailRef>, playback_path: Option<String> }`
   and `pub struct ThumbnailRef { time: f64, path: String }`. Both are
   `Serialize`, and `ts_rs::TS`-exported under feature `ts-bindings`. They carry
@@ -196,18 +199,39 @@ There are no child directories with contracts.
 
 ### Rendering (`FfmpegCli::render_mp4`)
 
-- Fails with `InvalidArg("timeline has no included clips")` when
-  `timeline.included_clips()` is empty.
-- Video cuts are hard trims. Each clip's audio gets fades of
-  `min(0.02, dur/4)` s at both edges. Clips are joined with
+- The inputs and filter graph are built by the pure `render_plan` (unit
+  tested); `render_mp4` only runs ffmpeg on them.
+- Fails with `InvalidArg("timeline has no included clips")` when no piece has
+  a span.
+- **One input per group of pieces, seeked.** `input_groups` puts
+  consecutive pieces in one group when each starts at or after the previous
+  one's end and at most 30 s later (`SHARED_INPUT_GAP_S`); past 12 groups
+  (`MAX_INPUTS`) the in-order neighbours with the smallest gaps merge.
+  Pieces played out of source order never share. Group `k` is input `k`,
+  opened with `-ss (start − preroll)` rounded down to the millisecond (not
+  below 0), where `preroll = 1 s + max(audio_offset_s, 0)`; its spans' trims
+  are measured from that same rounded value. A render therefore decodes about
+  what plays, not the source from 0:00. When compositing, the screen file
+  gets one input per group too (`n_groups + k`), seeked the same but never
+  into its last 3 s (`SCREEN_TAIL_S`); the difference comes off its
+  timestamps (`setpts`), and its last frame is clone-padded (`tpad`) in both
+  pip and screen modes.
+- Video trims sit half a frame early (`0.5 / frame_rate`), so a span edge on
+  a frame boundary keeps the frame at its start and drops the one at its end
+  regardless of float rounding. Audio trims are exact.
+- `render_mp4` sets `kill_on_drop`: a render whose caller went away stops.
+- Video cuts are hard trims. Each span's audio gets fades of
+  `min(0.02, dur/4)` s at both edges. Spans are joined, in order, with
   `concat=n=N:v=1:a=1`.
-- The A/V offset is applied once, before the per-clip trims, and only when
-  `|audio_offset_s| > 0.001`: `adelay` when positive, `atrim` when negative
-  (`audio_sources`). The shifted stream is then `asplit` into one copy per
-  clip, because a filter output label must be read by exactly one filter.
-  Reading `[ash]` once per clip made ffmpeg 8 feed every clip after the first
-  audio from the wrong position, without an error. Without an offset, every
-  clip reads the raw input `[0:a]`, which may be read any number of times.
+- The A/V offset is applied once per input, before that input's trims, and
+  only when `|audio_offset_s| > 0.001`: `adelay` when positive, `atrim` when
+  negative (`audio_sources`). The shifted stream is then `asplit` into one
+  copy per span, because a filter output label must be read by exactly one
+  filter. Reading `[ash]` once per clip made ffmpeg 8 feed every clip after the
+  first audio from the wrong position, without an error. Without an offset,
+  every span reads its raw input `[k:a]`, which may be read any number of
+  times. The preroll keeps a delayed track's first second real audio rather
+  than `adelay` silence.
 - ffmpeg runs with `-hide_banner`, and a failed render's error carries the last
   800 characters of stderr, where ffmpeg states the cause.
 - Compositing applies only when `job.screen` is `Some` **and**
@@ -344,7 +368,7 @@ There are no child directories with contracts.
 
 ### Known hazards (from reading the code; not covered by tests)
 
-- `render_mp4` uses `[0:a]` without checking that the source has an audio
+- `render_mp4` uses `[k:a]` without checking that the source has an audio
   stream.
 - `record::resume` numbers the next take `takes.len() + 1 + 1`, so after
   take 1 the next file is `-take3.mp4`. This also disagrees with

@@ -27,6 +27,10 @@ pub enum ProgressTask {
     ModelPull,
     RuntimeInstall,
     FindClips,
+    /// `create_clips`: framing each new short on the speaker.
+    MakeClips,
+    /// `export_clips`: the whole batch (the per-clip render events are folded in).
+    ExportClips,
 }
 
 #[derive(Debug, Clone, Serialize)]

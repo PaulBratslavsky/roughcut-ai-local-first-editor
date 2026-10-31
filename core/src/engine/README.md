@@ -126,7 +126,10 @@ This package depends on the following crate modules but does not own them:
 | Method                                                                              | Notes                                                                                  |
 | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `set_clip_candidates(id, Vec<ClipCandidate>)`, `get_clip_candidates(id)`            | Replace or read the candidates from one `find_clips` run.                              |
+| `replace_clip_candidates(id, Vec<ClipCandidate>, drop_saved: Option<f64>)`          | A run's final write: with `drop_saved`, drops candidates overlapping a saved clip now. |
+| `begin_clip_scan(id) -> Result<ClipScan>`                                           | Claims the project's one `find_clips` slot; dropping the guard frees it.               |
 | `create_clip(id, ClipSource, title: Option<&str>, format: Option<ClipFormat>)`      | Snapshots the main cut, restricted to the clip's ranges. Returns `SavedClipSummary`.   |
+| `async create_clips(id, &[Uuid], format: Option<ClipFormat>)`                       | Makes each candidate that validates, then frames each vertical one in turn (`MakeClips` progress). Returns `(clips, errors)`. |
 | `list_clips(id)`, `get_clip(id, clip_id)`                                           | Summaries in creation order, or the full `SavedClip` including its timeline.           |
 | `update_clip(id, clip_id, ClipChanges)`, `delete_clip(id, clip_id)`                 | New ranges re-snapshot the current main cut.                                           |
 | `async center_clip_on_face(id, clip_id) -> Result<FaceCrop>`                        | Face pass that always applies the crop it finds.                                       |
@@ -248,8 +251,14 @@ This package depends on the following crate modules but does not own them:
 - `create_clip` defaults: `crop_x = 0.5`, `Landscape`, and title
   `"Clip {n}"`.
 - `create_clip` from a `Candidate` defaults to `Vertical`, copies the
-  candidate's title, score, reason, and hook, and removes the candidate. An
+  candidate's title, score, reason, and hook, builds the clip from its
+  `pieces`, and removes the candidate only after the clip validates. An
   explicit `format` or non-blank `title` argument overrides these defaults.
+- `create_clips` does the same per id inside one `update_project_meta`. An id
+  that isn't listed becomes a `ClipBatchError`; one that fails validation
+  stays listed and becomes one too. It then awaits the face pass for each
+  vertical clip, with compare-and-set on `crop_x`; a failed pass leaves the
+  crop at 0.5. A clip deleted during framing is left out of the result.
 - `update_clip` clamps `crop_x` to `[0, 1]` and ignores a blank title.
 - `set_crop_if` is compare-and-set: the background face pass writes `crop_x`
   only if the clip's crop still equals the value captured when the pass
@@ -347,10 +356,6 @@ This package depends on the following crate modules but does not own them:
 
 ### Known caveats (current code behavior)
 
-- `create_clip` from a `Candidate` removes the candidate from the in-memory
-  project before `set_ranges` runs. If `set_ranges` then fails, nothing is
-  saved, but the cached candidate list has already lost the entry. The cache
-  and the store disagree until the next reload.
 - `set_crop_if` saves, bumps `updated_at`, and emits `ClipsChanged` even when
   the compare fails and the crop is unchanged.
 - `auto_center_clip` calls `tokio::spawn` without checking for a runtime, so

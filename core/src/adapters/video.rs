@@ -6,7 +6,7 @@
 //! the core. Hardware accel flags are chosen per platform by ffmpeg itself.
 
 use crate::error::{CoreError, Result};
-use crate::model::{Media, Timeline};
+use crate::model::{Media, PlaySpan};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,10 @@ pub const PEAKS_PER_SECOND: u32 = 50;
 /// compositing (screen + camera bubble) made a struct overdue.
 pub struct RenderJob<'a> {
     pub media: &'a Media,
-    pub timeline: &'a Timeline,
+    /// What plays, grouped by piece, in output order. Each piece is read from
+    /// its own input seeked to just before it, so a render decodes about what
+    /// it uses instead of everything from 0:00. The main cut is one piece.
+    pub pieces: &'a [Vec<PlaySpan>],
     pub out_path: &'a str,
     pub audio_offset_s: f64,
     /// Dual-capture compositing: the synced screen file + how to frame it.
@@ -60,8 +63,8 @@ pub struct RenderJob<'a> {
 pub trait VideoEngine: Send + Sync {
     /// Probe a local file's metadata (no decode).
     async fn probe(&self, file_path: &str) -> Result<Media>;
-    /// Render the included clips of `timeline` to an MP4 at `out_path`,
-    /// emitting `progress` events (task "export") as ffmpeg advances.
+    /// Render the job's spans, in order, to an MP4 at `out_path`, emitting
+    /// `progress` events (task "export") as ffmpeg advances.
     async fn render_mp4(&self, job: &RenderJob<'_>, sink: &crate::events::SharedSink)
         -> Result<()>;
     /// Extract mono 16 kHz WAV (whisper input) to `out_path`.
@@ -204,134 +207,25 @@ impl VideoEngine for FfmpegCli {
     }
 
     async fn render_mp4(&self, job: &RenderJob<'_>, sink: &crate::events::SharedSink) -> Result<()> {
-        let media = job.media;
-        let timeline = job.timeline;
         let out_path = job.out_path;
-        let audio_offset_s = job.audio_offset_s;
-        let clips: Vec<_> = timeline.included_clips().collect();
-        if clips.is_empty() {
-            return Err(CoreError::InvalidArg("timeline has no included clips".into()));
-        }
-        let total_us = (timeline.included_duration() * 1_000_000.0).max(1.0);
-        // Dual-capture compositing: bake the SAME layout the preview shows.
-        let compositing = job.screen.filter(|(_, l)| l.mode != "camera");
-        // Build a trim/concat filtergraph over the single source. Each clip's
-        // audio gets a 20ms fade at both edges so joins never click — video
-        // stays a hard cut, timing is untouched.
-        let mut filter = String::new();
-        let (audio_graph, audio_srcs) = audio_sources(audio_offset_s, clips.len());
-        filter.push_str(&audio_graph);
-        // Video source per clip: raw camera, or the composed frame.
-        let video_src: String = if let Some((screen, layout)) = compositing {
-            let w = (screen.width.max(2) / 2 * 2) as i64;
-            let h = (screen.height.max(2) / 2 * 2) as i64;
-            filter.push_str(&format!(
-                "[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,\
-                 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[scr];"
-            ));
-            if layout.mode == "screen" {
-                // The screen file is routinely a hair shorter than the
-                // camera (start latency); trims past its EOF would emit
-                // EMPTY video that concat happily desyncs. Clone-pad the
-                // last frame out to the camera's duration.
-                let pad = (media.duration - screen.duration).max(0.0) + 1.0;
-                filter.push_str(&format!(
-                    "[scr]tpad=stop_mode=clone:stop_duration={pad:.3}[comp];"
-                ));
-            } else {
-                // The face bubble: scaled camera with a round / rounded-rect
-                // alpha mask (geq on the small pip only — cheap), overlaid at
-                // the chosen corner with a 3% inset.
-                let pw = ((layout.size.clamp(0.10, 0.45) * w as f64) as i64 / 2 * 2).max(64);
-                let scale_chain = if layout.shape == "round" {
-                    format!(
-                        "scale={pw}:{pw}:force_original_aspect_ratio=increase,\
-                         crop={pw}:{pw}"
-                    )
-                } else {
-                    format!("scale={pw}:-2")
-                };
-                let mask = if layout.shape == "round" {
-                    "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),(W/2)*(W/2)),255,0)".to_string()
-                } else {
-                    let r = (pw / 14).max(10);
-                    format!(
-                        "if(lte(pow(max(abs(X-W/2)-(W/2-{r}),0),2)+pow(max(abs(Y-H/2)-(H/2-{r}),0),2),{r}*{r}),255,0)"
-                    )
-                };
-                let inset_x = (w as f64 * 0.03) as i64;
-                let inset_y = (h as f64 * 0.03) as i64;
-                let x = if layout.corner.contains('l') {
-                    inset_x.to_string()
-                } else {
-                    format!("main_w-overlay_w-{inset_x}")
-                };
-                let y = if layout.corner.contains('t') {
-                    inset_y.to_string()
-                } else {
-                    format!("main_h-overlay_h-{inset_y}")
-                };
-                filter.push_str(&format!(
-                    "[0:v]{scale_chain},format=rgba,\
-                     geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{mask}'[cam];\
-                     [scr][cam]overlay={x}:{y}[comp];"
-                ));
-            }
-            // A labeled stream is consumed once — fan out per clip.
-            filter.push_str(&format!("[comp]split={}", clips.len()));
-            for i in 0..clips.len() {
-                filter.push_str(&format!("[cc{i}]"));
-            }
-            filter.push(';');
-            "cc".to_string()
-        } else {
-            String::new()
-        };
-
-        for (i, c) in clips.iter().enumerate() {
-            let dur = c.duration();
-            let fade = (0.02_f64).min(dur / 4.0);
-            let vsrc = if video_src.is_empty() {
-                "[0:v]".to_string()
-            } else {
-                format!("[{video_src}{i}]")
-            };
-            filter.push_str(&format!(
-                "{vsrc}trim=start={in_}:end={out},setpts=PTS-STARTPTS[v{i}];\
-                 {audio_src}atrim=start={in_}:end={out},asetpts=PTS-STARTPTS,\
-                 afade=t=in:st=0:d={fade:.3},afade=t=out:st={fo:.3}:d={fade:.3}[a{i}];",
-                in_ = c.source_in,
-                out = c.source_out,
-                fo = (dur - fade).max(0.0),
-                audio_src = audio_srcs[i],
-            ));
-        }
-        for i in 0..clips.len() {
-            filter.push_str(&format!("[v{i}][a{i}]"));
-        }
-        if let Some(x) = job.vertical_crop_x {
-            // Reframe once, after the cuts: one crop for the whole clip.
-            filter.push_str(&format!(
-                "concat=n={}:v=1:a=1[vcat][a];\
-                 [vcat]crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*{x:.4}:y=0,\
-                 scale=1080:1920,setsar=1[v]",
-                clips.len(),
-                x = x.clamp(0.0, 1.0),
-            ));
-        } else {
-            filter.push_str(&format!("concat=n={}:v=1:a=1[v][a]", clips.len()));
-        }
+        let plan = render_plan(job)?;
+        let total_us = (plan.total_s * 1_000_000.0).max(1.0);
         let mut cmd = ffmpeg_cmd()?;
-        cmd.args(["-y", "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", &media.file_path]);
-        if let Some((screen, _)) = compositing {
-            cmd.args(["-i", &screen.file_path]);
+        cmd.args(["-y", "-hide_banner", "-nostats", "-progress", "pipe:1"]);
+        for (seek, file) in &plan.inputs {
+            if *seek > 0.0 {
+                cmd.args(["-ss", &format!("{seek:.3}")]);
+            }
+            cmd.args(["-i", file]);
         }
         cmd.args([
-            "-filter_complex", &filter, "-map", "[v]", "-map", "[a]",
+            "-filter_complex", &plan.filter, "-map", "[v]", "-map", "[a]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac", out_path,
         ]);
-        // Stream ffmpeg's key=value progress lines into UI events.
+        // Stream ffmpeg's key=value progress lines into UI events. A render
+        // whose caller went away (a dropped request) stops with it.
         let mut child = cmd
+            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -738,51 +632,406 @@ impl VideoEngine for AutoVideoEngine {
     }
 }
 
-/// The per-clip audio inputs for a render, plus the filtergraph prefix that
-/// produces them. The global A/V sync nudge is applied ONCE, before the
-/// per-clip trims: positive = delay audio (silence pad), negative = audio
-/// starts |offset| early (trim).
+/// One render's ffmpeg inputs and filter graph, built without running ffmpeg.
+struct RenderPlan {
+    /// `(seek seconds, file)` per input, in input order: one camera input per
+    /// piece, then (when compositing) one screen input per piece.
+    inputs: Vec<(f64, String)>,
+    filter: String,
+    /// Output length, seconds.
+    total_s: f64,
+}
+
+/// Footage read before each piece: a second for the decoder to settle, plus
+/// the A/V delay, so delayed audio starts on real audio rather than silence.
+fn preroll(audio_offset_s: f64) -> f64 {
+    1.0 + audio_offset_s.max(0.0)
+}
+
+/// Pieces at most this far apart share one input: decoding a short gap costs
+/// less than another decoder of the same file.
+const SHARED_INPUT_GAP_S: f64 = 30.0;
+/// The most inputs of the source one render opens (one decoder each).
+const MAX_INPUTS: usize = 12;
+/// A screen input is never seeked closer than this to its end, so it always
+/// has frames to clone (`tpad`) when the camera runs longer.
+const SCREEN_TAIL_S: f64 = 3.0;
+
+/// Which pieces share an input: runs of consecutive pieces, each starting at
+/// or after the previous one's end and at most `SHARED_INPUT_GAP_S` later.
+/// Past `MAX_INPUTS` runs, in-order neighbours with the smallest gaps merge
+/// whatever the gap. Pieces that play out of source order never share (an
+/// input decodes forward only).
+fn input_groups(pieces: &[&Vec<PlaySpan>]) -> Vec<Vec<usize>> {
+    let start = |i: usize| pieces[i].iter().map(|s| s.source_in).fold(f64::INFINITY, f64::min);
+    let end = |i: usize| pieces[i].iter().map(|s| s.source_out).fold(f64::NEG_INFINITY, f64::max);
+    let mut groups: Vec<Vec<usize>> = vec![];
+    for i in 0..pieces.len() {
+        match groups.last_mut() {
+            Some(g) => {
+                let gap = start(i) - end(*g.last().unwrap());
+                if gap >= -1e-6 && gap <= SHARED_INPUT_GAP_S {
+                    g.push(i);
+                } else {
+                    groups.push(vec![i]);
+                }
+            }
+            None => groups.push(vec![i]),
+        }
+    }
+    while groups.len() > MAX_INPUTS {
+        let smallest = (0..groups.len() - 1)
+            .map(|j| (j, start(groups[j + 1][0]) - end(*groups[j].last().unwrap())))
+            .filter(|(_, gap)| *gap >= -1e-6)
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((j, _)) = smallest else { break };
+        let next = groups.remove(j + 1);
+        groups[j].extend(next);
+    }
+    groups
+}
+
+/// Seconds rounded down to the millisecond: the exact value `-ss` receives,
+/// so the trims below are measured from the same zero ffmpeg uses.
+fn to_ms(t: f64) -> f64 {
+    (t.max(0.0) * 1000.0).floor() / 1000.0
+}
+
+/// Build the inputs and trim/concat filter graph for a render. Each group of
+/// pieces (`input_groups`) has its own input seeked to `start − preroll`; its
+/// spans' trims are measured from that seek point. Video trims sit half a
+/// frame early, so a span edge that falls exactly on a frame never depends on
+/// float rounding: the frame AT the start is kept, the frame at the end isn't.
+/// Each span's audio gets a 20 ms fade at both edges so joins never click —
+/// video stays a hard cut, timing is untouched.
+fn render_plan(job: &RenderJob<'_>) -> Result<RenderPlan> {
+    let media = job.media;
+    let pieces: Vec<&Vec<PlaySpan>> = job.pieces.iter().filter(|p| !p.is_empty()).collect();
+    if pieces.is_empty() {
+        return Err(CoreError::InvalidArg("timeline has no included clips".into()));
+    }
+    let half_frame = 0.5 / if media.frame_rate > 0.0 { media.frame_rate } else { 30.0 };
+    let groups = input_groups(&pieces);
+    let n_inputs = groups.len();
+    // Dual-capture compositing: bake the SAME layout the preview shows.
+    let compositing = job.screen.filter(|(_, l)| l.mode != "camera");
+    let pre = preroll(job.audio_offset_s);
+    let seeks: Vec<f64> = groups
+        .iter()
+        .map(|g| {
+            let start = pieces[g[0]].iter().map(|s| s.source_in).fold(f64::INFINITY, f64::min);
+            to_ms(start - pre)
+        })
+        .collect();
+    let mut inputs: Vec<(f64, String)> = seeks.iter().map(|&t| (t, media.file_path.clone())).collect();
+    // The screen seeks with the camera, but never into its last seconds; the
+    // difference is taken off its timestamps so the two stay in step.
+    let screen_seeks: Vec<f64> = match compositing {
+        Some((screen, _)) => seeks.iter().map(|&t| to_ms(t.min(screen.duration - SCREEN_TAIL_S))).collect(),
+        None => vec![],
+    };
+    if let Some((screen, _)) = compositing {
+        inputs.extend(screen_seeks.iter().map(|&t| (t, screen.file_path.clone())));
+    }
+
+    let mut filter = String::new();
+    let mut n = 0; // spans so far, across inputs
+    let mut total_s = 0.0;
+    for (k, group) in groups.iter().enumerate() {
+        let spans: Vec<PlaySpan> = group.iter().flat_map(|&i| pieces[i].iter().copied()).collect();
+        let m = spans.len();
+        let (audio_graph, audio_srcs) = audio_sources(job.audio_offset_s, k, m);
+        filter.push_str(&audio_graph);
+        // Video source per span: raw camera, or the composed frame.
+        let video_srcs: Vec<String> = match compositing {
+            Some((screen, layout)) => {
+                let shift = seeks[k] - screen_seeks[k];
+                composite_graph(&mut filter, media, screen, layout, k, n_inputs + k, shift, m)
+            }
+            None => vec![format!("[{k}:v]"); m],
+        };
+        for (i, span) in spans.iter().enumerate() {
+            let dur = span.duration();
+            total_s += dur;
+            let fade = (0.02_f64).min(dur / 4.0);
+            let (a, b) = (span.source_in - seeks[k], span.source_out - seeks[k]);
+            filter.push_str(&format!(
+                "{vsrc}trim=start={va:.6}:end={vb:.6},setpts=PTS-STARTPTS[v{n}];\
+                 {asrc}atrim=start={a:.6}:end={b:.6},asetpts=PTS-STARTPTS,\
+                 afade=t=in:st=0:d={fade:.3},afade=t=out:st={fo:.3}:d={fade:.3}[a{n}];",
+                vsrc = video_srcs[i],
+                asrc = audio_srcs[i],
+                va = (a - half_frame).max(0.0),
+                vb = (b - half_frame).max(0.0),
+                fo = (dur - fade).max(0.0),
+            ));
+            n += 1;
+        }
+    }
+    for i in 0..n {
+        filter.push_str(&format!("[v{i}][a{i}]"));
+    }
+    if let Some(x) = job.vertical_crop_x {
+        // Reframe once, after the cuts: one crop for the whole clip.
+        filter.push_str(&format!(
+            "concat=n={n}:v=1:a=1[vcat][a];\
+             [vcat]crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*{x:.4}:y=0,\
+             scale=1080:1920,setsar=1[v]",
+            x = x.clamp(0.0, 1.0),
+        ));
+    } else {
+        filter.push_str(&format!("concat=n={n}:v=1:a=1[v][a]"));
+    }
+    Ok(RenderPlan { inputs, filter, total_s })
+}
+
+/// The composed frame (screen + camera bubble, or screen only) for input
+/// group `k`, read from camera input `cam` and screen input `scr`, split once
+/// per span. `shift` is how much earlier the screen input was seeked than the
+/// camera's; its timestamps move back by that much.
+#[allow(clippy::too_many_arguments)]
+fn composite_graph(
+    filter: &mut String,
+    media: &Media,
+    screen: &Media,
+    layout: &crate::model::Layout,
+    cam: usize,
+    scr: usize,
+    shift: f64,
+    spans: usize,
+) -> Vec<String> {
+    let k = cam;
+    let w = (screen.width.max(2) / 2 * 2) as i64;
+    let h = (screen.height.max(2) / 2 * 2) as i64;
+    let realign = if shift > 0.0005 { format!("setpts=PTS-{shift:.6}/TB,") } else { String::new() };
+    // The screen file is routinely a hair shorter than the camera (start
+    // latency); trims past its EOF would emit EMPTY video that concat happily
+    // desyncs. Clone-pad its last frame out to the camera's duration.
+    let pad = (media.duration - screen.duration).max(0.0) + SCREEN_TAIL_S + 1.0;
+    let screen_out = if layout.mode == "screen" { format!("[comp{k}]") } else { format!("[scr{k}]") };
+    filter.push_str(&format!(
+        "[{scr}:v]{realign}scale={w}:{h}:force_original_aspect_ratio=decrease,\
+         pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,\
+         tpad=stop_mode=clone:stop_duration={pad:.3}{screen_out};"
+    ));
+    if layout.mode != "screen" {
+        // The face bubble: scaled camera with a round / rounded-rect alpha
+        // mask (geq on the small pip only — cheap), overlaid at the chosen
+        // corner with a 3% inset.
+        let pw = ((layout.size.clamp(0.10, 0.45) * w as f64) as i64 / 2 * 2).max(64);
+        let scale_chain = if layout.shape == "round" {
+            format!("scale={pw}:{pw}:force_original_aspect_ratio=increase,crop={pw}:{pw}")
+        } else {
+            format!("scale={pw}:-2")
+        };
+        let mask = if layout.shape == "round" {
+            "if(lte((X-W/2)*(X-W/2)+(Y-H/2)*(Y-H/2),(W/2)*(W/2)),255,0)".to_string()
+        } else {
+            let r = (pw / 14).max(10);
+            format!("if(lte(pow(max(abs(X-W/2)-(W/2-{r}),0),2)+pow(max(abs(Y-H/2)-(H/2-{r}),0),2),{r}*{r}),255,0)")
+        };
+        let inset_x = (w as f64 * 0.03) as i64;
+        let inset_y = (h as f64 * 0.03) as i64;
+        let x = if layout.corner.contains('l') { inset_x.to_string() } else { format!("main_w-overlay_w-{inset_x}") };
+        let y = if layout.corner.contains('t') { inset_y.to_string() } else { format!("main_h-overlay_h-{inset_y}") };
+        filter.push_str(&format!(
+            "[{cam}:v]{scale_chain},format=rgba,\
+             geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{mask}'[cam{k}];\
+             [scr{k}][cam{k}]overlay={x}:{y}[comp{k}];"
+        ));
+    }
+    // A labeled stream is consumed once — fan out per span.
+    let labels: Vec<String> = (0..spans).map(|i| format!("[cc{k}_{i}]")).collect();
+    filter.push_str(&format!("[comp{k}]split={spans}{};", labels.concat()));
+    labels
+}
+
+/// The per-span audio sources for input `input`, plus the filtergraph prefix
+/// that produces them. The global A/V sync nudge is applied ONCE per input,
+/// before the per-span trims: positive = delay audio (silence pad), negative =
+/// audio starts |offset| early (trim).
 ///
 /// The shifted stream is a filter output, and an output label must be read by
-/// exactly one filter: reusing it once per clip makes ffmpeg feed every clip
+/// exactly one filter: reusing it once per span makes ffmpeg feed every span
 /// after the first audio from the wrong place. So it is `asplit` into one copy
-/// per clip. The raw input `[0:a]` may be read any number of times.
-fn audio_sources(audio_offset_s: f64, clips: usize) -> (String, Vec<String>) {
+/// per span. A raw input like `[0:a]` may be read any number of times.
+fn audio_sources(audio_offset_s: f64, input: usize, spans: usize) -> (String, Vec<String>) {
     if audio_offset_s.abs() <= 0.001 {
-        return (String::new(), vec!["[0:a]".to_string(); clips]);
+        return (String::new(), vec![format!("[{input}:a]"); spans]);
     }
     let mut graph = if audio_offset_s > 0.0 {
         let ms = (audio_offset_s * 1000.0).round() as i64;
-        format!("[0:a]adelay={ms}:all=1[ash];")
+        format!("[{input}:a]adelay={ms}:all=1[ash{input}];")
     } else {
-        format!("[0:a]atrim=start={:.3},asetpts=PTS-STARTPTS[ash];", -audio_offset_s)
+        format!("[{input}:a]atrim=start={:.3},asetpts=PTS-STARTPTS[ash{input}];", -audio_offset_s)
     };
-    let labels: Vec<String> = (0..clips).map(|i| format!("[as{i}]")).collect();
-    graph.push_str(&format!("[ash]asplit={}{};", clips, labels.concat()));
+    let labels: Vec<String> = (0..spans).map(|i| format!("[as{input}_{i}]")).collect();
+    graph.push_str(&format!("[ash{input}]asplit={}{};", spans, labels.concat()));
     (graph, labels)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_sources, compute_peaks};
+    use super::{audio_sources, compute_peaks, render_plan, RenderJob};
+    use crate::model::{Layout, Media, PlaySpan};
 
     #[test]
-    fn shifted_audio_is_split_so_every_clip_reads_its_own_copy() {
-        // No offset: every clip reads the raw input, nothing to split.
-        let (graph, srcs) = audio_sources(0.0, 3);
+    fn shifted_audio_is_split_so_every_span_reads_its_own_copy() {
+        // No offset: every span reads the raw input, nothing to split.
+        let (graph, srcs) = audio_sources(0.0, 0, 3);
         assert!(graph.is_empty());
         assert_eq!(srcs, vec!["[0:a]"; 3]);
 
-        // With an offset each clip gets a distinct label from one asplit —
+        // With an offset each span gets a distinct label from one asplit —
         // a filter output label can be consumed only once.
         for offset in [0.2, -0.15] {
-            let (graph, srcs) = audio_sources(offset, 3);
-            assert!(graph.contains("[ash]asplit=3[as0][as1][as2];"), "{graph}");
-            assert_eq!(srcs, vec!["[as0]", "[as1]", "[as2]"]);
-            assert_eq!(graph.matches("[ash]").count(), 2, "produced once, read once: {graph}");
+            let (graph, srcs) = audio_sources(offset, 1, 3);
+            assert!(graph.contains("[ash1]asplit=3[as1_0][as1_1][as1_2];"), "{graph}");
+            assert_eq!(srcs, vec!["[as1_0]", "[as1_1]", "[as1_2]"]);
+            assert_eq!(graph.matches("[ash1]").count(), 2, "produced once, read once: {graph}");
         }
-        assert!(audio_sources(0.2, 1).0.contains("adelay=200"));
-        assert!(audio_sources(-0.15, 1).0.contains("atrim=start=0.150"));
+        assert!(audio_sources(0.2, 0, 1).0.contains("[0:a]adelay=200"));
+        assert!(audio_sources(-0.15, 0, 1).0.contains("atrim=start=0.150"));
+    }
+
+    fn media(path: &str) -> Media {
+        Media {
+            id: uuid::Uuid::new_v4(),
+            file_path: path.into(),
+            duration: 3600.0,
+            frame_rate: 30.0,
+            width: 1920,
+            height: 1080,
+            audio_sample_rate: 48000,
+            codec: "h264".into(),
+            imported_at: chrono::Utc::now(),
+        }
+    }
+
+    fn span(a: f64, b: f64) -> PlaySpan {
+        PlaySpan { source_in: a, source_out: b }
+    }
+
+    fn job<'a>(m: &'a Media, pieces: &'a [Vec<PlaySpan>], offset: f64) -> RenderJob<'a> {
+        RenderJob { media: m, pieces, out_path: "/tmp/out.mp4", audio_offset_s: offset, screen: None, vertical_crop_x: None }
+    }
+
+    #[test]
+    fn a_late_piece_seeks_instead_of_decoding_from_the_start() {
+        let m = media("/v.mp4");
+        // Minute 40, with a cut inside: two spans in one piece.
+        let pieces = vec![vec![span(2400.0, 2410.0), span(2412.0, 2430.0)]];
+        let plan = render_plan(&job(&m, &pieces, 0.0)).unwrap();
+        assert_eq!(plan.inputs, vec![(2399.0, "/v.mp4".to_string())], "one second of preroll");
+        // Audio exact; video half a frame (30 fps) early.
+        assert!(plan.filter.contains("[0:a]atrim=start=1.000000:end=11.000000"), "{}", plan.filter);
+        assert!(plan.filter.contains("[0:v]trim=start=0.983333:end=10.983333"), "{}", plan.filter);
+        assert!(plan.filter.contains("[0:v]trim=start=12.983333:end=30.983333"), "{}", plan.filter);
+        assert!(plan.filter.ends_with("[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"), "{}", plan.filter);
+        assert!((plan.total_s - 28.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn each_piece_reads_its_own_input_in_play_order() {
+        let m = media("/v.mp4");
+        // The payoff (1:45) plays before the setup (0:30).
+        let pieces = vec![vec![span(105.0, 125.0)], vec![span(30.0, 50.0)]];
+        let plan = render_plan(&job(&m, &pieces, 0.0)).unwrap();
+        assert_eq!(plan.inputs.iter().map(|i| i.0).collect::<Vec<_>>(), vec![104.0, 29.0]);
+        assert!(plan.filter.contains("[0:v]trim=start=0.983333:end=20.983333"));
+        assert!(plan.filter.contains("[1:v]trim=start=0.983333:end=20.983333"));
+        assert!(plan.filter.contains("[0:a]atrim") && plan.filter.contains("[1:a]atrim"));
+    }
+
+    #[test]
+    fn a_delayed_track_gets_more_preroll_and_a_split_per_input() {
+        let m = media("/v.mp4");
+        let pieces = vec![vec![span(100.0, 110.0)], vec![span(200.0, 210.0), span(215.0, 220.0)]];
+        let plan = render_plan(&job(&m, &pieces, 0.5)).unwrap();
+        assert_eq!(plan.inputs.iter().map(|i| i.0).collect::<Vec<_>>(), vec![98.5, 198.5]);
+        assert!(plan.filter.contains("[0:a]adelay=500:all=1[ash0];[ash0]asplit=1[as0_0];"), "{}", plan.filter);
+        assert!(plan.filter.contains("[1:a]adelay=500:all=1[ash1];[ash1]asplit=2[as1_0][as1_1];"));
+        // An early piece can't seek before 0.
+        let early = vec![vec![span(0.2, 10.0)]];
+        assert_eq!(render_plan(&job(&m, &early, -0.3)).unwrap().inputs[0].0, 0.0);
+    }
+
+    #[test]
+    fn compositing_adds_a_screen_input_per_piece() {
+        let m = media("/cam.mp4");
+        let scr = media("/screen.mp4");
+        let layout = Layout::default();
+        let pieces = vec![vec![span(100.0, 110.0)], vec![span(10.0, 20.0)]];
+        let mut j = job(&m, &pieces, 0.0);
+        j.screen = Some((&scr, &layout));
+        j.vertical_crop_x = Some(0.5);
+        let plan = render_plan(&j).unwrap();
+        let files: Vec<&str> = plan.inputs.iter().map(|i| i.1.as_str()).collect();
+        assert_eq!(files, vec!["/cam.mp4", "/cam.mp4", "/screen.mp4", "/screen.mp4"]);
+        assert_eq!(plan.inputs[2].0, plan.inputs[0].0, "screen and camera seek together");
+        assert!(plan.filter.contains("[2:v]scale=") && plan.filter.contains("[3:v]scale="));
+        assert!(plan.filter.contains("[scr0][cam0]overlay") && plan.filter.contains("[scr1][cam1]overlay"));
+        assert!(plan.filter.contains("[cc1_0]trim="));
+        assert!(plan.filter.contains("crop=w=trunc(ih*9/16/2)*2"));
+    }
+
+    #[test]
+    fn nearby_pieces_share_an_input_and_inputs_are_capped() {
+        let m = media("/v.mp4");
+        let near = vec![vec![span(100.0, 110.0)], vec![span(120.0, 130.0)]];
+        let plan = render_plan(&job(&m, &near, 0.0)).unwrap();
+        assert_eq!(plan.inputs.len(), 1, "a 10 s gap is cheaper to decode than a second decoder");
+        assert!(plan.filter.contains("[0:v]trim=start=20.983333:end=30.983333"), "{}", plan.filter);
+        // Twenty pieces 100 s apart, in order: merged down to the cap.
+        let far: Vec<Vec<PlaySpan>> = (0..20).map(|i| vec![span(i as f64 * 100.0, i as f64 * 100.0 + 5.0)]).collect();
+        let plan = render_plan(&job(&m, &far, 0.0)).unwrap();
+        assert_eq!(plan.inputs.len(), super::MAX_INPUTS);
+        assert!(plan.filter.ends_with("concat=n=20:v=1:a=1[v][a]"));
+    }
+
+    #[test]
+    fn the_seek_ffmpeg_gets_is_the_seek_the_trims_use() {
+        // A piece starting on frame 2 of second 100 at 30 fps: the seek is
+        // rounded to the millisecond once, and the trims measure from it.
+        let m = media("/v.mp4");
+        let start = 100.0 + 2.0 / 30.0;
+        let pieces = vec![vec![span(start, start + 10.0)]];
+        let plan = render_plan(&job(&m, &pieces, 0.0)).unwrap();
+        assert_eq!(plan.inputs[0].0, 99.066);
+        assert!(plan.filter.contains("[0:a]atrim=start=1.000667:"), "{}", plan.filter);
+        assert!(plan.filter.contains("[0:v]trim=start=0.984000:"), "{}", plan.filter);
+    }
+
+    #[test]
+    fn an_advanced_track_trims_each_input_and_keeps_the_base_preroll() {
+        let m = media("/v.mp4");
+        let pieces = vec![vec![span(100.0, 110.0)], vec![span(300.0, 310.0)]];
+        let plan = render_plan(&job(&m, &pieces, -0.2)).unwrap();
+        assert_eq!(plan.inputs.iter().map(|i| i.0).collect::<Vec<_>>(), vec![99.0, 299.0]);
+        assert!(plan.filter.contains("[0:a]atrim=start=0.200,asetpts=PTS-STARTPTS[ash0]"), "{}", plan.filter);
+        assert!(plan.filter.contains("[1:a]atrim=start=0.200,asetpts=PTS-STARTPTS[ash1]"), "{}", plan.filter);
+    }
+
+    #[test]
+    fn a_screen_never_seeks_into_its_last_seconds() {
+        let m = media("/cam.mp4");
+        let mut scr = media("/screen.mp4");
+        scr.duration = 180.0;
+        let layout = Layout { mode: "screen".into(), ..Layout::default() };
+        let pieces = vec![vec![span(179.5, 185.0)]];
+        let mut j = job(&m, &pieces, 0.0);
+        j.screen = Some((&scr, &layout));
+        let plan = render_plan(&j).unwrap();
+        assert_eq!(plan.inputs[0].0, 178.5);
+        assert_eq!(plan.inputs[1].0, 177.0, "three seconds before the screen's end");
+        assert!(plan.filter.contains("[1:v]setpts=PTS-1.500000/TB,scale="), "{}", plan.filter);
+        assert!(plan.filter.contains("tpad=stop_mode=clone"));
+    }
+
+    #[test]
+    fn nothing_to_play_is_an_error() {
+        let m = media("/v.mp4");
+        assert!(render_plan(&job(&m, &[vec![]], 0.0)).is_err());
     }
 
     #[test]

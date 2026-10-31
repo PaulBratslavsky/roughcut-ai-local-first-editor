@@ -1,8 +1,10 @@
 # Bulk shorts: scan, review, make, export
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Draft, revised after a fresh-eyes review; no open questions
-    (review UI decided 2026-10-31: its own Shorts screen)
+*   **Status:** Phase 1 implemented (branch `feat/bulk-shorts`, 2026-10-31;
+    see "Phase 1 as built" for where it differs from this plan). Phases 2
+    and 3 not started. No open questions (review UI decided 2026-10-31: its
+    own Shorts screen)
 *   **Date:** 2026-10-30
 
 --------------------------------------------------------------------------------
@@ -230,7 +232,9 @@ false). `count` is clamped to 1–60 in all modes.
     skipping windows that overlap one already taken, until the pool holds
     `SCAN_POOL` windows (starting value 90 = 15 model calls; tune after
     measuring). Every beat with at least one window is represented before any
-    beat gets a second.
+    beat gets a second. A round that doesn't fit under the cap keeps its
+    best-scoring windows, not its earliest beats'. The cap only bounds model
+    calls: with no model reachable, the pool is not capped.
 *   When the beat-respecting windows are empty and the finder falls back to
     `candidate_windows(None)` (choppy rule-based outlines), there are no beats
     to rotate over: the pool is `diversify(windows, SCAN_POOL)`.
@@ -244,7 +248,13 @@ false). `count` is clamped to 1–60 in all modes.
 **Writing the list.** The scan builds its result outside the project lock,
 then writes it in one `update_project_meta` closure that also drops
 candidates overlapping any **current** saved clip. A clip made while the
-scan ran is therefore not offered again (CUJ 5). The `Editor` keeps a set of
+scan ran is therefore not offered again (CUJ 5). A scan also drops windows
+overlapping saved clips before scoring, so the model's calls go to new
+moments; if that leaves nothing, the scan writes an empty list and returns
+no candidates (not an error). **Only scans** filter saved moments: a plain
+`find_clips` (the Clips tab's quick list, the chat agent) is unchanged, so
+the chat can still be asked for a saved moment again. There is one stored
+list, so a plain run after a scan replaces it, saved moments and all. The `Editor` keeps a set of
 project ids with a running `find_clips`; a second call for the same project
 fails with "a clip scan is already running for this project". The UI
 disables "Scan" while one runs.
@@ -294,6 +304,13 @@ grouped into pieces (`Vec<Vec<PlaySpan>>`: one inner list per piece; the main
 export is one piece). Each piece gets its own input of the source file,
 opened with `-ss (piece_start − preroll)` where `preroll = 1 s +
 max(audio_offset_s, 0)`; its spans' trims are measured from that seek point.
+As built, in-order pieces at most 30 s apart share one input and a render
+opens at most 12, so twenty hand-picked sentences don't start twenty
+decoders. The seek is rounded to the millisecond once and the trims use that
+same value, and video trims sit half a frame early, so frame-exact span
+edges never depend on float rounding. A screen input never seeks into its
+last 3 s (its timestamps are shifted to match), and its last frame is
+clone-padded in pip mode too.
 The audio-offset graph (`audio_sources`) runs per input as it does today on
 the one input, and the preroll keeps the delayed audio's first second real
 audio instead of `adelay` silence. When compositing a screen recording, the
@@ -427,6 +444,49 @@ if at least half pass; otherwise tune spans and prompt first.
     starting values); "Make N shorts" calls `create_clips`; "Export N" asks
     for a folder through the Tauri dialog plugin (`dialog:default` is already
     granted) and calls `export_clips` with the ticked saved clips.
+
+## Phase 1 as built
+
+Where the code (branch `feat/bulk-shorts`) differs from the plan above, after
+fresh-eyes code reviews of the core and the frontend:
+
+*   **Saved moments**: filtered only in scans, before scoring and at the
+    write (see "Writing the list"). A scan where every moment is saved
+    writes an empty list. `find_clips` reports `method` from the run, so an
+    empty result still says `llm` or `heuristic`.
+*   **Scan pool**: uncapped without a model; a cut-off round keeps its best.
+*   **Render**: nearby in-order pieces share an input (≤ 30 s gap, ≤ 12
+    inputs); one millisecond-rounded seek for `-ss` and trims; half-frame
+    video trims; the screen input stays out of its last 3 s; renders stop
+    when their caller goes away (`kill_on_drop`). Checked against real
+    ffmpeg by `core/examples/render_seek_check.rs` (frame placement by PSNR
+    at 25 and 30 fps, reversed pieces, ± A/V offset, 9:16, pip and
+    screen-only compositing, a short past the screen's end). A 28 s short
+    from minute 40 of a 320×240 test file renders in about 0.24 s against
+    about 2.1 s decoding from 0:00.
+*   **`export_clips`**: each file name is reserved on disk (`create_new`)
+    before its render, and a failed clip's file is removed. An unknown
+    project, empty `clip_ids` or unknown target fails before any folder is
+    made or any approval is asked. A bare `~` expands too.
+*   **`create_clips`**: a clip deleted while the batch is framing is left out
+    of the result instead of failing the call.
+*   **MCP shim** (`mcp-shim/src/main.rs`): no request timeout (it was
+    reqwest's 30 s default), and a request is retried only when it never
+    reached the app. Before, a scan or batch export longer than 30 s was
+    re-sent: a second export and a second approval prompt.
+*   **Frontend**: a scan, make or export keeps running and keeps its result
+    when the user leaves the Shorts screen or switches projects: the three
+    mutations carry a per-project `mutationKey` (shared with the Clips tab's
+    find), their result handling sits in the hooks, and the screen's state
+    (ticks, progress lines, last results) lives in `state/shortsStore.ts`,
+    fed by one progress listener mounted in `App`. Export is disabled while
+    a make is framing. Clips that exported are unticked. The browser mock has
+    switches for CUJ 6 (`?nomodel`) and failing exports (`?failexport`). A
+    candidate's preview draws a fixed, centred 9:16 guide (`PreviewPanel`'s
+    `shortsGuide`, shown only for a candidate's audition). Shared clip
+    helpers moved to `panels/clipUtil.ts`.
+*   **Not measured yet** (needs a real video and the on-device model): scan
+    time on a 45-minute video, make time, and peak memory on a 4K render.
 
 ## Alternatives Considered
 

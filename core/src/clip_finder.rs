@@ -11,7 +11,7 @@
 use crate::adapters::InferenceClient;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
-use crate::model::{ClipCandidate, Timeline, TranscriptSegment};
+use crate::model::{pieces_overlap, ClipCandidate, SourceRange, Timeline, TranscriptSegment};
 use crate::story::Beat;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -26,11 +26,20 @@ pub struct FindOptions {
     /// Only moments about this topic ("AI tools", "pricing"). Located with the
     /// hybrid transcript search, then judged by the model.
     pub theme: Option<String>,
+    /// Scan the whole video: a bigger model pool, filled across every story
+    /// beat so no part of the video goes unjudged.
+    pub scan: bool,
+    /// Drop windows the MODEL scored below this. Windows it didn't judge
+    /// (no model, a failed batch) are kept and rank after judged ones.
+    pub min_score: Option<f64>,
+    /// Also propose shorts made of several pieces (Phase 3; accepted and
+    /// ignored until then).
+    pub multi_moment: bool,
 }
 
 impl Default for FindOptions {
     fn default() -> Self {
-        Self { count: 8, min_s: 15.0, max_s: 60.0, theme: None }
+        Self { count: 8, min_s: 15.0, max_s: 60.0, theme: None, scan: false, min_score: None, multi_moment: false }
     }
 }
 
@@ -55,6 +64,11 @@ struct Window {
 /// The candidate pool the model sees — enough to find the good ones without
 /// a long chain of slow local-model calls.
 const POOL_MAX: usize = 24;
+/// The pool in scan mode: 15 model calls. A starting value — lower it if a
+/// scan of a long video is too slow on the user's model.
+const SCAN_POOL: usize = 90;
+/// The most candidates one run returns.
+const MAX_COUNT: usize = 60;
 /// Candidates per model call.
 const BATCH: usize = 6;
 /// Two candidates sharing more than this fraction of the SHORTER one are the
@@ -64,23 +78,32 @@ const MAX_OVERLAP: f64 = 0.3;
 /// With a theme, model-judged candidates under this are off-topic rejects.
 const MIN_THEMED_SCORE: f64 = 30.0;
 
+/// One run's result: the candidates written, and how they were scored.
+pub struct Found {
+    pub candidates: Vec<ClipCandidate>,
+    /// "llm" (the on-device model judged them) | "heuristic".
+    pub method: &'static str,
+}
+
 /// Find, rank, and persist clip candidates for the project's current cut.
-pub async fn find_clips(
-    editor: &Editor,
-    project_id: Uuid,
-    opts: FindOptions,
-) -> Result<Vec<ClipCandidate>> {
+pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) -> Result<Found> {
+    // One run per project at a time: a second one would race the first to
+    // write the list.
+    let _scan = editor.begin_clip_scan(project_id)?;
     let opts = FindOptions {
-        count: opts.count.clamp(1, 20),
+        count: opts.count.clamp(1, MAX_COUNT),
         min_s: opts.min_s.max(3.0),
         max_s: opts.max_s.max(opts.min_s.max(3.0) + 1.0),
         theme: opts.theme.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string),
+        min_score: opts.min_score.filter(|m| m.is_finite()),
+        ..opts
     };
-    let (main, speech) = editor.with_project(project_id, |p, t| {
+    let (main, speech, saved) = editor.with_project(project_id, |p, t| {
         let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript; transcribe first".into()))?;
         let speech: Vec<TranscriptSegment> =
             t.segments.iter().filter(|s| !s.is_silence && !s.text.trim().is_empty()).cloned().collect();
-        Ok((p.timeline.clone(), speech))
+        let saved: Vec<Vec<SourceRange>> = p.saved_clips.iter().map(|c| c.ranges.clone()).collect();
+        Ok((p.timeline.clone(), speech, saved))
     })?;
     if speech.is_empty() {
         return Err(CoreError::InvalidArg("transcript has no speech".into()));
@@ -93,10 +116,24 @@ pub async fn find_clips(
     let beat_of = beat_index(&speech, &outline.beats);
 
     let mut windows = candidate_windows(&speech, Some(&beat_of), &main, &opts);
+    let mut by_beat = true;
     if windows.is_empty() {
         // Beats shorter than min_s (choppy pause-based sections): let a
         // window span them rather than return nothing.
         windows = candidate_windows(&speech, None, &main, &opts);
+        by_beat = false;
+    }
+    let inference = editor.inference()?;
+    let healthy = inference.healthy().await;
+    // A scan doesn't offer moments already saved as clips. (A plain run
+    // behaves as it always has: the chat may ask for a saved moment again.)
+    if opts.scan && !windows.is_empty() {
+        windows.retain(|w| saved.iter().all(|r| pieces_overlap(&w.pieces(), r) <= MAX_OVERLAP));
+        if windows.is_empty() {
+            let candidates = editor.replace_clip_candidates(project_id, vec![], None)?;
+            progress(editor, project_id, 1.0, "every moment that fits is already saved as a clip");
+            return Ok(Found { candidates, method: if healthy { "llm" } else { "heuristic" } });
+        }
     }
     if windows.is_empty() {
         return Err(CoreError::InvalidArg(format!(
@@ -132,10 +169,9 @@ pub async fn find_clips(
             )));
         }
     }
-    let pool = diversify(windows, POOL_MAX.max(opts.count));
+    let pool = build_pool(windows, &beat_of, by_beat, &opts, healthy);
 
-    let inference = editor.inference()?;
-    let (ranked, method) = if inference.healthy().await {
+    let (ranked, method) = if healthy {
         let model = editor.get_preferences()?.inference_model;
         let on_batch = |done: usize, total: usize| {
             progress(
@@ -162,12 +198,74 @@ pub async fn find_clips(
             ranked.retain(|w| !w.judged || w.score >= MIN_THEMED_SCORE);
         }
     }
+    keep_above(&mut ranked, opts.min_score);
     let picked = diversify(ranked, opts.count);
-    progress(editor, project_id, 1.0, format!("found {} clip candidates", picked.len()));
     let candidates: Vec<ClipCandidate> =
         picked.iter().map(|w| to_candidate(&speech, w, method, opts.theme.as_deref())).collect();
-    editor.set_clip_candidates(project_id, candidates.clone())?;
-    Ok(candidates)
+    // Written in one step that (for a scan) also drops moments saved while
+    // it ran.
+    let drop_saved = opts.scan.then_some(MAX_OVERLAP);
+    let candidates = editor.replace_clip_candidates(project_id, candidates, drop_saved)?;
+    progress(editor, project_id, 1.0, format!("found {} clip candidates", candidates.len()));
+    Ok(Found { candidates, method })
+}
+
+/// The windows worth scoring. A plain run: the best `POOL_MAX` (or `count`)
+/// distinct moments, as always. A scan: taken beat by beat
+/// (`round_robin_pool`), or best-first when the windows span beats. The scan
+/// cap only bounds model calls, so without a model nothing is cut off and the
+/// result is simply the top moments by rule score.
+fn build_pool(windows: Vec<Window>, beat_of: &[usize], by_beat: bool, opts: &FindOptions, model: bool) -> Vec<Window> {
+    let cap = if model { SCAN_POOL } else { usize::MAX };
+    if !opts.scan {
+        diversify(windows, POOL_MAX.max(opts.count))
+    } else if by_beat {
+        round_robin_pool(windows, beat_of, cap)
+    } else {
+        diversify(windows, cap)
+    }
+}
+
+/// `min_score` drops what the model judged below it; unjudged windows stay.
+fn keep_above(ranked: &mut Vec<Window>, min: Option<f64>) {
+    if let Some(min) = min {
+        ranked.retain(|w| !w.judged || w.score >= min);
+    }
+}
+
+/// The scan pool: every beat's best window, then every beat's second best,
+/// and so on, until `cap`. Each beat's windows are ranked by score and
+/// de-duplicated first, so a beat never offers the same moment twice, and
+/// every beat with a window is in the pool before any beat has two. When a
+/// round doesn't fit under the cap, its best windows get in, wherever in the
+/// video they are.
+fn round_robin_pool(windows: Vec<Window>, beat_of: &[usize], cap: usize) -> Vec<Window> {
+    let mut beats: std::collections::BTreeMap<usize, Vec<Window>> = Default::default();
+    for w in windows {
+        beats.entry(beat_of[w.first]).or_default().push(w);
+    }
+    let mut lanes: Vec<std::vec::IntoIter<Window>> =
+        beats.into_values().map(|ws| diversify(ws, usize::MAX).into_iter()).collect();
+    let mut pool: Vec<Window> = vec![];
+    while pool.len() < cap {
+        // One window from every lane: its next that isn't a moment taken.
+        let mut round: Vec<Window> = vec![];
+        for lane in lanes.iter_mut() {
+            for w in lane.by_ref() {
+                if pool.iter().chain(round.iter()).all(|p| overlap(p, &w) <= MAX_OVERLAP) {
+                    round.push(w);
+                    break;
+                }
+            }
+        }
+        if round.is_empty() {
+            break;
+        }
+        round.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let room = cap - pool.len();
+        pool.extend(round.into_iter().take(room));
+    }
+    pool
 }
 
 fn progress(editor: &Editor, project_id: Uuid, fraction: f64, message: impl Into<String>) {
@@ -421,9 +519,14 @@ fn heuristic_score(
 }
 
 fn overlap(a: &Window, b: &Window) -> f64 {
-    let inter = (a.end.min(b.end) - a.start.max(b.start)).max(0.0);
-    let shorter = (a.end - a.start).min(b.end - b.start);
-    if shorter <= 0.0 { 0.0 } else { inter / shorter }
+    pieces_overlap(&a.pieces(), &b.pieces())
+}
+
+impl Window {
+    /// The pieces it plays (a single stretch: one).
+    fn pieces(&self) -> [SourceRange; 1] {
+        [SourceRange { start: self.start, end: self.end }]
+    }
 }
 
 /// Best-first, dropping anything that is substantially the same moment as a
@@ -591,6 +694,7 @@ fn to_candidate(
         id: Uuid::new_v4(),
         start: w.start,
         end: w.end,
+        pieces: w.pieces().to_vec(),
         duration: w.duration,
         title: w.title.clone().unwrap_or_else(|| heuristic_title(&open)),
         hook: open,
@@ -640,7 +744,7 @@ mod tests {
     }
 
     fn opts(min_s: f64, max_s: f64) -> FindOptions {
-        FindOptions { count: 5, min_s, max_s, theme: None }
+        FindOptions { count: 5, min_s, max_s, ..Default::default() }
     }
 
     #[test]
@@ -761,6 +865,98 @@ mod tests {
         assert_eq!(picked[0].score, 70.0);
         assert_eq!(picked[1].start, 40.0);
         assert_eq!(diversify(vec![w(0.0, 10.0, 1.0), w(20.0, 30.0, 2.0)], 1).len(), 1);
+    }
+
+    fn win(first: usize, start: f64, end: f64, score: f64, judged: bool) -> Window {
+        Window {
+            first,
+            last: first,
+            start,
+            end,
+            duration: end - start,
+            score,
+            signals: vec![],
+            title: None,
+            reason: None,
+            judged,
+        }
+    }
+
+    #[test]
+    fn scan_pool_takes_every_beat_before_any_beat_twice() {
+        // Beat 0 has three strong windows, beats 1 and 2 one weak window each.
+        let beat_of = vec![0, 0, 0, 1, 2];
+        let windows = vec![
+            win(0, 0.0, 20.0, 90.0, false),
+            win(1, 30.0, 50.0, 85.0, false),
+            win(2, 60.0, 80.0, 80.0, false),
+            win(3, 100.0, 120.0, 20.0, false),
+            win(4, 130.0, 150.0, 10.0, false),
+        ];
+        let pool = round_robin_pool(windows.clone(), &beat_of, 3);
+        let firsts: Vec<usize> = pool.iter().map(|w| w.first).collect();
+        assert_eq!(firsts, vec![0, 3, 4], "the weak beats get in before beat 0's second best");
+        // A bigger cap then takes the second round.
+        let pool = round_robin_pool(windows, &beat_of, 10);
+        assert_eq!(pool.iter().map(|w| w.first).collect::<Vec<_>>(), vec![0, 3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn a_round_cut_off_by_the_cap_keeps_its_best_not_its_earliest() {
+        // Five beats, one window each, the best ones late in the video.
+        let beat_of = vec![0, 1, 2, 3, 4];
+        let windows: Vec<Window> =
+            (0..5).map(|i| win(i, i as f64 * 100.0, i as f64 * 100.0 + 20.0, 10.0 * i as f64, false)).collect();
+        let pool = round_robin_pool(windows, &beat_of, 2);
+        assert_eq!(pool.iter().map(|w| w.first).collect::<Vec<_>>(), vec![4, 3]);
+    }
+
+    #[test]
+    fn the_pool_by_mode() {
+        let beat_of = vec![0; 40];
+        let windows: Vec<Window> =
+            (0..40).map(|i| win(i, i as f64 * 30.0, i as f64 * 30.0 + 20.0, i as f64, false)).collect();
+        let ids = |p: Vec<Window>| p.iter().map(|w| w.first).collect::<Vec<_>>();
+        let plain = FindOptions { count: 8, ..Default::default() };
+        // Not a scan: exactly today's pool.
+        assert_eq!(
+            ids(build_pool(windows.clone(), &beat_of, true, &plain, true)),
+            ids(diversify(windows.clone(), POOL_MAX))
+        );
+        let scan = FindOptions { scan: true, ..Default::default() };
+        // A scan whose windows span beats: best-first up to the cap.
+        assert_eq!(build_pool(windows.clone(), &beat_of, false, &scan, true).len(), 40.min(SCAN_POOL));
+        // No model: nothing is cut off.
+        let many: Vec<Window> =
+            (0..120).map(|i| win(i, i as f64 * 30.0, i as f64 * 30.0 + 20.0, i as f64, false)).collect();
+        let beats: Vec<usize> = (0..120).collect();
+        assert_eq!(build_pool(many.clone(), &beats, true, &scan, true).len(), SCAN_POOL);
+        assert_eq!(build_pool(many, &beats, true, &scan, false).len(), 120);
+    }
+
+    #[test]
+    fn scan_pool_skips_the_same_moment_within_a_beat() {
+        let beat_of = vec![0, 0, 1];
+        let windows = vec![
+            win(0, 0.0, 30.0, 90.0, false),
+            win(1, 2.0, 32.0, 80.0, false), // the same moment as the first
+            win(2, 40.0, 60.0, 50.0, false),
+        ];
+        let pool = round_robin_pool(windows, &beat_of, 10);
+        assert_eq!(pool.iter().map(|w| w.first).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn min_score_drops_only_judged_windows() {
+        let mut ranked = vec![
+            win(0, 0.0, 20.0, 80.0, true),
+            win(1, 30.0, 50.0, 30.0, true),
+            win(2, 60.0, 80.0, 10.0, false),
+        ];
+        keep_above(&mut ranked, Some(40.0));
+        assert_eq!(ranked.iter().map(|w| w.first).collect::<Vec<_>>(), vec![0, 2]);
+        keep_above(&mut ranked, None);
+        assert_eq!(ranked.len(), 2);
     }
 
     /// A model that loves exactly one candidate (by index) and pans the rest.

@@ -8,8 +8,10 @@ import { getDemoMode, isTauri } from "./ipc/api";
 import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from "./ipc/queries";
 import { useEditorKeyboard } from "./hooks/useEditorKeyboard";
 import { setActiveTab, setProjectId, setScreen, viewStore } from "./state/viewStore";
+import { useShortsProgressListener } from "./state/shortsStore";
 import { EmptyState } from "./EmptyState";
 import { RecorderPanel } from "./panels/RecorderPanel";
+import { ShortsScreen } from "./panels/ShortsScreen";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
 import { ChatPanel } from "./panels/ChatPanel";
@@ -204,6 +206,8 @@ function useExternalConfirmations() {
 
 export default function App() {
   useCoreEventInvalidation();
+  // Scan / make / export progress, kept per project while any screen shows.
+  useShortsProgressListener();
   useExternalConfirmations();
   useSuppressDefaultContextMenu();
   const projects = useProjects();
@@ -231,6 +235,15 @@ export default function App() {
       <>
         <DemoBanner />
         <RecorderPanel />
+      </>
+    );
+  }
+
+  if (screen === "shorts") {
+    return (
+      <>
+        <DemoBanner />
+        {projectId ? <ShortsScreen key={projectId} projectId={projectId} /> : <EmptyState />}
       </>
     );
   }

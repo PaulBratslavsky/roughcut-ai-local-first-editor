@@ -27,7 +27,9 @@ import type {
   Transcript,
   UndoResult,
   MediaAssets,
+  ClipBatchError,
   ClipCandidate,
+  ClipExportResult,
   ClipFormat,
   SavedClipSummary,
   SourceRange,
@@ -147,21 +149,34 @@ export function useCoreEventInvalidation(): void {
 // Mutations (editing tools)
 // ---------------------------------------------------------------------------
 
+/** Options for a long run whose outcome must survive its component: the
+ *  key lets any screen see it is running (`useIsMutating`), and these
+ *  callbacks — unlike ones passed to `mutate()` — still fire after the
+ *  component that started the run has unmounted. */
+export interface RunOptions<TArgs, TResult> {
+  onSuccess?: (data: TResult, args: TArgs) => void;
+  onError?: (error: unknown, args: TArgs) => void;
+}
+
 function useEditMutation<TArgs extends Record<string, unknown>, TResult>(
   toolName: string,
   invalidate: (
     | "timeline" | "transcript" | "project" | "projects" | "preferences" | "suggestions" | "history"
     | "clips" | "clip-candidates"
   )[],
+  run?: RunOptions<TArgs, TResult> & { mutationKey: readonly unknown[] },
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: run?.mutationKey,
     mutationFn: (args: TArgs) => callTool<TResult>(toolName, args),
-    onSuccess: () => {
+    onSuccess: (data: TResult, args: TArgs) => {
       for (const key of invalidate) {
         void queryClient.invalidateQueries({ queryKey: [key] });
       }
+      run?.onSuccess?.(data, args);
     },
+    onError: (error: unknown, args: TArgs) => run?.onError?.(error, args),
   });
 }
 
@@ -382,18 +397,41 @@ export function useClipCandidates(projectId: string | null) {
 
 export interface FindClipsArgs extends Record<string, unknown> {
   project_id: string;
+  /** How many to return, 1–60 (default 8). */
   count?: number;
   min_s?: number;
   max_s?: number;
   /** Only moments about this topic. */
   theme?: string;
+  /** Judge moments from every part of the video, beat by beat (slower). */
+  scan?: boolean;
+  /** Drop moments the model scored below this (unjudged ones stay). */
+  min_score?: number;
+  /** Also propose shorts made of several pieces (needs the model). */
+  multi_moment?: boolean;
 }
 
-export function useFindClips() {
-  return useEditMutation<FindClipsArgs, { candidates: ClipCandidate[]; method: string; theme: string | null }>(
-    "find_clips",
-    ["clip-candidates"],
-  );
+export interface FindClipsResult {
+  candidates: ClipCandidate[];
+  /** "llm" (scored by the on-device model) | "heuristic" (no model reachable). */
+  method: string;
+  theme: string | null;
+}
+
+/** Mutation keys of the per-project clip runs (scan, batch make, batch
+ *  export): `useIsMutating({ mutationKey })` says one is running wherever it
+ *  was started (Clips tab, Shorts screen) and after a remount. */
+export const clipRunKeys = {
+  find: (projectId: string) => ["find_clips", projectId] as const,
+  make: (projectId: string) => ["create_clips", projectId] as const,
+  export: (projectId: string) => ["export_clips", projectId] as const,
+};
+
+export function useFindClips(projectId: string, run?: RunOptions<FindClipsArgs, FindClipsResult>) {
+  return useEditMutation<FindClipsArgs, FindClipsResult>("find_clips", ["clip-candidates"], {
+    ...run,
+    mutationKey: clipRunKeys.find(projectId),
+  });
 }
 
 export interface CreateClipArgs extends Record<string, unknown> {
@@ -411,6 +449,27 @@ export function useCreateClip() {
     "clips",
     "clip-candidates",
   ]);
+}
+
+export interface CreateClipsArgs extends Record<string, unknown> {
+  project_id: string;
+  candidate_ids: string[];
+  /** Default `vertical` (a 9:16 short). */
+  format?: ClipFormat;
+}
+
+/** Make several candidates at once; vertical ones come back framed on the
+ *  speaker. Candidates that no longer validate stay listed, in `errors`. */
+export interface CreateClipsResult {
+  clips: SavedClipSummary[];
+  errors: ClipBatchError[];
+}
+
+export function useCreateClips(projectId: string, run?: RunOptions<CreateClipsArgs, CreateClipsResult>) {
+  return useEditMutation<CreateClipsArgs, CreateClipsResult>("create_clips", ["clips", "clip-candidates"], {
+    ...run,
+    mutationKey: clipRunKeys.make(projectId),
+  });
 }
 
 export function useUpdateClip() {
@@ -443,4 +502,26 @@ export function useExportClip() {
     { project_id: string; clip_id: string; target: ExportTarget; out_path: string },
     ExportResult
   >("export_clip", []);
+}
+
+export interface ExportClipsArgs extends Record<string, unknown> {
+  project_id: string;
+  clip_ids: string[];
+  /** Folder to write into (created if missing; `~` expands). */
+  out_dir: string;
+  /** Default `mp4`. */
+  target?: ExportTarget;
+}
+
+/** One file per clip into one folder, `NN-<slug>.<ext>`; results follow
+ *  `clip_ids` order, each with a path or an error. */
+export interface ExportClipsResult {
+  results: ClipExportResult[];
+}
+
+export function useExportClips(projectId: string, run?: RunOptions<ExportClipsArgs, ExportClipsResult>) {
+  return useEditMutation<ExportClipsArgs, ExportClipsResult>("export_clips", [], {
+    ...run,
+    mutationKey: clipRunKeys.export(projectId),
+  });
 }

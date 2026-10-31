@@ -592,7 +592,7 @@ async fn run_instruction_offline(
             None,
         );
         let opts = crate::clip_finder::FindOptions { theme: theme.clone(), ..Default::default() };
-        let summary = match crate::clip_finder::find_clips(editor, project_id, opts).await {
+        let summary = match crate::clip_finder::find_clips(editor, project_id, opts).await.map(|f| f.candidates) {
             Ok(found) if !found.is_empty() => format!(
                 "Found {} clip candidate(s){} — the best is “{}” ({:.0}s). They're in the \
                  Clips tab; the main video is untouched.",

@@ -2,25 +2,24 @@
 // and the clips you saved — from a suggestion or from pieces picked in the
 // transcript ("Add to clip"). Each clip is 16:9 or 9:16, is its own timeline
 // over the same source (the current cut inside its pieces), and survives
-// later main-cut edits.
+// later main-cut edits. Reviewing many at once happens on the Shorts screen.
 
-import { useEffect, useRef, useState } from "react";
-import { onAppEvent, revealPath } from "../ipc/api";
+import { useEffect, useState } from "react";
+import { useIsMutating } from "@tanstack/react-query";
+import { onAppEvent } from "../ipc/api";
 import {
+  clipRunKeys,
   useClipCandidates,
   useClips,
   useCreateClip,
-  useDeleteClip,
-  useExportClip,
   useFindClips,
   useProject,
   useTranscript,
-  useUpdateClip,
 } from "../ipc/queries";
-import type { ClipCandidate, ClipFormat, ExportTarget, ProgressEvent, SavedClipSummary } from "../ipc/types";
-import { previewRanges, seekTo, setCropClip, togglePreviewCollapsed, viewStore } from "../state/viewStore";
-import { useStore } from "@tanstack/react-store";
-import { EXPORT_TARGETS } from "./ExportMenu";
+import type { ClipCandidate, ClipFormat, ProgressEvent } from "../ipc/types";
+import { previewRanges, seekTo, setScreen } from "../state/viewStore";
+import { clock, errText, useElapsed } from "./clipUtil";
+import { SavedClipRow } from "./SavedClipRow";
 
 const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
   { label: "15–30s", min_s: 15, max_s: 30 },
@@ -28,37 +27,20 @@ const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
   { label: "30–90s", min_s: 30, max_s: 90 },
 ];
 
-export const FORMAT_LABEL: Record<ClipFormat, string> = { landscape: "16:9", vertical: "9:16" };
-
-export function clock(s: number): string {
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-}
-
-export function errText(e: unknown): string {
-  const o = e as { error?: { message?: string }; message?: string };
-  return o?.error?.message ?? o?.message ?? String(e);
-}
-
-/** Room the export menu needs below its button (8 targets). */
-const MENU_HEIGHT_PX = 280;
-
-function slugify(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "clip";
-}
-
 export function ClipsPanel({ projectId }: { projectId: string }) {
   const { data: transcript } = useTranscript(projectId);
   const { data: project } = useProject(projectId);
   const { data: candidates = [] } = useClipCandidates(projectId);
   const { data: clips = [] } = useClips(projectId);
-  const find = useFindClips();
+  const find = useFindClips(projectId);
+  // A find or scan for this project, from here or the Shorts screen: one at a time.
+  const finding = useIsMutating({ mutationKey: clipRunKeys.find(projectId) }) > 0;
   const create = useCreateClip();
   const [lengthIdx, setLengthIdx] = useState(1);
   const [theme, setTheme] = useState("");
   const [method, setMethod] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const elapsed = useElapsed(find.isPending);
+  const elapsed = useElapsed(finding);
   const [progress, setProgress] = useState<string | null>(null);
 
   // The core narrates a find (outline → scoring batches); a long local-model
@@ -74,6 +56,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
   const hasSpeech = !!transcript?.segments.some((s) => !s.is_silence);
 
   const runFind = () => {
+    if (finding) return;
     setError(null);
     setProgress(null);
     const len = LENGTHS[lengthIdx];
@@ -100,10 +83,21 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
     );
   };
 
+  // Always reachable: the Shorts screen says "transcribe first" itself.
+  const openReview = (
+    <div className="clips-find">
+      <span className="clips-note">Many at once: scan the whole video and pick shorts side by side.</span>
+      <button className="ghost-btn" onClick={() => setScreen("shorts")} title="Open the Shorts screen">
+        ▸ open review
+      </button>
+    </div>
+  );
+
   if (!hasSpeech) {
     return (
       <div className="clips-panel">
         <p className="clips-note">Transcribe the video first — clips are found from what you say.</p>
+        {openReview}
       </div>
     );
   }
@@ -118,16 +112,18 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
         cut's removed silences and fillers.
       </p>
 
+      {openReview}
+
       <input
         className="clips-theme"
         value={theme}
         onChange={(e) => setTheme(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !find.isPending) runFind();
+          if (e.key === "Enter" && !finding) runFind();
         }}
         placeholder="about… (optional) — e.g. AI tools, pricing, my guitar plugin"
         aria-label="Only find clips about this topic"
-        disabled={find.isPending}
+        disabled={finding}
       />
       <div className="clips-find">
         <div className="clips-lengths" role="radiogroup" aria-label="Clip length">
@@ -138,17 +134,17 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
               aria-checked={i === lengthIdx}
               className={`tab${i === lengthIdx ? " active" : ""}`}
               onClick={() => setLengthIdx(i)}
-              disabled={find.isPending}
+              disabled={finding}
             >
               {l.label}
             </button>
           ))}
         </div>
-        <button className="ghost-btn" onClick={runFind} disabled={find.isPending}>
-          {find.isPending ? `finding… ${elapsed}s` : candidates.length ? "▸ find again" : "▸ find clips"}
+        <button className="ghost-btn" onClick={runFind} disabled={finding}>
+          {finding ? `finding… ${elapsed}s` : candidates.length ? "▸ find again" : "▸ find clips"}
         </button>
       </div>
-      {find.isPending && (
+      {finding && (
         <p className="clips-note">
           {progress ?? "Reading the transcript…"} Scoring on-device can take a minute or two.
         </p>
@@ -198,7 +194,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
                 <div className="clip-actions">
                   <button
                     className="ghost-btn"
-                    onClick={() => previewRanges([{ start: c.start, end: c.end }])}
+                    onClick={() => previewRanges(c.pieces.length ? c.pieces : [{ start: c.start, end: c.end }])}
                     title="Play this moment"
                   >
                     ▶
@@ -227,194 +223,4 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
       )}
     </div>
   );
-}
-
-function SavedClipRow({
-  projectId,
-  projectName,
-  clip,
-}: {
-  projectId: string;
-  projectName: string;
-  clip: SavedClipSummary;
-}) {
-  const update = useUpdateClip();
-  const del = useDeleteClip();
-  const exportClip = useExportClip();
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(clip.title);
-  const [menuOpen, setMenuOpen] = useState(false);
-  // The panel scrolls (clips overflow), so near its bottom the menu opens up.
-  const [menuUp, setMenuUp] = useState(false);
-  const [status, setStatus] = useState<{ text: string; path?: string } | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [menuOpen]);
-
-  const saveTitle = () => {
-    setEditing(false);
-    const t = title.trim();
-    if (t && t !== clip.title) update.mutate({ project_id: projectId, clip_id: clip.id, title: t });
-    else setTitle(clip.title);
-  };
-
-  const toggleFormat = () =>
-    update.mutate({
-      project_id: projectId,
-      clip_id: clip.id,
-      format: clip.format === "vertical" ? "landscape" : "vertical",
-    });
-
-  const runExport = (target: ExportTarget, ext: string, label: string) => {
-    setMenuOpen(false);
-    setStatus({
-      text: target === "mp4" && clip.format === "vertical" ? "rendering 9:16…" : `exporting ${label}…`,
-    });
-    exportClip.mutate(
-      {
-        project_id: projectId,
-        clip_id: clip.id,
-        target,
-        out_path: `~/Downloads/${slugify(projectName)}-${slugify(clip.title)}.${ext}`,
-      },
-      {
-        onSuccess: (r) => {
-          setStatus({ text: `saved ${r.path.split("/").pop()}`, path: r.path });
-          void revealPath(r.path);
-        },
-        onError: (e) => setStatus({ text: `export failed: ${errText(e)}` }),
-      },
-    );
-  };
-
-  const pieces = clip.ranges.length;
-  const framing = useStore(viewStore, (s) => s.cropClipId === clip.id);
-
-  // Show this short's 9:16 window over the preview, on one of its frames.
-  const toggleCrop = () => {
-    if (framing) return setCropClip(null);
-    if (viewStore.state.previewCollapsed) togglePreviewCollapsed();
-    seekTo(clip.start);
-    setCropClip(clip.id);
-  };
-
-  return (
-    <div className="clip-row">
-      <button
-        className={`clip-format${clip.format === "vertical" ? " vertical" : ""}`}
-        onClick={toggleFormat}
-        disabled={update.isPending}
-        title={`${clip.format === "vertical" ? "9:16 short" : "16:9"} — click to switch`}
-      >
-        {FORMAT_LABEL[clip.format]}
-      </button>
-      <div className="clip-body">
-        {editing ? (
-          <input
-            className="clip-title-input"
-            value={title}
-            autoFocus
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={saveTitle}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") saveTitle();
-              if (e.key === "Escape") {
-                setTitle(clip.title);
-                setEditing(false);
-              }
-            }}
-          />
-        ) : (
-          <button
-            className="clip-title"
-            onClick={() => seekTo(clip.start)}
-            onDoubleClick={() => setEditing(true)}
-            title="Jump to the clip · double-click to rename"
-          >
-            {clip.title}
-          </button>
-        )}
-        <span className="clip-meta">
-          {pieces > 1 ? `${pieces} pieces · ` : `${clock(clip.start)}–${clock(clip.end)} · `}
-          {Math.round(clip.duration)}s
-          {clip.score !== null && ` · score ${Math.round(clip.score)}`}
-        </span>
-        {status && (
-          <span className="clip-reason">
-            {status.text}
-            {status.path && (
-              <button className="reveal-btn" onClick={() => void revealPath(status.path!)}>
-                reveal
-              </button>
-            )}
-          </span>
-        )}
-      </div>
-      <div className="clip-actions" ref={menuRef}>
-        <button className="ghost-btn" onClick={() => previewRanges(clip.ranges)} title="Play the clip">
-          ▶
-        </button>
-        {clip.format === "vertical" && (
-          <button
-            className={`ghost-btn${framing ? " active" : ""}`}
-            onClick={toggleCrop}
-            title="Frame the 9:16 crop over the preview: drag it, or centre it on the speaker"
-          >
-            crop
-          </button>
-        )}
-        <button
-          className="ghost-btn"
-          onClick={() => {
-            const row = menuRef.current?.getBoundingClientRect();
-            const panel = menuRef.current?.closest(".clips-panel")?.getBoundingClientRect();
-            setMenuUp(!!row && !!panel && row.bottom + MENU_HEIGHT_PX > panel.bottom);
-            setMenuOpen((v) => !v);
-          }}
-          disabled={exportClip.isPending}
-        >
-          export
-        </button>
-        <button
-          className="ghost-btn clip-delete"
-          onClick={() => del.mutate({ project_id: projectId, clip_id: clip.id })}
-          disabled={del.isPending}
-          title="Delete this clip"
-        >
-          ×
-        </button>
-        {menuOpen && (
-          <div className={`export-dropdown${menuUp ? " up" : ""}`}>
-            {EXPORT_TARGETS.map((t) => (
-              <button key={t.target} className="export-item" onClick={() => runExport(t.target, t.ext, t.label)}>
-                {t.target === "mp4" ? `MP4 (${FORMAT_LABEL[clip.format]})` : t.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** Whole seconds since `running` turned true (0 when idle). */
-function useElapsed(running: boolean): number {
-  const [s, setS] = useState(0);
-  useEffect(() => {
-    if (!running) {
-      setS(0);
-      return;
-    }
-    const started = Date.now();
-    const id = setInterval(() => setS(Math.floor((Date.now() - started) / 1000)), 1000);
-    return () => clearInterval(id);
-  }, [running]);
-  return s;
 }
