@@ -1,7 +1,8 @@
 # Bulk shorts: scan, review, make, export
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Draft (revised after a fresh-eyes review)
+*   **Status:** Draft, revised after a fresh-eyes review; no open questions
+    (review UI decided 2026-10-31: its own Shorts screen)
 *   **Date:** 2026-10-30
 
 --------------------------------------------------------------------------------
@@ -23,9 +24,10 @@ Two more abilities build on that:
     with the material between them dropped.
 
 This extends the clip finder (`core/src/clip_finder.rs`), saved clips
-(`core/src/engine/clips.rs`), the MP4 render (`core/src/adapters/video.rs`)
-and the Clips tab (`frontend/src/panels/ClipsPanel.tsx`). Everything stays
-on-device.
+(`core/src/engine/clips.rs`) and the MP4 render (`core/src/adapters/video.rs`),
+and adds a Shorts screen beside the editor and the recorder
+(`frontend/src/panels/ShortsScreen.tsx`) where the review happens. Everything
+stays on-device.
 
 ## The Problem
 
@@ -92,22 +94,11 @@ through a video:
 
 ## Open Questions
 
-*   **D1: Where the review happens.** The owner chooses; the plan marks the
-    files that differ as **(D1a)** or **(D1b)**.
-    *   **(a) Grow the Clips tab.** Candidate rows become cards with a
-        checkbox and thumbnail; the main preview plays them. *Cost:* about
-        3 days of UI. *Trade-off:* the side panel is narrow, so 30–60 cards
-        is a long scroll beside the transcript. *Fails when* the user wants
-        to compare many moments at a glance.
-    *   **(b) A Shorts screen** (a third `AppScreen` beside `editor` and
-        `recorder`): the existing `PreviewPanel` on the left with the 9:16
-        guide, a grid of cards on the right, a bar with "Scan", "Make N",
-        "Export N". It reuses `PreviewPanel` and `usePlaybackEngine` as they
-        are; both read the same `viewStore`, and only one screen is mounted at
-        a time, so there is one player. The Clips tab gains an "Open review"
-        button that switches `screen` to `"shorts"`. *Cost:* about 5–6 days
-        of UI. *Trade-off:* to fix the main cut mid-review the user switches
-        screens. *Fails when* review and cut editing are interleaved a lot.
+None remain.
+
+*   **D1: Where the review happens. Decided 2026-10-31 by the owner: its own
+    Shorts screen** (see "Shorts screen and cards"). Growing the Clips tab
+    instead is Alternative F.
 
 ## Critical User Journeys (CUJs)
 
@@ -115,14 +106,15 @@ through a video:
 
 *   **Given**: a transcribed 45-minute talking-head project, the on-device
     model reachable.
-*   **When**: the user clicks "Scan for shorts".
+*   **When**: the user clicks "Shorts" in the top bar, then "Scan for
+    shorts".
 *   **Then**: progress shows "outlining the video…", then "scoring candidates
-    on-device — 3/15". When it finishes, up to 40 cards appear, best first,
-    from all parts of the video. Clicking a card plays it with a centred
-    9:16 guide. The user ticks six and clicks "Make 6 shorts". Progress shows
-    "framing 2/6". Six vertical saved clips appear with crops on the speaker;
-    the six cards leave the list; the six new clips are ticked in the saved
-    list.
+    on-device — 3/15". When it finishes, up to 40 cards appear in a grid,
+    best first, from all parts of the video. Clicking a card plays it in the
+    player beside the grid with a centred 9:16 guide. The user ticks six and
+    clicks "Make 6 shorts". Progress shows "framing 2/6". Six vertical saved
+    clips appear with crops on the speaker; the six cards leave the grid; the
+    six new clips are ticked in the screen's saved list.
 
 ### CUJ 2: Export the batch
 
@@ -342,8 +334,9 @@ order is the piece order. Effects:
     end of the last piece played. Excluded material inside a piece is skipped
     by the existing range logic. `addToClipDraft` keeps sorting: a draft is
     built in video order.
-*   **UI**: each saved clip in the Clips tab lists its pieces with up/down
-    buttons; a move calls `update_clip { ranges }` with the new order.
+*   **UI**: each saved clip row (`SavedClipRow`, shown in the Clips tab and
+    on the Shorts screen) lists its pieces with up/down buttons; a move calls
+    `update_clip { ranges }` with the new order.
 *   **Mock**: `normalizeRanges` in `mockApi.ts` follows the same rule as
     `set_ranges`, so reordering doesn't revert in the browser build.
 
@@ -401,8 +394,25 @@ if at least half pass; otherwise tune spans and prompt first.
 | `create_clips` | yes | yes | yes |
 | `export_clips` | no (export is never shown to the agent) | yes, user approves once | yes |
 
-### Cards and previews (frontend)
+### Shorts screen and cards (frontend)
 
+*   **Screen**: a third `AppScreen`, `"shorts"`, beside `"editor"` and
+    `"recorder"` (`state/viewStore.ts`). `App.tsx` renders one screen at a
+    time, so the Shorts screen can mount the existing `PreviewPanel` (which
+    runs `usePlaybackEngine` and draws the 9:16 crop guide) without a second
+    player: both screens read the same `viewStore` playhead and audition.
+*   **Layout**: the `TopBar` as in the editor; below it the `PreviewPanel` on
+    the left and, on the right, a bar ("Scan for shorts", scan progress,
+    "Make N shorts", "Export N"), the grid of candidate cards, and the
+    project's saved clips as `SavedClipRow`s (moved out of `ClipsPanel.tsx`
+    into its own file so both places use it) with a checkbox each. Framing
+    a crop by hand works as in the Clips tab, over the same player.
+*   **Getting there and back**: a "Shorts" button in the top bar switches
+    to the screen and reads "Editor" while on it; the Clips tab gains "Open
+    review", which switches to the screen. The Clips tab otherwise keeps its
+    quick "▸ find clips" list; both lists read the same
+    `clip-candidates` query, so they never disagree. With no project open the
+    screen shows the editor's empty state.
 *   **Thumbnail**: the nearest frame from the filmstrip `get_media_assets`
     already caches (one frame about every 10 s on a 45-minute video, 160 px
     wide) at the first piece's start. The filmstrip is empty in demo mode and
@@ -465,6 +475,16 @@ if at least half pass; otherwise tune spans and prompt first.
     queue is lost when the app quits.
 *   **Reason for Rejection**: `create_clips` frames before it returns.
 
+### Alternative F: Review inside the Clips tab
+
+*   **Pros**: about 3 days of UI instead of 5–6; the transcript stays in
+    view, so fixing the main cut mid-review needs no screen switch.
+*   **Cons**: the side panel is narrow, so 30–60 cards are a long scroll
+    beside the transcript, and many moments can't be compared at a glance.
+*   **Reason for Rejection**: the owner chose the Shorts screen
+    (2026-10-31); a scan returns enough cards that a grid beside the player
+    matters more than staying in the editor.
+
 --------------------------------------------------------------------------------
 
 ## Non-Functional Requirements
@@ -520,9 +540,10 @@ if at least half pass; otherwise tune spans and prompt first.
 
 ## Detailed Implementation Plan
 
-Rough effort: Phase 1 about 2 weeks (D1a) or 2.5 weeks (D1b), the render
-change included; Phase 2 about 1 week; Phase 3 about 1–1.5 weeks including
-the measurement step. Numbers marked "starting value" are settings to tune.
+Rough effort: Phase 1 about 2.5 weeks, the render change and the Shorts
+screen (about 5–6 days of UI) included; Phase 2 about 1 week; Phase 3 about
+1–1.5 weeks including the measurement step, so about 4.5–5 weeks in all.
+Numbers marked "starting value" are settings to tune.
 
 ### Phase 1: scan, review, batch make and export
 
@@ -645,27 +666,32 @@ the measurement step. Numbers marked "starting value" are settings to tune.
 
 *   **Proposed Changes**: the card, with the thumbnail fallback.
 
-#### 15. `frontend/src/panels/ClipsPanel.tsx` (Modify, D1a) or `frontend/src/panels/ShortsScreen.tsx` (Create, D1b)
+#### 15. `frontend/src/panels/ShortsScreen.tsx` (Create)
 
-*   **Proposed Changes**: cards, selection, "Scan for shorts", "Make N",
-    "Export N", progress from `find_clips`, `make_clips`, `export_clips`
-    events. Saved clips gain a checkbox; clips made by "Make N" start
-    ticked. D1b: the same in a new screen beside `PreviewPanel`; the Clips
-    tab gets "Open review".
+*   **Proposed Changes**: the screen described under "Shorts screen and
+    cards": `TopBar`, `PreviewPanel`, the bar with "Scan for shorts", "Make
+    N shorts", "Export N" and progress from the `find_clips`, `make_clips`
+    and `export_clips` events, the card grid, and the saved list with
+    checkboxes. Clips made by "Make N" start ticked. Selection is local
+    state of the screen and is cleared by a new scan.
 
-#### 16. `frontend/src/App.tsx`, `frontend/src/state/viewStore.ts`, `frontend/src/panels/TopBar.tsx` (Modify, D1b only)
+#### 16. `frontend/src/panels/SavedClipRow.tsx` (Create), `frontend/src/panels/ClipsPanel.tsx` (Modify)
+
+*   **Proposed Changes**: `SavedClipRow` moves out of `ClipsPanel.tsx`
+    unchanged, plus an optional checkbox (shown on the Shorts screen only).
+    The Clips tab gains "Open review".
+
+#### 17. `frontend/src/App.tsx`, `frontend/src/state/viewStore.ts`, `frontend/src/panels/TopBar.tsx` (Modify)
 
 *   **Proposed Changes**: `AppScreen` gains `"shorts"`; `App.tsx` renders
-    `ShortsScreen`; a "Shorts" button in the top bar.
+    `ShortsScreen` (with the demo banner, or the empty state when there is
+    no project); the top bar's "Shorts" / "Editor" button.
 
-#### 17. `frontend/src/styles.css` (Modify)
+#### 18. `frontend/src/styles.css`, `CONTEXT.md`, `core/src/README.md`, `core/src/engine/README.md`, `core/src/export/README.md`, `core/src/adapters/README.md` (Modify)
 
-*   **Proposed Changes**: card, selection bar (and the D1b grid), on the
-    existing `:root` tokens.
-
-#### 18. `CONTEXT.md`, `core/src/README.md`, `core/src/engine/README.md`, `core/src/export/README.md`, `core/src/adapters/README.md` (Modify)
-
-*   **Proposed Changes**: `ClipCandidate.pieces`; **PlaySpan**; batch make
+*   **Proposed Changes**: styles for the screen layout, card grid, card and
+    selection bar, on the existing `:root` tokens. Docs:
+    `ClipCandidate.pieces`; **PlaySpan**; the Shorts screen; batch make
     frames before returning; one scan per project; render seeks per piece.
 
 ### Phase 2: play order
@@ -696,7 +722,7 @@ the measurement step. Numbers marked "starting value" are settings to tune.
     `seekWithinAudition`, end after the last piece played; `previewRanges`
     stops sorting.
 
-#### 23. `frontend/src/panels/ClipsPanel.tsx`, `frontend/src/ipc/queries.ts`, `frontend/src/ipc/mockApi.ts` (Modify)
+#### 23. `frontend/src/panels/SavedClipRow.tsx`, `frontend/src/ipc/queries.ts`, `frontend/src/ipc/mockApi.ts` (Modify)
 
 *   **Proposed Changes**: piece list with up/down; `useUpdateClip`'s
     argument type gains `ranges`; mock `normalizeRanges` keeps order like

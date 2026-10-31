@@ -14,7 +14,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 
 | Link | Date | Author | Components | Description |
 | ---- | ---- | ------ | ---------- | ----------- |
-| [bulk-shorts.md](bulk-shorts.md) | 2026-10-30 | Paul Bratslavsky | core/clip_finder, core/engine/clips, core/export, frontend/clips | Draft: scan the whole video for shorts, review them as cards, make and export them in a batch; pieces of a clip in any play order; multi-moment shorts by condensing a stretch. |
+| [bulk-shorts.md](bulk-shorts.md) | 2026-10-30 | Paul Bratslavsky | core/clip_finder, core/engine/clips, core/export, frontend/shorts, frontend/clips | Draft, no open questions: scan the whole video for shorts, review them as cards on a Shorts screen, make and export them in a batch; pieces of a clip in any play order; multi-moment shorts by condensing a stretch. |
 
 ## Existing design artifacts
 
