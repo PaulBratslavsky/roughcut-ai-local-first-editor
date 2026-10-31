@@ -5,23 +5,16 @@
 // The shell is spawned with ROUGHCUT_MCP_URL/_TOKEN in its env (when the MCP
 // server is up), so "Connect Claude Code" just types a command that references
 // them — no secrets on screen.
+//
+// The session itself lives in state/terminalSession.ts: this panel only shows
+// it. The editor's Terminal tab and the Shorts screen's drawer are views of
+// the same shell, and closing either leaves it running.
 
-import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
+import { useEffect, useRef } from "react";
+import { useStore } from "@tanstack/react-store";
 import "@xterm/xterm/css/xterm.css";
-import { isTauri, onAppEvent, ptyKill, ptyResize, ptySpawn, ptyWrite } from "../ipc/api";
-import type { TerminalExitEvent, TerminalOutputEvent } from "../ipc/types";
-
-/** base64 (raw PTY bytes) → Uint8Array for term.write — survives multibyte
- *  characters split across read boundaries, which a string decode would drop. */
-function decode(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+import { isTauri } from "../ipc/api";
+import { attachTerminal, restartTerminal, terminalStore, writeToTerminal } from "../state/terminalSession";
 
 const CONNECT_CMD =
   'claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" ' +
@@ -29,66 +22,12 @@ const CONNECT_CMD =
 
 export function TerminalPanel() {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const idRef = useRef<string>("");
-  const [exited, setExited] = useState<number | null | "running">("running");
-  // Bumped by "Restart" to re-run the init effect with a fresh session.
-  const [gen, setGen] = useState(0);
+  const exited = useStore(terminalStore, (s) => s.exited);
 
   useEffect(() => {
-    if (!isTauri || !hostRef.current) return;
-    const id = crypto.randomUUID();
-    idRef.current = id;
-    setExited("running");
-
-    const term = new Terminal({
-      cursorBlink: true,
-      fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
-      fontSize: 13,
-      theme: { background: "#0e0e0e", foreground: "#e6e6e6", cursor: "#e6e6e6" },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(hostRef.current);
-    // WebGL is a perf win but can fail (driver/context limits) — degrade to DOM.
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      /* DOM renderer is fine */
-    }
-    fit.fit();
-    termRef.current = term;
-
-    term.onData((d) => void ptyWrite(id, d));
-
-    const offOut = onAppEvent<TerminalOutputEvent>("terminal-output", (e) => {
-      if (e.id === id) term.write(decode(e.data));
-    });
-    const offExit = onAppEvent<TerminalExitEvent>("terminal-exit", (e) => {
-      if (e.id === id) setExited(e.code);
-    });
-
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-        void ptyResize(id, term.cols, term.rows);
-      } catch {
-        /* host not measurable yet */
-      }
-    });
-    ro.observe(hostRef.current);
-
-    void ptySpawn(id, term.cols, term.rows).then(() => term.focus());
-
-    return () => {
-      offOut();
-      offExit();
-      ro.disconnect();
-      void ptyKill(id);
-      term.dispose();
-      termRef.current = null;
-    };
-  }, [gen]);
+    if (!hostRef.current) return;
+    return attachTerminal(hostRef.current);
+  }, []);
 
   if (!isTauri) {
     return (
@@ -98,24 +37,25 @@ export function TerminalPanel() {
     );
   }
 
-  const connect = () => {
-    ptyWrite(idRef.current, CONNECT_CMD);
-    termRef.current?.focus();
-  };
-
   return (
     <div className="terminal-panel">
       <div className="terminal-toolbar">
-        <button className="terminal-btn" onClick={connect} title="Register this app's MCP server with Claude Code">
+        <button
+          className="terminal-btn"
+          onClick={() => writeToTerminal(CONNECT_CMD)}
+          title="Register this app's MCP server with Claude Code"
+        >
           Connect Claude Code
         </button>
-        <span className="terminal-hint">runs <code>claude mcp add</code> against the running server</span>
+        <span className="terminal-hint">
+          runs <code>claude mcp add</code> against the running server
+        </span>
       </div>
       <div className="terminal-host" ref={hostRef} />
       {exited !== "running" && (
         <div className="terminal-exit-bar">
           <span>Shell exited{typeof exited === "number" ? ` (code ${exited})` : ""}.</span>
-          <button className="terminal-btn" onClick={() => setGen((g) => g + 1)}>
+          <button className="terminal-btn" onClick={restartTerminal}>
             Restart
           </button>
         </div>
