@@ -1,7 +1,8 @@
 # Local or hosted models
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Draft, revised after a fresh-eyes review (four reviewers)
+*   **Status:** Draft, revised after a fresh-eyes review (four reviewers);
+    no open questions (D1–D3 decided by the owner 2026-10-31)
 *   **Date:** 2026-10-31
 
 --------------------------------------------------------------------------------
@@ -87,41 +88,19 @@ falling back.
 
 ## Open Questions
 
-*   **D1: Hosted providers.** The owner chooses.
-    *   **(a) Claude only, native Messages API** (recommended). One client,
-        written against the API it targets: structured outputs, adaptive
-        thinking, refusal fallbacks. *Trade-off:* a user with only another
-        provider's key can't use Hosted. Local mode can already point
-        `inference_endpoint` at a bigger model on the user's own network.
-    *   **(b) Claude, plus a "custom" OpenAI-compatible provider** (base
-        URL, model, key). *Cost:* about 2 more days. *Trade-off:* the custom
-        path sends the local request shape, so what works depends on the
-        provider; a second key slot and settings form.
-*   **D2: How prominent Hosted is.** The owner chooses. `docs/01-product.md`
-    says success is proving "a capable local LLM … can replace a paid cloud
-    service without compromise", and promises "no upload" and "works fully
-    offline".
-    *   **(a) A first-class mode** (recommended, since the request is "a
-        toggle so I can pick"): the chip in the top bar; the product doc
-        says "local by default; hosted when you choose, with your own key,
-        for text only". Local stays the default and the mission's proof
-        point.
-    *   **(b) An escape hatch:** Setup only, no chip; the product doc adds
-        one sentence. Less visible, closer to the current mission wording;
-        the user has to open Setup to switch.
-*   **D3: Which callers use Hosted once it is on.** The owner chooses. AI
-    steps can be started by the user in the app, by the in-app chat agent,
-    and by MCP clients (Claude Code calling `find_clips`, `story_edit`,
-    `transcribe`, which triggers cleanup).
-    *   **(a) All callers** (recommended): turning Hosted on is the user's
-        standing consent; `docs/07-architecture.md` §7 ("only a human action
-        can trigger network egress") is reworded to "only a human action can
-        enable egress". Simple; Claude Code gets the better scoring too.
-        *Risk:* an MCP client looping `find_clips { scan }` spends the
-        user's credits with no click.
-    *   **(b) App-started runs only:** runs an MCP client starts use the
-        local model unless Setup's "Let MCP clients use Hosted" is ticked.
-        *Cost:* about 1 day to thread the caller into the eight steps.
+None remain. Decided by the owner on 2026-10-31:
+
+*   **D1, providers: Claude only**, through the native Messages API. A
+    custom OpenAI-compatible provider is Alternative F.
+*   **D2, prominence: a first-class toggle** — the chip in the top bar.
+    `docs/01-product.md` says "local by default; hosted when you choose,
+    with your own key, for text only"; Local stays the default and the
+    mission's proof point. Setup-only is Alternative G.
+*   **D3, callers: all callers use Hosted once it is on.** Turning Hosted on
+    is the user's standing consent, so runs started by MCP clients (Claude
+    Code) and by the chat agent use it too. `docs/07-architecture.md` §7
+    changes from "only a human action can trigger network egress" to "only
+    a human action can enable egress". App-started-only is Alternative H.
 
 ## Critical User Journeys (CUJs)
 
@@ -479,8 +458,7 @@ or mode-aware.
     current mode). Labels: `LOCAL`; `HOSTED · Opus 5.5`; `HOSTED → LOCAL
     (offline | rate limited | Anthropic unavailable)`; `HOSTED · key
     rejected`. Click: with no key, open Setup's Models row; otherwise
-    switch modes (the CUJ 1 confirm the first time). Under D2b the chip is
-    left out.
+    switch modes (the CUJ 1 confirm the first time).
 *   **Setup** (`SetupPanel.tsx`): a Models row above "Chat editing": Local /
     Hosted, key field (masked) with Save, Test and Forget, model picker,
     last error, and a link to the Anthropic Console for spend. In Hosted
@@ -529,6 +507,30 @@ or mode-aware.
     the registry ("everything in it is safe to hand to a model").
 *   **Reason for Rejection**: Tauri commands, like `setup_status`.
 
+### Alternative F: A custom OpenAI-compatible provider next to Claude (D1b)
+
+*   **Pros**: users with another provider's key can use Hosted.
+*   **Cons**: about 2 more days; the custom path sends the local request
+    shape, so what works depends on the provider; a second key slot.
+*   **Reason for Rejection**: owner chose Claude only (D1). Local mode can
+    already point at a bigger model on the user's own network.
+
+### Alternative G: Hosted only in Setup (D2b)
+
+*   **Pros**: closer to the current mission wording.
+*   **Cons**: the user asked for a toggle to pick quickly; Setup is two
+    clicks away and the current mode isn't visible while editing.
+*   **Reason for Rejection**: owner chose a first-class toggle (D2).
+
+### Alternative H: Hosted for app-started runs only (D3b)
+
+*   **Pros**: an MCP client can't spend the user's credits unless allowed.
+*   **Cons**: about 1 more day to thread the caller into the eight steps; a
+    second setting to explain; Claude Code would get weaker scoring by
+    default.
+*   **Reason for Rejection**: owner chose all callers (D3); spend is visible
+    in the Anthropic Console linked from Setup.
+
 ## Non-Functional Requirements
 
 *   **Privacy**: Local mode and a fresh install make no off-machine
@@ -555,8 +557,8 @@ or mode-aware.
 
 ### Additional Resources
 
-*   [`docs/01-product.md`](../01-product.md) — the local-first promise (D2).
-*   [`docs/07-architecture.md`](../07-architecture.md) §7 — egress (D3).
+*   [`docs/01-product.md`](../01-product.md) — the local-first promise.
+*   [`docs/07-architecture.md`](../07-architecture.md) §7 — egress.
 *   [ADR-0004](../adr/0004-provisioning-outside-the-tool-registry.md) —
     provisioning outside the registry.
 *   [`docs/zero-egress-verification.md`](../zero-egress-verification.md).
@@ -579,8 +581,8 @@ or mode-aware.
 
 ## Detailed Implementation Plan
 
-Rough effort: 1.5–2 weeks with D1a, D2a, D3a. D1b and D3b add about 2 days
-and 1 day. Each step leaves `cargo test` and the frontend build green.
+Rough effort: 1.5–2 weeks. Each step leaves `cargo test` and the frontend
+build green.
 
 #### 1. Types (`core/src/model.rs`, `events.rs`, `error.rs`, `engine/projects.rs`)
 
@@ -659,8 +661,8 @@ and 1 day. Each step leaves `cargo test` and the frontend build green.
 
 *   `docs/tool-api.md` (removed tools, read-only preference fields, the
     `model-route` event in the events table), `CONTEXT.md` (**ModelMode**,
-    **HostedRouter**), `docs/01-product.md` (per D2),
-    `docs/07-architecture.md` §1/§7 (per D3), a Hosted section in
+    **HostedRouter**), `docs/01-product.md` (the D2 sentence),
+    `docs/07-architecture.md` §1/§7 (the D3 wording), a Hosted section in
     `docs/zero-egress-verification.md`, a new ADR recording the egress
     change, and the core READMEs.
 
