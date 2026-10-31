@@ -15,6 +15,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | Link | Date | Author | Components | Description |
 | ---- | ---- | ------ | ---------- | ----------- |
 | [bulk-shorts.md](bulk-shorts.md) | 2026-10-30 | Paul Bratslavsky | core/clip_finder, core/engine/clips, core/export, frontend/shorts, frontend/clips | Phase 1 implemented (Phases 2–3 to do): scan the whole video for shorts, review them as cards on a Shorts screen, make and export them in a batch; pieces of a clip in any play order; multi-moment shorts by condensing a stretch. |
+| [hosted-models.md](hosted-models.md) | 2026-10-31 | Paul Bratslavsky | core/adapters, core/engine, core/tools, app/src-tauri, frontend/setup, frontend/topbar | Draft (3 owner choices open): a Local / Hosted switch for every AI step; Hosted uses Claude's Messages API with the user's key in the OS key store, one model per run, visible errors instead of silent fallbacks, and only the user can turn it on; removes the hidden escalate_to_frontier path. |
 
 ## Existing design artifacts
 
