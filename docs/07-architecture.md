@@ -63,7 +63,9 @@ Six principles shape everything (see `README.md` and `docs/06-build-spec.md`):
 
 1. **Local-first / zero egress by default** — the app is fully functional with
    networking disabled; the only network calls are to localhost (Ollama) unless
-   the user explicitly opts into a frontier provider.
+   the user switches the app to Hosted mode (Claude with their own key, text
+   only — ADR-0007). Only a human action can *enable* egress; once Hosted is
+   on, every caller's AI steps use it.
 2. **Non-destructive editing** — source media is never modified. Edits toggle
    visibility of clip ranges; nothing is ever lost.
 3. **The Rust core owns all state** — the frontend is a pure view layer that
@@ -87,7 +89,10 @@ core/          roughcut-core — the portable asset; all logic lives here
   src/export/         srt, edl, fcpxml, xmeml (Premiere/Resolve), otio
   src/store.rs        SQLite persistence
   src/events.rs       EventSink trait + payload builders
-  src/mcp/            MCP server (axum) + frontier client / keychain
+  src/mcp/            MCP server (axum)
+  src/engine/route.rs the LOCAL / HOSTED switch: per-run router, key, chip status
+  src/adapters/anthropic.rs  Claude Messages API client (Hosted mode)
+  src/secrets.rs      the Hosted API key in the OS key store
   src/demo.rs         fixture media + transcript for demo mode
   tests/e2e.rs        full edit loop + MCP-over-HTTP, runs on fixtures
   examples/agent_live.rs  smoke test against a real local model server
@@ -234,8 +239,9 @@ then call `mutate_timeline` with the corresponding `Timeline` operation.
 
 `Editor::transcribe()` (`engine.rs:228`) extracts a 16 kHz mono WAV via the
 video adapter, calls the transcriber (which emits `progress` events), persists
-the transcript, emits `transcript-changed` — and then, when a local model
-server is available, spawns a background **cleanup pass**
+the transcript, emits `transcript-changed` — and then, when a model is
+available (the local server, or Claude in Hosted mode), spawns a background
+**cleanup pass**
 (`agent.rs:299`): the LLM fixes casing/punctuation/mishearings in chunks of 40
 segments, constrained to *keep exactly the same number of words* so word-level
 timestamps stay valid. `update_segment_texts()` (`engine.rs:296`) enforces the
@@ -267,7 +273,6 @@ served to:
 | Read state | `get_timeline`, `get_transcript` |
 | History | `undo`, `redo` |
 | Settings | `get_preferences`, `set_preferences` |
-| Frontier (opt-in) | `connect_external`, `escalate_to_frontier` |
 
 Exact parameter and result shapes for every tool are in
 [`tool-api.md`](tool-api.md); edit tools uniformly return
@@ -279,15 +284,13 @@ The caller decides which rows are visible *and* callable (so listing and
 dispatch can never disagree), whether arguments are schema-checked, and which
 `ActionSource` the resulting edits carry:
 
-- `Ui` — every tool, including the meta tools (`apply_instruction`,
-  `connect_external`, `escalate_to_frontier`).
+- `Ui` — every tool, including the meta tool `apply_instruction`.
 - `Mcp` — everything except meta tools; arguments schema-checked.
 - `Agent` — only `agent`-flagged rows, never meta tools, so recursion is
   prevented structurally rather than by prompt engineering. Deliberately
   excluded: project lifecycle (the agent works within the open project),
-  `export` (handing off is a user decision), preferences, and the frontier
-  tools (opt-in means a human clicks). Frontier escalation runs this same loop
-  with `attribute_to: McpClient`.
+  `export` (handing off is a user decision), and preferences. The model
+  switch and its key are not tools at all (Tauri commands, ADR-0004/0007).
 
 **To add a feature to RoughCut, you almost always add a tool**: implement the
 operation on `Editor`, add a handler and a `tool!(…)` row to `REGISTRY` — and
@@ -313,10 +316,9 @@ The whisper model path comes from `WHISPER_MODEL` or defaults to
 preferences, seeded by `INFERENCE_ENDPOINT` (default
 `http://localhost:11434/v1`) and `INFERENCE_MODEL` (default `gemma4:26b`).
 
-Because the inference client speaks the OpenAI protocol, "local Gemma via
-Ollama" and "Claude via api.anthropic.com" are the *same code path* — the
-frontier escalation (§7) just constructs the client with a different base URL
-and an API key.
+In Hosted mode (§7) `Editor::inference()` hands out a per-run router that
+sends the same OpenAI-shaped requests to Claude's Messages API through
+`adapters/anthropic.rs`, which translates them; every AI step is unchanged.
 
 ---
 
@@ -348,8 +350,8 @@ tagged `ClipOrigin::AiCut`. One click, undoable as a single action.
 
 ### The local agent loop (`core/src/agent.rs`)
 
-`apply_instruction` runs a textbook tool-calling loop, entirely against a
-local model:
+`apply_instruction` runs a textbook tool-calling loop against the app's model
+— the local one, or Claude in Hosted mode (one model per run, §7):
 
 1. **Context**: `project_context()` (`agent.rs:45`) renders the project stats
    and the full transcript as `id | start–end | flags | text` lines (capped at
@@ -406,15 +408,17 @@ endpoint (CLI args → `ROUGHCUT_MCP_ENDPOINT`/`ROUGHCUT_MCP_TOKEN` env vars →
 responses to stdout. Claude Desktop config just points at the shim binary
 (see README "Claude Desktop (MCP)").
 
-### Frontier escalation (`mcp/client.rs`) — the only egress in the app
+### Hosted mode (`engine/route.rs`, `adapters/anthropic.rs`) — the only model egress
 
-`connect_external` stores an API key in the OS keychain (macOS `security`
-CLI; elsewhere a 0600 file under `<data dir>/secrets/`) and records an
-`ExternalConnection`. `escalate_to_frontier` maps the provider to an endpoint
-(`claude`/`anthropic` → `api.anthropic.com`, `openai` → `api.openai.com`, or a
-custom URL), builds an `OpenAiCompatClient` with the key, and runs the *same*
-agent loop from §6 against it. Both tools are excluded from the agent's tool
-set: only a human action can trigger network egress.
+The user's LOCAL / HOSTED switch (ADR-0007, `docs/designs/hosted-models.md`).
+The key lives in the OS key store (`secrets.rs`); the switch, the model and
+the key are changed only through Tauri commands, never the registry. In
+Hosted mode `Editor::inference()` returns a `HostedRouter` per run: one model
+per run, "unreachable" falls back to the local model (a conversation that
+already used Claude stops instead), and no key / a rejected key / a rejected
+request is a visible `CoreError::Hosted` that no call site papers over. Only
+a human action can enable egress; once on, every caller's AI steps use it.
+The chip in the top bar follows `model-route` events.
 
 ---
 
@@ -510,7 +514,7 @@ frozen in `tool-api.md`).
 
 ### State management (`src/ipc/queries.ts`, `src/state/viewStore.ts`)
 
-Two stores with a clean division:
+Server state and view state, with a clean division:
 
 - **Server state** lives in TanStack Query under keys `["projects"]`,
   `["project", id]`, `["timeline", id]`, `["transcript", id]`,
@@ -527,6 +531,10 @@ Two stores with a clean division:
   timeline `zoom`/`scrollX`, selected clip and segment ids, `showCuts` /
   `skipCuts` toggles, and the active left-panel tab. Nothing here is persisted
   or owned by the core.
+- Two smaller view stores follow the same rule: `shortsStore.ts` (the Shorts
+  screen's ticks, progress lines and last results, kept across screen
+  switches) and `modelStore.ts` (the LOCAL / HOSTED chip's copy of the core's
+  `model_status`, refreshed on `model-route` events and after each command).
 
 ### Layout and panels
 

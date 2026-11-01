@@ -37,7 +37,6 @@ Environment variables (read at runtime):
   `Preferences`; saved preferences win.
 - `WHISPER_MODEL`, `FFMPEG_PATH`, `FFPROBE_PATH` — file paths tried before the
   usual lookup.
-- `FRONTIER_MODEL` — overrides the frontier provider's default model.
 
 ## Subdirectories & System Boundaries
 
@@ -55,8 +54,7 @@ Environment variables (read at runtime):
     semantic search, and confirmations.
   - [./src/export/README.md](./src/export/README.md) - NLE interchange, SRT,
     plain text, and MP4 export.
-  - [./src/mcp/README.md](./src/mcp/README.md) - The localhost MCP server and
-    the opt-in frontier-provider client.
+  - [./src/mcp/README.md](./src/mcp/README.md) - The localhost MCP server.
 - examples: [./examples/README.md](./examples/README.md) - Manual smoke tests
   and diagnostics (`cargo run -p roughcut-core --example <name>`) that drive
   the real API against real devices, services, and files. Compiled but not run
@@ -71,7 +69,7 @@ Environment variables (read at runtime):
 - One tool registry, three callers. Every operation MCP clients and agent
   loops can reach is a `ToolSpec` row in `src/tools.rs`; `Caller::can_use`
   alone decides who may see and call it (the UI sees all 66 tools, MCP clients
-  63, the agent loop 27), and `tools::dispatch` is their single entry point.
+  65, the agent loop 28), and `tools::dispatch` is their single entry point.
   The Tauri app (`app/src-tauri/src/lib.rs`) also calls the core outside the
   registry: recording, setup and model downloads, the LLM runtime, terminals,
   Resolve, and confirmation answers are app commands only, and
@@ -95,8 +93,10 @@ Environment variables (read at runtime):
   `RationalTime` is unused outside `src/time.rs`.
 - Zero egress by default. Model calls go to the configured inference endpoint
   (local by default); non-UI callers cannot point it at a non-loopback host
-  (`Editor::update_preferences`), and the frontier client (`src/mcp/client.rs`)
-  is reachable only from the UI's meta tools.
+  (`Editor::update_preferences`). Hosted mode (Claude, `src/engine/route.rs`,
+  `src/adapters/anthropic.rs`) is turned on only by the user through the app's
+  shell commands, never a tool; `set_preferences` rejects the model-switch
+  fields for every caller (ADR-0007).
 - Externally requested writes need the user's approval. `export`,
   `export_clip`, and `delete_project` from MCP clients
   (`ActionSource::McpClient`) wait on `Editor::request_confirmation`, which
@@ -120,11 +120,11 @@ Environment variables (read at runtime):
 
 - **SQLite**: `library.db` under `<OS data dir>/roughcut` (`store::data_dir()`),
   tables `projects`, `transcripts`, `preferences`, `kv`, `embeddings`.
-  `Editor::bootstrap_with_store` purges trash older than 30 days.
+  `Editor::bootstrap_with_store` purges trash older than 30 days and deletes
+  plaintext keys the removed frontier path left under `<data dir>/secrets/`.
 - **Files**: media caches under `<data dir>/roughcut/cache/`, downloaded models
   under `<data dir>/roughcut/models`, binaries under `<data dir>/roughcut/bin`,
-  the frontier API key at `<data dir>/roughcut/secrets/<key_ref>` when the
-  Keychain is unavailable, recordings under `~/Movies/RoughCut`, `mcp.json`
+  recordings under `~/Movies/RoughCut`, `mcp.json`
   (URL and bearer token for `mcp-shim`), the Resolve plugin scripts in
   Resolve's `Fusion/Scripts/Utility` folder, `roughcut-*` temp files (the
   transcription WAV, ffmpeg concat lists, the Resolve import script), and
@@ -132,15 +132,16 @@ Environment variables (read at runtime):
 - **Subprocesses**: ffmpeg/ffprobe (probe, render, capture, peaks, frames),
   whisper-cli (when not built with `whisper-native`), Ollama and llama-server,
   a login shell for in-app terminals, `python3` for DaVinci Resolve,
-  `security` for the Keychain, `tar` (llama-server install), and `which`,
+  `tar` (llama-server install), and `which`,
   `sysctl`, and `df` for capability, RAM, and disk-space checks.
 - **Network**: the inference endpoint (chat, embeddings, health probes),
   user-triggered downloads (Hugging Face, GitHub releases, `.gguf` URLs), the
-  MCP server on `127.0.0.1`, and — only when the user opts in — a frontier
-  provider's API.
-- **macOS services**: Apple Vision face detection, the Keychain (frontier API
-  key), and the camera, microphone, and Screen Recording permissions used by
-  capture.
+  MCP server on `127.0.0.1`, and — only in Hosted mode, or when the user saves
+  or tests a key in Setup — `api.anthropic.com`.
+- **OS key store** (`keyring` crate): the Hosted API key — Keychain on macOS,
+  Credential Manager on Windows, the kernel keyring on Linux.
+- **macOS services**: Apple Vision face detection, and the camera, microphone,
+  and Screen Recording permissions used by capture.
 
 ## System Verification
 

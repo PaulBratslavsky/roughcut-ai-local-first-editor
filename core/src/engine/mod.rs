@@ -16,13 +16,14 @@ mod confirm;
 mod edits;
 mod media;
 mod projects;
+pub mod route;
 mod semantic;
 
 pub use clips::{ClipChanges, ClipScan, ClipSource, FaceCrop};
 
 use crate::adapters::{
-    AutoTranscriber, AutoVideoEngine, Embedder, InferenceClient, MockTranscriber,
-    MockVideoEngine, OllamaEmbedder, OpenAiCompatClient, Transcriber, VideoEngine,
+    AutoTranscriber, AutoVideoEngine, Embedder, MockTranscriber,
+    MockVideoEngine, OllamaEmbedder, Transcriber, VideoEngine,
 };
 use crate::error::{CoreError, Result};
 use crate::events::{NullSink, SharedSink};
@@ -75,6 +76,11 @@ pub struct Inner {
     pub(crate) rough_cut_peaks: Mutex<Option<Vec<u8>>>,
     /// Projects with a `find_clips` run in flight (one at a time each).
     scans: Mutex<HashSet<Uuid>>,
+    /// The LOCAL / HOSTED switch's key and status (see [`route`]).
+    pub(crate) route: route::RouteState,
+    /// Serialises every preferences load-modify-save, so a slow tool call
+    /// can't write back a model switch the user changed meanwhile.
+    pub(crate) prefs_write: Mutex<()>,
     state: Mutex<HashMap<Uuid, ProjectState>>,
 }
 
@@ -103,6 +109,8 @@ impl Editor {
                 require_confirm: std::sync::atomic::AtomicBool::new(false),
                 rough_cut_peaks: Mutex::new(None),
                 scans: Mutex::new(HashSet::new()),
+                route: route::RouteState::new(Arc::new(crate::secrets::KeyringStore::hosted())),
+                prefs_write: Mutex::new(()),
                 state: Mutex::new(HashMap::new()),
             }),
         }
@@ -131,6 +139,8 @@ impl Editor {
         editor.inner.require_confirm.store(confirm, std::sync::atomic::Ordering::Relaxed);
         // Trash older than 30 days is gone for good.
         let _ = editor.purge_trash(30);
+        // Keys the removed "frontier" path left in plain text.
+        crate::secrets::remove_legacy_plaintext();
         Ok(editor)
     }
 
@@ -141,13 +151,16 @@ impl Editor {
         let mut prefs = Preferences::default();
         prefs.inference_endpoint = "http://127.0.0.1:9/v1".into();
         store.save_preferences(&prefs).expect("prefs");
-        Self::new(
+        let editor = Self::new(
             Box::new(store),
             Box::new(MockVideoEngine),
             Box::new(MockTranscriber),
             Arc::new(NullSink),
             true,
-        )
+        );
+        // Tests never read or write the developer's real key store.
+        editor.set_secret_store_for_tests(Arc::new(crate::secrets::MemoryStore::default()));
+        editor
     }
 
     /// Dynamic: fixtures forced (tests / FABLE_DEMO) or the media toolchain is
@@ -166,13 +179,6 @@ impl Editor {
 
     pub fn video(&self) -> &dyn VideoEngine {
         self.inner.video.as_ref()
-    }
-
-    /// Inference client built from current preferences (the endpoint makes the
-    /// local model and a remote frontier model interchangeable).
-    pub fn inference(&self) -> Result<Box<dyn InferenceClient>> {
-        let prefs = self.inner.store.load_preferences()?;
-        Ok(Box::new(OpenAiCompatClient::new(&prefs.inference_endpoint, None)))
     }
 
     /// Local embedder from preferences (same endpoint as the chat model).

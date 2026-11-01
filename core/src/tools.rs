@@ -59,19 +59,20 @@ pub fn registry() -> &'static [ToolSpec] {
 /// and which [`ActionSource`] the edits it lands are attributed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caller {
-    /// The app's own UI — the user. Every tool, including the meta tools that
-    /// start agent loops or opt in to a frontier provider.
+    /// The app's own UI — the user. Every tool, including the meta tool that
+    /// starts the agent loop. (The LOCAL / HOSTED switch isn't a tool at all.)
     Ui,
     /// An external MCP client (Claude Desktop/Code via the shim, the Resolve
     /// scripts). Everything except meta tools: an external model IS an
     /// orchestrator — handing it apply_instruction would route editing through
-    /// the weaker on-device model, and it must never opt the user into egress.
+    /// the app's own (often weaker, on-device) model, and it can never turn on
+    /// Hosted mode (that is a shell command, ADR-0007).
     Mcp,
-    /// An agent loop: the on-device model, or a frontier model the user
-    /// escalated to. Only the `agent` rows it is shown — never meta tools (so a
-    /// loop can't recurse) nor project lifecycle / export / preferences.
-    /// `attribute_to` is who its edits are credited to (`LocalAi`, or
-    /// `McpClient` for frontier escalation) — distinct from what it may call.
+    /// The agent loop (on the on-device model, or Claude in Hosted mode). Only
+    /// the `agent` rows it is shown — never meta tools (so a loop can't
+    /// recurse) nor project lifecycle / export / preferences. `attribute_to`
+    /// is who its edits are credited to (`LocalAi` for the in-app chat) —
+    /// distinct from what it may call.
     Agent { attribute_to: ActionSource },
 }
 
@@ -1136,23 +1137,6 @@ handler!(h_set_preferences, |e, a, s| {
     Ok(serde_json::to_value(e.update_preferences(&a["preferences"], s)?)?)
 });
 
-handler!(h_connect_external, |e, a, _s| {
-    let conn =
-        crate::mcp::client::connect_external(e, arg_str(a, "provider")?, arg_str(a, "api_key")?)?;
-    Ok(serde_json::to_value(conn)?)
-});
-
-handler!(h_escalate_to_frontier, |e, a, _s| {
-    let outcome = crate::mcp::client::escalate_to_frontier(
-        e,
-        arg_uuid(a, "project_id")?,
-        arg_str(a, "instruction")?,
-        arg_str(a, "connection_id")?,
-    )
-    .await?;
-    Ok(serde_json::to_value(outcome)?)
-});
-
 // ---------------------------------------------------------- the registry
 
 macro_rules! tool {
@@ -1176,7 +1160,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("import_media", "Probe a local video file and return its metadata. With project_id, attach it to that project: a project with no media gets it (and a fresh timeline); a project whose video was moved can be relinked to the same video at a new path (same duration, size, frame rate — cuts, history, and transcript are kept). A different video is refused: create a new project, or use append_media.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["file_path"]),
         agent: false, meta: false, h_import_media),
-    tool!("transcribe", "Transcribe the project's media on-device into time-aligned text.",
+    tool!("transcribe", "Transcribe the project's media on-device into time-aligned text. Afterwards the app polishes punctuation with its model in the background (on-device, or on Claude when the user has switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),
     tool!("detect_silences", "PREVIEW dead-air ranges (read-only): word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only. To actually remove them, use remove_silences.",
@@ -1242,13 +1226,13 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Undo history and checkpoints are extended to cover the new footage; the append itself is not an undoable edit. Re-run transcribe afterwards to caption the appended span.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
         agent: false, meta: false, h_append_media),
-    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one on-device model pass per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the on-device beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
+    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one model pass (on-device unless the user switched the app to Hosted) per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the app's own beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
-    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower on-device semantic pass per seam.",
-        || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "on-device semantic pass per seam (slower); default false runs only the instant deterministic checks"}}), &["project_id"]),
+    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower model pass per seam (on-device unless the user switched the app to Hosted).",
+        || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "a model pass per seam (slower; on-device unless the app is in Hosted mode); default false runs only the instant deterministic checks"}}), &["project_id"]),
         agent: true, meta: false, h_review_flow),
-    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several local-model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
+    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
         agent: true, meta: false, mutating: true, h_story_edit),
     tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: ranks still-included segments by how central they are to the video (least-central tangents cut first; intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
@@ -1272,7 +1256,7 @@ static REGISTRY: &[ToolSpec] = &[
             {"type": "object", "properties": {"type": {"const": "set_global_padding"}, "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}, "required": ["type", "start_s", "end_s"]}
         ]}}}), &["project_id", "edits"]),
         agent: true, meta: false, mutating: true, h_apply_edits),
-    tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
+    tool!("apply_instruction", "Delegate a natural-language edit to the app's agent loop (the on-device model, or Claude in Hosted mode; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "history": {"type": "array", "description": "recent chat turns, oldest first", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["user", "agent"]}, "text": {"type": "string"}}}}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
     tool!("generate_chapters", "Generate YouTube-style chapters from the transcript.",
@@ -1287,7 +1271,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
-    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, pieces, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8, at most 60), min_s/max_s playable length bounds (default 15-60). scan: true judges moments from every part of the video and skips moments already saved as clips (use with a larger count, e.g. 40); it can take minutes, longer than some clients wait — the list still persists, so read it with get_clip_candidates. min_score drops moments the model scored below it. One run per project at a time. Scored by the on-device model when reachable, else heuristically (method says which). Save one with create_clip (rank), several with create_clips.",
+    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, pieces, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8, at most 60), min_s/max_s playable length bounds (default 15-60). scan: true judges moments from every part of the video and skips moments already saved as clips (use with a larger count, e.g. 40); it can take minutes, longer than some clients wait — the list still persists, so read it with get_clip_candidates. min_score drops moments the model scored below it. One run per project at a time. Scored by the app's model (on-device, unless the user switched the app to Hosted, then Claude) when reachable, else heuristically: method says which, and each candidate's scorer names the model. Save one with create_clip (rank), several with create_clips.",
         || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer", "description": "how many to return, 1-60 (default 8)"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}, "scan": {"type": "boolean", "description": "judge moments from every part of the video (slower)"}, "min_score": {"type": "number", "description": "drop moments the model scored below this (0-100)"}, "multi_moment": {"type": "boolean", "description": "also propose shorts made of several pieces (not available yet; ignored)"}}), &["project_id"]),
         agent: true, meta: false, h_find_clips),
     tool!("get_clip_candidates", "The candidates from the latest find_clips run, best first (no recompute).",
@@ -1376,12 +1360,6 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_preferences", "Update user preferences: pass only the keys to change (merged into the current preferences; unknown keys are rejected). Only the user, in the app, can point inference_endpoint off this machine.",
         || obj(json!({"preferences": {"type": "object"}}), &["preferences"]),
         agent: false, meta: false, h_set_preferences),
-    tool!("connect_external", "Opt in to an external frontier provider (stores key in OS keychain).",
-        || obj(json!({"provider": {"type": "string"}, "api_key": {"type": "string"}}), &["provider", "api_key"]),
-        agent: false, meta: true, h_connect_external),
-    tool!("escalate_to_frontier", "Send an instruction to the connected frontier model. Explicit opt-in only; never auto-invoked.",
-        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "connection_id": {"type": "string"}}), &["project_id", "instruction", "connection_id"]),
-        agent: false, meta: true, h_escalate_to_frontier),
 ];
 
 #[cfg(test)]

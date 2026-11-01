@@ -6,6 +6,8 @@ import { callTool, onAppEvent } from "../ipc/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { useApplyInstruction } from "../ipc/queries";
 import type { AgentStepEvent } from "../ipc/types";
+import { modelLabel, useModelStatus } from "../state/modelStore";
+import { errText } from "./clipUtil";
 
 interface AgentMessage {
   id: string;
@@ -19,7 +21,7 @@ interface AgentMessage {
   startedAt: number;
 }
 
-/** Always-moving footer for an in-flight run: local models can sit on one
+/** Always-moving footer for an in-flight run: a model can sit on one
  *  inference call for a minute — a ticking clock says "working, not hung". */
 function ElapsedRow({ startedAt }: { startedAt: number }) {
   const [, force] = useState(0);
@@ -173,6 +175,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
   const applyInstruction = useApplyInstruction();
+  const model = useModelStatus();
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pendingIdRef = useRef<string | null>(null);
@@ -237,7 +240,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
           setMessages((msgs) =>
             msgs.map((m) =>
               m.id === agentId
-                ? { ...m, pending: false, text: `Something went wrong: ${String((err as Error)?.message ?? err)}` }
+                ? { ...m, pending: false, text: `Something went wrong: ${errText(err)}` }
                 : m,
             ),
           );
@@ -258,8 +261,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
       await queryClient.invalidateQueries();
       setMessages((msgs) => msgs.map((m) => (m.id === msgId ? { ...m, undone: true } : m)));
     } catch (e) {
-      const o = e as { error?: { message?: string }; message?: string };
-      const why = o?.error?.message ?? o?.message ?? String(e);
+      const why = errText(e);
       setMessages((msgs) =>
         msgs.map((m) => (m.id === msgId ? { ...m, text: `${m.text}\n\n[undo: ${why}]` } : m)),
       );
@@ -271,7 +273,7 @@ export function ChatPanel({ projectId }: { projectId: string }) {
       <div className="chat-scroll" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="chat-empty">
-            <p>Edit by chatting with the local model.</p>
+            <p>Edit by chatting with {modelLabel(model)}.</p>
             <p className="chat-suggestions">
               Try: <em>“remove all the filler words”</em> · <em>“cut the silences”</em> ·{" "}
               <em>“cut the parts about meetings”</em>

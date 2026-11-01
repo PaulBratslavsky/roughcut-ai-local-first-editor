@@ -74,6 +74,14 @@ pub enum CoreEvent {
     ClipsChanged {
         project_id: Uuid,
     },
+    /// Where the AI steps actually run changed (Hosted fell back to Local,
+    /// came back, or the key was rejected) — the top-bar chip follows it.
+    ModelRoute {
+        mode: crate::model::ModelMode,
+        effective: crate::model::ModelMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::model::RouteReason>,
+    },
     McpReady {
         url: String,
         token: String,
@@ -132,6 +140,7 @@ impl CoreEvent {
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::ClipsChanged { .. } => "clips-changed",
+            CoreEvent::ModelRoute { .. } => "model-route",
             CoreEvent::McpReady { .. } => "mcp-ready",
             CoreEvent::ConfirmRequest { .. } => "confirm-request",
             CoreEvent::TerminalOutput { .. } => "terminal-output",

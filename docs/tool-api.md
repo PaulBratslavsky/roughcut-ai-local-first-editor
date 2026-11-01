@@ -39,12 +39,16 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 | `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers) |
 | `mcp-ready` | `{ url, token }` — MCP server is up |
 | `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background; refetch `get_media_assets` |
+| `model-route` | `{ mode, effective, reason? }` — where the AI steps actually run changed (Hosted fell back to Local, came back, or the key was rejected); `reason`: `offline` \| `rate_limited` \| `server_error` \| `key_rejected` \| `no_key`. The app's LOCAL / HOSTED chip follows it |
+
+### Model switch (app commands, not tools)
+Whether the AI steps run on the local model or on Claude (Hosted mode, ADR-0007) is the user's choice in the app. The switch, the hosted model and the API key are changed only by Tauri commands — `model_status`, `set_model_mode { mode, consent }`, `set_hosted_model { model }`, `set_hosted_key { key | null }`, `check_hosted_key` — never by a tool, so no MCP client or agent can turn Hosted on or read the key. `get_preferences` shows `model_mode` and `hosted_model`. In Hosted mode a step can fail with `hosted_no_key`, `hosted_not_consented`, `hosted_key_rejected` or `hosted_bad_request` (shown, never replaced by a rule-based result); `hosted_refused` / `hosted_truncated` affect one request.
 
 ### MCP
 Same tools exposed over a localhost HTTP JSON-RPC endpoint guarded by a per-install
 token; `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop. Exception:
-the orchestration meta-tools (`apply_instruction`, `connect_external`,
-`escalate_to_frontier`) are neither advertised nor callable over MCP — an
+the orchestration meta-tool `apply_instruction` is neither advertised nor
+callable over MCP — an
 external client IS an orchestrator and should compose the granular tools /
 `apply_edits` itself. MCP arguments are schema-checked (required fields and
 primitive types) before a handler runs.
@@ -57,7 +61,7 @@ so `tools/list` and `tools/call` can never disagree:
 |---|---|---|---|
 | `Ui` | every tool | no (typed frontend) | `ui` |
 | `Mcp` | everything except meta tools | yes | `mcp_client` |
-| `Agent` | only `agent`-flagged tools | yes | `local_ai` (or `mcp_client` for frontier escalation) |
+| `Agent` | only `agent`-flagged tools | yes | `local_ai` |
 
 ## Tools
 
@@ -97,7 +101,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Semantic / LLM
 - `outline_transcript { project_id, refresh? } -> { beats: [{title, summary, role, cut_priority, segment_ids, start, end}], method: "llm"|"heuristic" }` — the FULL transcript split into story beats (chunked map for long videos; cached per transcript hash; pause-boundary sections without a model)
-- `review_flow { project_id, llm? } -> { coherent, boundaries_checked, issues: [{kind, severity, at_segment, description, restore_segment_ids}], method }` — re-reads the edited transcript at every cut point. Default `llm=false` runs only the instant deterministic checks (mid-sentence cuts, orphaned connectives — no model calls, safe for long videos); `llm=true` adds on-device semantic judgment per boundary. Run after every batch of cuts and restore what it flags.
+- `review_flow { project_id, llm? } -> { coherent, boundaries_checked, issues: [{kind, severity, at_segment, description, restore_segment_ids}], method }` — re-reads the edited transcript at every cut point. Default `llm=false` runs only the instant deterministic checks (mid-sentence cuts, orphaned connectives — no model calls, safe for long videos); `llm=true` adds the app's model judgment per boundary (on-device, or Claude in Hosted mode). Run after every batch of cuts and restore what it flags.
 - `story_edit { project_id, instruction, target_duration_s? } -> { actions, summary, before_s, after_s, coherent, issues_remaining }` — the cohesive pipeline in one call: outline → cut whole beats against the instruction → review every cut point → restore what reads broken → summarize. Long-running; frontier orchestrators may prefer composing the granular tools
 - `plan_duration_cut { project_id, target_duration_s, apply? } -> plan | receipt` — ranks still-included segments by embedding centrality (tangents first, intro/outro protected). `apply: true` (recommended for orchestrators) plans AND cuts in one undoable step, returning `{ applied, action, before_s, included_duration_s, target_s, method, notes }`; without it, returns the full `{ segment_ids, projected_after_s, … }` plan for review
 - `find_segments { project_id, query, limit? } -> { segments: [LeanSegment & {score}], method: "hybrid"|"bm25" }` — BM25 + local embeddings (Ollama `nomic-embed-text`) fused by reciprocal rank; BM25 alone when no index
@@ -114,7 +118,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 
 ### Clips
 A saved clip is a standalone edit made of one or more pieces of the long-form video, played back to back in source order, in a 16:9 (`landscape`) or 9:16 (`vertical`, a short) frame. Its timeline is the current cut restricted to those pieces, snapshotted at save (main-cut edits and undo don't move it). Project metadata, not journaled. Not to be confused with the main timeline's clips (`trim_clip`, `split_clip`).
-- `find_clips { project_id, theme?, count?, min_s?, max_s?, scan?, min_score?, multi_moment? } -> { candidates: [ClipCandidate], method: "llm"|"heuristic", theme }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results, at most 60) that work as standalone shorts, ranked best first (hook, stands alone, payoff). Each candidate has `pieces: [SourceRange]`, the stretches it plays in play order (one for a single stretch); `start`/`end` cover them all. `theme` keeps only moments about that topic (hybrid transcript search, then the model judges relevance); errors when nothing matches. `scan: true` judges moments from every part of the video (taken beat by beat: every story beat's best before any beat's second; the model sees up to 90, and with no model nothing is capped) — slower, minutes on a long video; the result still persists if a client stops waiting. `min_score` drops moments the model scored below it (unjudged ones stay). `multi_moment` is accepted and ignored for now. A scan doesn't offer moments already saved as clips (sharing over 30% of the shorter one's source seconds), including one saved while it ran. One run per project at a time: a second errors `invalid_argument` ("a clip scan is already running for this project"). Scored by the on-device model when reachable. Replaces the stored candidates
+- `find_clips { project_id, theme?, count?, min_s?, max_s?, scan?, min_score?, multi_moment? } -> { candidates: [ClipCandidate], method: "llm"|"heuristic", theme }` — sentence-aligned stretches of the current cut (default 15–60 s playable, 8 results, at most 60) that work as standalone shorts, ranked best first (hook, stands alone, payoff). Each candidate has `pieces: [SourceRange]`, the stretches it plays in play order (one for a single stretch); `start`/`end` cover them all. `scorer` names the model that scored it ("Claude Opus 5.5" in Hosted mode, or the local model's name; null for a rule-based score). `theme` keeps only moments about that topic (hybrid transcript search, then the model judges relevance); errors when nothing matches. `scan: true` judges moments from every part of the video (taken beat by beat: every story beat's best before any beat's second; the model sees up to 90, and with no model nothing is capped) — slower, minutes on a long video; the result still persists if a client stops waiting. `min_score` drops moments the model scored below it (unjudged ones stay). `multi_moment` is accepted and ignored for now. A scan doesn't offer moments already saved as clips (sharing over 30% of the shorter one's source seconds), including one saved while it ran. One run per project at a time: a second errors `invalid_argument` ("a clip scan is already running for this project"). Scored by the app's model (on-device, or Claude in Hosted mode) when reachable. Replaces the stored candidates
 - `get_clip_candidates { project_id } -> { candidates }` — the latest find_clips results, no recompute
 - `create_clip { project_id, rank? | candidate_id? | segment_ids? | ranges? | start, end, title?, format? } -> { clip: SavedClipSummary }` — from a candidate by `rank` (1 = top) or id (removes it from the list; defaults to `vertical`), or from pieces: `segment_ids` (whole sentences, anywhere), `ranges: [{start, end}]`, or one `start`+`end` (defaults to `landscape`). Touching pieces merge
 - `create_clips { project_id, candidate_ids: [id], format? } -> { clips: [SavedClipSummary], errors: [{ candidate_id, message }] }` — make several candidates at once (each `vertical` unless `format` says otherwise; each leaves the list), then frame every vertical clip's crop on the speaker (the same face pass `center_clip_on_face` runs, except a crop set by someone else meanwhile wins) before returning, emitting `make_clips` progress ("framing 2/6"). A candidate that no longer validates (its material was cut from the main edit since the scan) or isn't listed stays put and is reported in `errors`; the rest are still made. A clip the face pass can't frame keeps `crop_x` 0.5
@@ -146,11 +150,7 @@ A saved clip is a standalone edit made of one or more pieces of the long-form vi
 - `undo { project_id } -> { action: EditAction|null, timeline }`
 - `redo { project_id } -> { action: EditAction|null, timeline }`
 - `get_preferences {} -> Preferences`
-- `set_preferences { preferences } -> Preferences` — a partial update: only the keys given change (nested objects like `default_padding` merge); unknown keys are rejected. Non-UI callers cannot point `inference_endpoint` at a non-loopback host (zero egress).
-
-### MCP client (opt-in; never auto-invoked)
-- `connect_external { provider, api_key } -> ExternalConnection`
-- `escalate_to_frontier { project_id, instruction, connection_id } -> { actions, summary }`
+- `set_preferences { preferences } -> Preferences` — a partial update: only the keys given change (nested objects like `default_padding` merge); unknown keys are rejected. Non-UI callers cannot point `inference_endpoint` at a non-loopback host (zero egress). `model_mode`, `hosted_model` and `hosted_consent_at` (the LOCAL / HOSTED switch) are read-only here for every caller: changing them fails with `invalid_argument`; only the app's own Setup and top-bar switch change them
 
 ## Shapes (JSON, as the UI sees them)
 
@@ -212,7 +212,9 @@ interface Preferences { default_padding: Padding;
   custom_filler_words: string[]; silence_min_duration_s: number;
   export_target: string; language: string;
   model_tier: "auto" | "small" | "medium" | "large";
-  inference_endpoint: string; inference_model: string; embedding_model: string }
+  inference_endpoint: string; inference_model: string; embedding_model: string;
+  // The LOCAL / HOSTED switch: read-only here (changed only in the app).
+  model_mode: "local" | "hosted"; hosted_model: string; hosted_consent_at: string | null }
 ```
 
 ## Demo mode

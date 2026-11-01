@@ -596,10 +596,113 @@ pub struct Preferences {
     /// same OpenAI-compatible endpoint as the chat model).
     #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
+    /// Where the AI steps run: on this machine, or on Claude with the user's
+    /// key. Only the user, in the app, changes it (never `set_preferences`).
+    #[serde(default)]
+    pub model_mode: ModelMode,
+    /// The Claude model Hosted mode uses: one of [`HOSTED_MODELS`].
+    #[serde(default = "default_hosted_model")]
+    pub hosted_model: String,
+    /// When the user confirmed what Hosted mode sends. Hosted runs refuse to
+    /// start without it.
+    #[serde(default)]
+    pub hosted_consent_at: Option<DateTime<Utc>>,
 }
 
 fn default_embedding_model() -> String {
     std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "nomic-embed-text".into())
+}
+
+fn default_hosted_model() -> String {
+    HOSTED_MODELS[0].0.to_string()
+}
+
+/// Where the AI steps run.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Ollama / llama-server on this machine. Works offline.
+    #[default]
+    Local,
+    /// Claude through the Messages API with the user's own key.
+    Hosted,
+}
+
+/// The Claude models Hosted mode offers, best first: (model id, display name).
+/// The one place ids map to names.
+pub const HOSTED_MODELS: &[(&str, &str)] = &[
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+];
+
+/// "Claude Opus 5.5" for a known id; the id itself otherwise (a refusal
+/// fallback can answer with a model outside the list).
+pub fn hosted_model_name(id: &str) -> String {
+    HOSTED_MODELS.iter().find(|(m, _)| *m == id).map(|(_, n)| n.to_string()).unwrap_or_else(|| id.to_string())
+}
+
+/// The result of checking an API key against Anthropic (no tokens spent).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyCheck {
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// What saving or forgetting the Hosted API key did.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct HostedKeyResult {
+    pub status: ModelStatus,
+    /// Present when a key was given: whether it checked out.
+    pub check: Option<KeyCheck>,
+    /// The key was stored (it checked out, or couldn't be checked offline).
+    pub saved: bool,
+}
+
+/// Why the AI steps aren't running where the user chose.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteReason {
+    /// Anthropic couldn't be reached (no network, timeout).
+    Offline,
+    /// Anthropic kept answering 429.
+    RateLimited,
+    /// Anthropic kept answering 5xx / 529.
+    ServerError,
+    /// Anthropic rejected the key (401 / 403).
+    KeyRejected,
+    /// Hosted is on but no key is stored.
+    NoKey,
+}
+
+/// The model switch as the app shows it (the top-bar chip and Setup).
+/// In memory apart from the preference fields; reading it never touches the
+/// network or the key store.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelStatus {
+    /// What the user chose.
+    pub mode: ModelMode,
+    pub hosted_model: String,
+    pub hosted_model_name: String,
+    pub key_present: bool,
+    pub consented: bool,
+    /// Where the last AI request actually ran.
+    pub effective: ModelMode,
+    /// Why `effective` differs from `mode`, or why Hosted is failing.
+    pub reason: Option<RouteReason>,
+    pub last_ok_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
 }
 
 impl Default for Preferences {
@@ -617,6 +720,9 @@ impl Default for Preferences {
             inference_model: std::env::var("INFERENCE_MODEL")
                 .unwrap_or_else(|_| "gemma4:26b".into()),
             embedding_model: default_embedding_model(),
+            model_mode: ModelMode::Local,
+            hosted_model: default_hosted_model(),
+            hosted_consent_at: None,
         }
     }
 }
@@ -876,6 +982,10 @@ pub struct ClipCandidate {
     /// The theme it was found for, if the search asked for one.
     #[serde(default)]
     pub theme: Option<String>,
+    /// The model that scored it ("Claude Opus 5.5", or the local model's
+    /// name); None for a rule-based score.
+    #[serde(default)]
+    pub scorer: Option<String>,
 }
 
 /// A named, self-contained snapshot of the timeline — a "save point" the
@@ -1048,19 +1158,6 @@ pub struct ProjectSummary {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-// --------------------------------------------------- external connections
-
-#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts-bindings", ts(export))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalConnection {
-    pub id: Uuid,
-    pub provider: String,
-    /// Reference into the OS keychain (never the raw key).
-    pub api_key_ref: String,
-    pub enabled: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,6 +1227,21 @@ mod tests {
         assert_eq!(c.format, ClipFormat::Vertical);
         assert_eq!(c.ranges, vec![SourceRange { start: 5.0, end: 25.0 }]);
         assert_eq!(c.crop_x, 0.5);
+    }
+
+    #[test]
+    fn old_preferences_load_in_local_mode_with_opus_as_the_hosted_model() {
+        let mut doc = serde_json::to_value(Preferences::default()).unwrap();
+        let obj = doc.as_object_mut().unwrap();
+        for k in ["model_mode", "hosted_model", "hosted_consent_at"] {
+            obj.remove(k);
+        }
+        let p: Preferences = serde_json::from_value(doc).unwrap();
+        assert_eq!(p.model_mode, ModelMode::Local);
+        assert_eq!(p.hosted_model, "claude-opus-5-5");
+        assert!(p.hosted_consent_at.is_none());
+        assert_eq!(hosted_model_name("claude-sonnet-5-5"), "Claude Sonnet 5.5");
+        assert_eq!(hosted_model_name("claude-x"), "claude-x");
     }
 
     #[test]

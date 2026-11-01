@@ -26,6 +26,7 @@ This is the key interaction-model difference from Gling's "footage in → rough 
 Concretely, versus Gling, the user gets:
 - **Privacy / ownership** — footage never leaves the device. Unlocks NDA, enterprise, legal, medical, and journalism work that cloud tools can't touch.
 - **Works fully offline** — process 4K instantly on-device; no upload wait; usable anywhere.
+- **Local by default; hosted when you choose** — every AI step runs on-device unless the user flips the app's LOCAL / HOSTED switch to use Claude with their own API key, for better judgement when they're online. Hosted sends text only (transcripts, chat, prompts) — video and audio never leave the device — and the switch is always visible (ADR-0007).
 - **One-time purchase, no caps** — no subscription, no monthly hour ceiling, no overage fees.
 - **Open source** — the project is open source, so it's free to use, inspectable (you can verify nothing is uploaded — a powerful proof of the privacy claim), self-hostable, and community-extensible. This reinforces the trust/privacy story in a way no closed cloud product can match and turns users into potential contributors.
 - **A conversational interface** — a local LLM (Gemma 4) acts as an orchestrator the user talks to, so editing feels like giving instructions, not operating software.

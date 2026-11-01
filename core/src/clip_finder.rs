@@ -59,6 +59,8 @@ struct Window {
     /// The model scored it. In a model run, anything it skipped ranks after
     /// everything it judged — heuristic and model scores aren't one scale.
     judged: bool,
+    /// The model that judged it, when one did.
+    scorer: Option<String>,
 }
 
 /// The candidate pool the model sees — enough to find the good ones without
@@ -173,17 +175,21 @@ pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) ->
 
     let (ranked, method) = if healthy {
         let model = editor.get_preferences()?.inference_model;
+        let label = editor.model_label();
         let on_batch = |done: usize, total: usize| {
             progress(
                 editor,
                 project_id,
                 0.3 + 0.65 * done as f64 / total.max(1) as f64,
-                format!("scoring candidates on-device — {done}/{total}"),
+                format!("scoring candidates with {label} — {done}/{total}"),
             )
         };
         let theme = opts.theme.as_deref();
         match llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), theme, on_batch).await {
             Ok(scored) => (scored, "llm"),
+            // A Hosted account problem (no key, rejected key) is shown, and
+            // the stored candidates stay as they were.
+            Err(e) if e.is_fatal_model_error() => return Err(e),
             Err(_) => (pool, "heuristic"),
         }
     } else {
@@ -367,6 +373,7 @@ fn candidate_windows(
                     title: None,
                     reason: None,
                     judged: false,
+                    scorer: None,
                 });
             }
         }
@@ -574,19 +581,7 @@ async fn llm_rescore(
         #[serde(default)]
         reason: String,
     }
-    let schema = serde_json::json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "index": {"type": "integer"},
-                "score": {"type": "integer", "minimum": 0, "maximum": 100},
-                "title": {"type": "string"},
-                "reason": {"type": "string"}
-            },
-            "required": ["index", "score", "title", "reason"]
-        }
-    });
+    let schema = short_scores_schema();
     let mut system = String::from(
         "You are a short-form video editor (YouTube Shorts, Reels, TikTok). Each \
         numbered candidate is a contiguous excerpt from a longer talking-head video. Score how \
@@ -623,7 +618,7 @@ async fn llm_rescore(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        let replies: Vec<Scored> = match crate::llm::ask_json_schema(
+        let (replies, served): (Vec<Scored>, _) = match crate::llm::ask_json_schema_served(
             inference,
             model,
             "short_scores",
@@ -635,12 +630,16 @@ async fn llm_rescore(
         .await
         {
             Ok(r) => r,
-            // One bad batch keeps its heuristic scores; the rest still count.
+            // An account problem stops the scan; anything else about this
+            // batch (a malformed or refused reply) keeps its heuristic scores
+            // and the rest still count.
+            Err(e) if e.is_fatal_model_error() => return Err(e),
             Err(_) => {
                 on_batch(batch_no + 1, batches);
                 continue;
             }
         };
+        let scorer = served.map(|s| scorer_name(&s));
         for r in replies {
             if !(batch_start..batch_end).contains(&r.index) {
                 continue;
@@ -653,6 +652,7 @@ async fn llm_rescore(
             if !r.reason.trim().is_empty() {
                 w.reason = Some(r.reason.trim().to_string());
             }
+            w.scorer = scorer.clone();
             w.judged = true;
             scored_any = true;
         }
@@ -662,6 +662,34 @@ async fn llm_rescore(
         return Err(CoreError::Inference("model scored no clip candidates".into()));
     }
     Ok(pool)
+}
+
+/// How a candidate names the model that scored it: "Claude Opus 5.5", or
+/// the local model's own name.
+fn scorer_name(s: &crate::adapters::inference::ServedBy) -> String {
+    if s.hosted {
+        crate::model::hosted_model_name(&s.model)
+    } else {
+        s.model.clone()
+    }
+}
+
+/// What the model returns for one batch: a score, title and reason per
+/// numbered candidate.
+pub(crate) fn short_scores_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "index": {"type": "integer"},
+                "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                "title": {"type": "string"},
+                "reason": {"type": "string"}
+            },
+            "required": ["index", "score", "title", "reason"]
+        }
+    })
 }
 
 fn heuristic_title(open: &str) -> String {
@@ -703,6 +731,7 @@ fn to_candidate(
         segment_ids: speech[w.first..=w.last].iter().map(|s| s.id).collect(),
         method: method.to_string(),
         theme: theme.map(str::to_string),
+        scorer: w.scorer.clone(),
     }
 }
 
@@ -859,6 +888,7 @@ mod tests {
             title: None,
             reason: None,
             judged: false,
+            scorer: None,
         };
         let picked = diversify(vec![w(0.0, 30.0, 60.0), w(2.0, 32.0, 70.0), w(40.0, 70.0, 50.0)], 5);
         assert_eq!(picked.len(), 2);
@@ -879,6 +909,7 @@ mod tests {
             title: None,
             reason: None,
             judged,
+            scorer: None,
         }
     }
 
@@ -976,7 +1007,7 @@ mod tests {
                     "title": format!("Title {i}"), "reason": "ok"
                 }))
                 .collect();
-            Ok(ChatResponse { message: ChatMessage::assistant(&serde_json::to_string(&replies).unwrap()) })
+            Ok(ChatResponse::new(ChatMessage::assistant(&serde_json::to_string(&replies).unwrap())))
         }
         async fn healthy(&self) -> bool {
             true

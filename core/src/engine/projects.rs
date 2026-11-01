@@ -200,6 +200,7 @@ impl Editor {
         let patch = patch
             .as_object()
             .ok_or_else(|| CoreError::InvalidArg("preferences must be an object".into()))?;
+        let _write = self.inner.prefs_write.lock().unwrap();
         let current = self.get_preferences()?;
         let serde_json::Value::Object(mut merged) = serde_json::to_value(&current)? else {
             return Err(CoreError::Other("preferences did not serialize to an object".into()));
@@ -217,6 +218,18 @@ impl Editor {
         }
         merge_into(&mut merged, patch);
         let next: Preferences = serde_json::from_value(serde_json::Value::Object(merged))?;
+        // The model switch, its model and the consent are the user's, set in
+        // the app (shell commands), never through this tool by any caller.
+        if next.model_mode != current.model_mode
+            || next.hosted_model != current.hosted_model
+            || next.hosted_consent_at != current.hosted_consent_at
+        {
+            return Err(CoreError::InvalidArg(
+                "model_mode, hosted_model and hosted_consent_at can only be changed in the app \
+                 (the LOCAL / HOSTED switch and Setup)"
+                    .into(),
+            ));
+        }
         if source != ActionSource::Ui
             && next.inference_endpoint != current.inference_endpoint
             && !is_loopback_url(&next.inference_endpoint)

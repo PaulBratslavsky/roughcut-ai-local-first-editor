@@ -3,6 +3,7 @@
 //! that shells out to the bundled binary, and a fixture-backed mock used in
 //! demo mode and tests.
 
+pub mod anthropic;
 pub mod capture;
 pub mod embed;
 pub mod face;

@@ -4,7 +4,16 @@
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { mockCallTool, mockOn, mockSwitch } from "./mockApi";
+import {
+  mockCallTool,
+  mockCheckHostedKey,
+  mockModelStatus,
+  mockOn,
+  mockSetHostedKey,
+  mockSetHostedModel,
+  mockSetModelMode,
+  mockSwitch,
+} from "./mockApi";
 import type { AppEventName, WhisperTier, SetupStatus } from "./types";
 
 export const isTauri: boolean =
@@ -20,21 +29,41 @@ export async function callTool<T = unknown>(
   return mockCallTool(name, args) as Promise<T>;
 }
 
-/** Subscribe to a core event. Returns an unsubscribe function. */
-export function onAppEvent<T>(event: AppEventName, handler: (payload: T) => void): () => void {
+/** Subscribe to a core event. Returns an unsubscribe function. `onReady`
+ *  runs once the listener is live (Tauri registers it asynchronously): read
+ *  initial state there, so no event can fall between the read and the
+ *  subscription. */
+export function onAppEvent<T>(
+  event: AppEventName,
+  handler: (payload: T) => void,
+  onReady?: () => void,
+): () => void {
   if (isTauri) {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
       if (cancelled) fn();
-      else unlisten = fn;
+      else {
+        unlisten = fn;
+        onReady?.();
+      }
     });
     return () => {
       cancelled = true;
       unlisten?.();
     };
   }
-  return mockOn(event, handler as (payload: unknown) => void);
+  const off = mockOn(event, handler as (payload: unknown) => void);
+  onReady?.();
+  return off;
+}
+
+/** Open one of the app's known sites (Anthropic Console, Ollama, DaVinci
+ *  Resolve) in the system browser: the desktop webview doesn't follow
+ *  target=_blank links. The shell allow-lists the sites. */
+export async function openExternal(url: string): Promise<void> {
+  if (isTauri) return invoke("open_external", { url });
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /** True when the backend is running on fixture adapters. In a plain browser
@@ -83,6 +112,44 @@ export async function getSetupStatus(): Promise<SetupStatus> {
     demo: true,
     demo_reason: "browser mock",
   };
+}
+
+// ---- The LOCAL / HOSTED switch ----
+// Shell commands, not registry tools (ADR-0004): only the user, in the app,
+// turns Hosted on or handles the key. Errors reject with
+// `{ error: { code, message } }` (codes include hosted_no_key,
+// hosted_not_consented, hosted_key_rejected, invalid_argument).
+import type { HostedKeyResult, KeyCheck, ModelMode, ModelStatus } from "./types";
+
+/** In memory: no network, no key-store read. */
+export async function getModelStatus(): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("model_status");
+  return mockModelStatus();
+}
+
+/** Hosted needs a stored key, and `consent: true` the first time. */
+export async function setModelMode(mode: ModelMode, consent: boolean): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("set_model_mode", { mode, consent });
+  return mockSetModelMode(mode, consent);
+}
+
+/** One of claude-opus-5-5 | claude-sonnet-5-5 | claude-haiku-5-5. */
+export async function setHostedModel(model: string): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("set_hosted_model", { model });
+  return mockSetHostedModel(model);
+}
+
+/** Save (checked first, no tokens spent) or forget (null; also switches to
+ *  Local) the Anthropic API key. */
+export async function setHostedKey(key: string | null): Promise<HostedKeyResult> {
+  if (isTauri) return invoke<HostedKeyResult>("set_hosted_key", { key });
+  return mockSetHostedKey(key);
+}
+
+/** Check the stored key against Anthropic again (Setup's "Test"). */
+export async function checkHostedKey(): Promise<KeyCheck> {
+  if (isTauri) return invoke<KeyCheck>("check_hosted_key");
+  return mockCheckHostedKey();
 }
 
 /** Download a whisper model; progress arrives via `progress` events with

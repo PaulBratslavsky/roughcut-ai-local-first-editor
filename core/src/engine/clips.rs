@@ -485,6 +485,7 @@ mod tests {
             segment_ids: vec![],
             method: "heuristic".into(),
             theme: None,
+            scorer: None,
         }
     }
 

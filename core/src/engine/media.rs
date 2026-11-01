@@ -109,7 +109,7 @@ impl Editor {
                                 CoreEvent::progress(ProgressTask::Transcribe,
                                     Some(project_id),
                                     1.0,
-                                    format!("polished {n} segment(s) with the local LLM"),
+                                    format!("polished {n} segment(s) with {}", editor.model_label()),
                                 ),
                             );
                         }

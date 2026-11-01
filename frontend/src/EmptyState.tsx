@@ -9,7 +9,10 @@ import { downloadWhisperModel, getSetupStatus, isTauri, onAppEvent } from "./ipc
 import { ingestFile } from "./ingest";
 import { setScreen } from "./state/viewStore";
 import { useProjects, useRestoreProject } from "./ipc/queries";
+import { useModelStatus } from "./state/modelStore";
+import { ModelChip } from "./panels/ModelChip";
 import type { WhisperTier, ProgressEvent, SetupStatus } from "./ipc/types";
+import { errText } from "./panels/clipUtil";
 
 /** The empty state is also where you land after trashing your LAST project —
  *  the trash must be reachable from here, not just the project switcher. */
@@ -63,19 +66,24 @@ function SetupCard({ status, onChanged }: { status: SetupStatus; onChanged: () =
       await downloadWhisperModel(tier);
       onChanged();
     } catch (err) {
-      setError(String((err as { message?: string })?.message ?? err));
+      setError(errText(err));
     } finally {
       setDownloading(null);
     }
   };
 
+  const hosted = useModelStatus()?.mode === "hosted";
   const needsModel = status.whisper_native && !status.whisper_model;
   const modelName = status.whisper_model?.split(/[\\/]/).pop();
 
   return (
     <div className="setup-card">
-      <h3>Set up local AI</h3>
-      <p className="setup-note">One-time setup. Everything runs on this machine.</p>
+      <h3>Set up AI</h3>
+      <p className="setup-note">
+        {hosted
+          ? "One-time setup. Video and transcription run on this machine; AI steps run on Claude (Hosted)."
+          : "One-time setup. Everything runs on this machine."}
+      </p>
       <div className="setup-row">
         <span className={`setup-dot${status.ffmpeg ? " ok" : ""}`} />
         <div className="setup-row-body">
@@ -164,7 +172,7 @@ export function EmptyState() {
       await ingestFile(name, filePath, { onPhase: setMessage });
       await queryClient.invalidateQueries();
     } catch (err) {
-      setError(String((err as { message?: string })?.message ?? err));
+      setError(errText(err));
       setPhase("idle");
     } finally {
       workingRef.current = false;
@@ -261,6 +269,7 @@ export function EmptyState() {
             </button>
           )}
           {error && <p className="empty-error">{error}</p>}
+          <ModelChip variant="line" />
           <TrashList />
         </>
       ) : (

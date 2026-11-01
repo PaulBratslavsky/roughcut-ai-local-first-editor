@@ -7,6 +7,7 @@ import { getResolveStatus, isTauri, onAppEvent, revealPath, sendToResolve } from
 import type { ProgressEvent } from "../ipc/types";
 import { useExport } from "../ipc/queries";
 import type { ExportTarget } from "../ipc/types";
+import { errText } from "./clipUtil";
 
 export const EXPORT_TARGETS: { target: ExportTarget; label: string; ext: string }[] = [
   { target: "premiere_xml", label: "Premiere XML", ext: "xml" },
@@ -90,7 +91,7 @@ export function ExportMenu({
           void revealPath(res.path);
         },
         onError: (err) =>
-          setStatus({ text: `Export failed: ${String((err as Error)?.message ?? err)}`, busy: false }),
+          setStatus({ text: `Export failed: ${errText(err)}`, busy: false }),
       },
     );
   };
@@ -114,7 +115,7 @@ export function ExportMenu({
         void revealPath(res.xml_path);
       }
     } catch (err) {
-      setStatus({ text: `Send failed: ${String((err as Error)?.message ?? err)}`, busy: false });
+      setStatus({ text: `Send failed: ${errText(err)}`, busy: false });
     }
   };
 

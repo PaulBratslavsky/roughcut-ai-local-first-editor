@@ -2483,3 +2483,63 @@ input, select { font: inherit; }
 .crop-guide.passive { pointer-events: none; }
 .crop-guide.passive .crop-window { cursor: default; }
 .crop-guide.passive .crop-label { top: 6px; }
+
+/* LOCAL / HOSTED model chip: a top-bar button. LOCAL is the plain outline;
+   HOSTED is inverted (ink), so the mode reads at a glance without a new
+   colour; a fallback to Local is dashed; a rejected key uses the error red. */
+.model-chip {
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+}
+.model-chip:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+.model-chip.hosted { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+.model-chip.hosted:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.model-chip.fallback { border-style: dashed; border-color: var(--text); color: var(--text); }
+.model-chip.error { border-color: var(--danger); color: var(--danger); }
+.model-chip.error:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); color: var(--bg); }
+
+/* The import screen's one-line equivalent ("AI: Local"). */
+.model-line {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+}
+.model-line:hover:not(:disabled) { color: var(--text); text-decoration-color: currentColor; }
+.model-line.hosted,
+.model-line.fallback { color: var(--text); }
+.model-line.error { color: var(--danger); }
+
+/* Setup's Models row: mode toggle, key field, model picker. Its details are
+   prose, not paths: wrap at words. */
+.models-row .setup-detail { word-break: normal; overflow-wrap: anywhere; }
+.models-mode { display: inline-flex; gap: 2px; margin: 8px 0 0 17px; border: 1px solid var(--border-soft); }
+.models-mode .tab { margin-right: 0; padding: 4px 12px; }
+.models-key { display: flex; align-items: center; gap: 6px; margin: 8px 0 0 17px; }
+.models-key .gguf-input { flex: 1; min-width: 0; }
+.models-key .tier-btn { margin-left: 0; }
+.models-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 0 17px; }
+.models-pick .setup-detail { margin: 0; }
+.models-select {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+}
+.models-console { margin-left: auto; font-size: 12px; color: var(--text-muted); text-decoration: underline; }
+.models-console:hover { color: var(--text); }
