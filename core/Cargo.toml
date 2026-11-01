@@ -26,6 +26,10 @@ base64.workspace = true
 # Off by default so core builds/tests stay light; the app crate turns it on.
 whisper-rs = { version = "0.16", optional = true }
 hound = { version = "3.5", optional = true }
+# The Hosted-mode API key lives in the OS's own secure store: Keychain on
+# macOS, Credential Manager on Windows, the kernel keyring on Linux (until
+# reboot). All three backends are pure Rust: no system libraries to install.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 # ts-bindings: generate the frontend's TypeScript types from these structs
 # (one source of truth for the model). Dev-time only.
 ts-rs = { version = "10", features = ["uuid-impl", "chrono-impl"], optional = true }

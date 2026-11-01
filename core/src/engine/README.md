@@ -23,6 +23,7 @@ share the `Inner` state defined in `mod.rs`.
 | `clips.rs`    | Saved clips, clip candidates, and the 9:16 face-centred crop                                            |
 | `semantic.rs` | Embedding index, semantic and hybrid search, and the duration-cut planner                               |
 | `confirm.rs`  | User approval of destructive ops that an external MCP client requests                                   |
+| `route.rs`    | The LOCAL / HOSTED switch: `RouteState` (key, chip status), the per-run `HostedRouter`, the app commands' Editor methods |
 
 This package depends on the following crate modules but does not own them:
 `core/src/error.rs` (`CoreError`, `Result`),
@@ -70,11 +71,11 @@ This package depends on the following crate modules but does not own them:
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `new(store, video, transcriber, sink, demo)`          | Empty state. Confirmations off. No embedder override.                                                                                                                  |
 | `bootstrap(sink) -> Result<Self>`                     | Opens `SqliteStore` at `SqliteStore::default_path()`, then calls `bootstrap_with_store`.                                                                               |
-| `bootstrap_with_store(store, sink) -> Result<Self>`   | Production wiring with `AutoVideoEngine` and `AutoTranscriber`. Confirmations follow `ROUGHCUT_NO_CONFIRM`. Runs `purge_trash(30)` at startup.                         |
-| `test_instance() -> Self`                             | In-memory SQLite with `inference_endpoint = http://127.0.0.1:9/v1`, `MockVideoEngine`, `MockTranscriber`, `NullSink`, and `demo = true`.                                 |
+| `bootstrap_with_store(store, sink) -> Result<Self>`   | Production wiring with `AutoVideoEngine` and `AutoTranscriber`. Confirmations follow `ROUGHCUT_NO_CONFIRM`. Runs `purge_trash(30)` and `secrets::remove_legacy_plaintext()` at startup.                         |
+| `test_instance() -> Self`                             | In-memory SQLite with `inference_endpoint = http://127.0.0.1:9/v1`, `MockVideoEngine`, `MockTranscriber`, `NullSink`, `demo = true`, and an in-memory key store (`MemoryStore`).                                 |
 | `demo_mode() -> bool`                                 | `inner.demo \|\| capabilities::probe().demo()`, re-evaluated on every call.                                                                                             |
 | `sink()`, `store()`, `video()`                        | Return the shared sink (cloned), the store, and the video engine.                                                                                                      |
-| `inference() -> Result<Box<dyn InferenceClient>>`     | Builds a new `OpenAiCompatClient` from `prefs.inference_endpoint` on each call.                                                                                         |
+| `inference() -> Result<Box<dyn InferenceClient>>`     | One run's client: Local mode, a new `OpenAiCompatClient` from `prefs.inference_endpoint`; Hosted mode, a `HostedRouter` (batch policy). `inference_conversation()` is the same with the conversation policy (chat, story edit). See `route.rs`. |
 | `embedder() -> Result<Arc<dyn Embedder>>`             | Returns the test override if one is set. Otherwise builds a new `OllamaEmbedder` from `prefs.inference_endpoint` and `prefs.embedding_model`.                          |
 | `set_embedder_for_tests(embedder)`                    | Installs the embedder override.                                                                                                                                        |
 | `with_project(id, f(&Project, Option<&Transcript>))`  | Read access. Loads the project on demand, then runs `f` with the state lock held.                                                                                      |
@@ -93,7 +94,7 @@ This package depends on the following crate modules but does not own them:
 | `get_timeline(id)`, `get_transcript(id)`                                 | Read accessors.                                                                                                    |
 | `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths. Builds a playable copy in the background when one is missing.                  |
 | `get_preferences()`, `set_preferences(prefs)`                            | Full load and full replace. `set_preferences` does no validation.                                                  |
-| `update_preferences(patch: &serde_json::Value, source: ActionSource)`    | Partial JSON merge with an unknown-key check and a loopback guard.                                                 |
+| `update_preferences(patch: &serde_json::Value, source: ActionSource)`    | Partial JSON merge with an unknown-key check, a loopback guard, and a guard on the model-switch fields.            |
 | `set_layout(id, Layout)`, `set_audio_offset(id, offset_s)`               | Project metadata: persisted, not journaled.                                                                        |
 
 ### Media and transcription (`media.rs`)
@@ -152,6 +153,19 @@ This package depends on the following crate modules but does not own them:
 | `async request_confirmation(summary) -> bool`        | Asks the UI to approve a destructive op (export, delete) that an external MCP client requested.     |
 | `resolve_confirmation(id, approved)`                 | The answer path, called from a Tauri command.                                                       |
 | `require_confirmations_for_tests(on)`                | Turns the confirmation requirement on or off.                                                       |
+
+### The model switch (`route.rs`)
+
+| Method | Notes |
+| --- | --- |
+| `inference()`, `inference_conversation()` | One run's client (batch / conversation policy). Local mode: the local client. Hosted mode: a `HostedRouter`. |
+| `model_label() -> String` | "Claude Opus 5.5", or "the on-device model" in Local mode or after a Hosted fallback. |
+| `model_status() -> Result<ModelStatus>` | The chip's state; no network, the key store read only once. |
+| `set_model_mode(mode, consent)` | Hosted needs a stored key and, the first time, `consent: true` (stores `hosted_consent_at`). Sends `model-route`. |
+| `set_hosted_model(model)` | One of `HOSTED_MODELS`. |
+| `async set_hosted_key(Option<&str>) -> HostedKeyResult` | `Some`: printable ASCII, checked with `GET /v1/models/{model}`; saved if it works or Anthropic is unreachable. `None`: deletes it and switches to Local. |
+| `async check_hosted_key() -> KeyCheck` | Setup's Test. |
+| `set_inference_for_tests(local, hosted)`, `set_secret_store_for_tests(store)`, `set_hosted_key_for_tests(key)` | Test seams: fake clients, an in-memory key store, a key stored without a network check. |
 
 ### Subdirectories
 
@@ -311,6 +325,26 @@ This package depends on the following crate modules but does not own them:
   `is_loopback_url`. That check accepts `localhost`, `*.localhost`,
   `127.0.0.0/8`, and `::1`; unparseable URLs and `0.0.0.0` fail it.
   `set_preferences` bypasses both preference checks.
+- Model-switch guard: `update_preferences` rejects a change to `model_mode`,
+  `hosted_model` or `hosted_consent_at` from every source (only the
+  `route.rs` methods behind the app's shell commands change them). Every
+  preferences load-modify-save holds `Inner::prefs_write`.
+
+### The model switch (`route.rs`)
+
+- In Hosted mode each run gets its own `HostedRouter`. It re-reads the mode
+  before every request (a switch to Local takes effect at once), sends the
+  hosted model to Anthropic and the local model's name to the local server,
+  and never goes from the local model back to Claude within a run. Only
+  "unreachable" falls back; a conversation run that already used Claude
+  stops instead, and stays stopped. No key, no consent, a rejected key or
+  request is returned as `CoreError::Hosted`.
+- `healthy()` is always true in Hosted mode, so key and consent problems come
+  back from `chat` as errors instead of quietly selecting rule-based paths.
+- The key is read from the `SecretStore` once and cached in `RouteState`
+  (a failed read is cached too, until the key is set or forgotten); one
+  `AnthropicClient` is kept per key.
+- `RouteState` sends `model-route` only when the chip's text would change.
 - `media_assets` builds a playable copy only when `playback_path` is `None`,
   demo mode is off, and a tokio runtime is present.
 
@@ -377,6 +411,14 @@ This package depends on the following crate modules but does not own them:
   - `load_embeddings` / `save_embeddings`.
   - `list_projects` / `delete_project`: the trash purge.
   - `bootstrap` opens or creates the SQLite DB at `SqliteStore::default_path()`.
+- **OS key store** (`route.rs` through `SecretStore`): reads, writes and
+  deletes the Hosted API key; `bootstrap_with_store` deletes plaintext keys
+  left under `<data dir>/secrets/` by the removed frontier path.
+- **Network** (`route.rs`): in Hosted mode, AI requests to
+  `api.anthropic.com`; in either mode, one `GET /v1/models/{model}` when the
+  user saves or tests a key.
+- **Events**: `model-route` from `set_model_mode`, `set_hosted_key(None)` and
+  the routers.
 - **Events (`events::send`):**
   - `TimelineChanged`: edits, undo/redo, suggestion removal
     (`accept_suggestion`, `accept_all_suggestions`, `dismiss_suggestion`),

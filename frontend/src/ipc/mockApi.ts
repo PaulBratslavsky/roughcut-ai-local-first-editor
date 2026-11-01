@@ -15,6 +15,11 @@ import type {
   ClipCandidate,
   ClipExportResult,
   ClipFormat,
+  HostedKeyResult,
+  KeyCheck,
+  ModelMode,
+  ModelStatus,
+  RouteReason,
   SavedClip,
   SavedClipSummary,
   SourceRange,
@@ -61,15 +66,240 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               (bulk-shorts CUJ 6); setup reports inference unreachable.
 //   failexport  export_clips fails every second clip, so the batch's
 //               "one failure doesn't stop the rest" path shows.
+//   nohosted    Anthropic is unreachable: a key check can't verify (Save
+//               keeps the key, "saved; couldn't verify while offline"), and
+//               Hosted requests fail — except a multi-request run's first
+//               one, as if the Wi-Fi dropped mid-run: a scan or clean-up
+//               finishes on the local model (mixed scorers, chip HOSTED →
+//               LOCAL (offline), hosted CUJ 3), while a chat or story edit
+//               stops rather than switch models half-way. One-request steps
+//               (outline, flow review, chapters, titles) run locally.
+//   badkey      Anthropic rejects the key: Save / Test report it, and Hosted
+//               runs stop with hosted_key_rejected (hosted CUJ 4). Read on
+//               every call, so localStorage.setItem("rc-mock-badkey", "1")
+//               revokes the key of an already-Hosted session without reload.
 // ---------------------------------------------------------------------------
 
-export function mockSwitch(name: "nomodel" | "failexport"): boolean {
+export function mockSwitch(name: "nomodel" | "failexport" | "nohosted" | "badkey"): boolean {
   try {
     if (new URLSearchParams(window.location.search).has(name)) return true;
     return localStorage.getItem(`rc-mock-${name}`) === "1";
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The LOCAL / HOSTED switch. In the app these are Tauri shell commands, not
+// registry tools (ADR-0004; ipc/api.ts calls them); this mirrors
+// core/src/engine/route.rs. The key lives in memory; Hosted works unless
+// the nohosted / badkey switches say otherwise.
+// ---------------------------------------------------------------------------
+
+const HOSTED_MODELS: [id: string, name: string][] = [
+  ["claude-opus-5-5", "Claude Opus 5.5"],
+  ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+  ["claude-haiku-5-5", "Claude Haiku 5.5"],
+];
+const hostedName = (id: string) => HOSTED_MODELS.find(([m]) => m === id)?.[1] ?? id;
+const KEY_REJECTED = "Anthropic rejected the API key (401). Update it in Setup.";
+
+const route = {
+  key: null as string | null,
+  effective: null as ModelMode | null,
+  reason: null as RouteReason | null,
+  lastOkAt: null as string | null,
+  lastError: null as string | null,
+  /** What the chip was last told, so model-route fires on a change only. */
+  sent: null as string | null,
+};
+
+/** Shell commands reject with `{ error: { code, message } }`. */
+const commandError = (code: string, message: string) => ({ error: { code, message } });
+
+export function mockModelStatus(): ModelStatus {
+  const p = state.preferences;
+  const local = p.model_mode === "local";
+  return {
+    mode: p.model_mode,
+    hosted_model: p.hosted_model,
+    hosted_model_name: hostedName(p.hosted_model),
+    key_present: route.key !== null,
+    consented: p.hosted_consent_at !== null,
+    effective: local ? "local" : (route.effective ?? p.model_mode),
+    reason: local ? null : route.reason,
+    last_ok_at: route.lastOkAt,
+    last_error: route.lastError,
+  };
+}
+
+function sendRoute(mode: ModelMode, effective: ModelMode, reason: RouteReason | null): void {
+  route.sent = `${effective}/${reason}`;
+  emit("model-route", reason ? { mode, effective, reason } : { mode, effective });
+}
+
+/** After a Hosted run's request: where it ran, and tell the chip on a change. */
+function recordRoute(effective: ModelMode, reason: RouteReason | null, opts: { ok?: boolean; error?: string } = {}): void {
+  route.effective = effective;
+  route.reason = reason;
+  if (opts.ok) {
+    route.lastOkAt = new Date().toISOString();
+    route.lastError = null;
+  }
+  if (opts.error) route.lastError = opts.error;
+  if (route.sent !== `${effective}/${reason}`) sendRoute(state.preferences.model_mode, effective, reason);
+}
+
+/** A Hosted request with a revoked key: the run stops, nothing changes. */
+function hostedKeyRejected(): never {
+  recordRoute("hosted", "key_rejected", { error: KEY_REJECTED });
+  throw { code: "hosted_key_rejected", message: KEY_REJECTED };
+}
+
+/** One AI run's route, after the core's HostedRouter. Local mode: the local
+ *  model. Hosted: Claude, until Anthropic is unreachable (a batch run pins
+ *  Local and goes on; a conversation that already had a Claude step stops)
+ *  or the user switches to Local mid-run (same rule). A revoked key stops
+ *  any run. `next()` before each AI request says where it runs — null when
+ *  no model is reachable (the caller keeps its rule-based result). */
+class MockRun {
+  private pin: "hosted" | "local" | null = null;
+  private requests = 0;
+  constructor(
+    private readonly policy: "batch" | "conversation",
+    /** More than one request: under `nohosted` the first still gets through. */
+    private readonly multi: boolean,
+  ) {}
+
+  private stop(why: string): never {
+    throw { code: "unavailable", message: `unavailable: ${why}; stopped so this run doesn't switch models half-way` };
+  }
+
+  private local(): "local" | null {
+    this.pin = "local";
+    return mockSwitch("nomodel") ? null : "local";
+  }
+
+  next(): "hosted" | "local" | null {
+    const n = ++this.requests;
+    if (state.preferences.model_mode === "local") {
+      if (this.pin === "hosted" && this.policy === "conversation") this.stop("switched to Local");
+      return this.local();
+    }
+    if (this.pin === "local") return this.local();
+    if (mockSwitch("badkey")) hostedKeyRejected();
+    if (mockSwitch("nohosted") && !(this.multi && n === 1)) {
+      recordRoute("local", "offline", { error: "mock: Anthropic unreachable" });
+      if (this.pin === "hosted" && this.policy === "conversation") {
+        this.stop("Anthropic stopped answering (mock: no network)");
+      }
+      return this.local();
+    }
+    this.pin = "hosted";
+    recordRoute("hosted", null, { ok: true });
+    return "hosted";
+  }
+}
+
+/** The transcript clean-up that follows every transcription (in the
+ *  background, two chunks here). A Hosted failure is recorded for Setup and
+ *  the chip (last_error, "key rejected"); the transcript stays as it is. */
+async function mockCleanup(): Promise<void> {
+  const run = new MockRun("batch", true);
+  try {
+    for (let chunk = 0; chunk < 2; chunk++) {
+      await sleep(250);
+      run.next();
+    }
+  } catch {
+    /* recorded by the route: last_error, and the chip for a rejected key */
+  }
+}
+
+export async function mockSetModelMode(mode: ModelMode, consent: boolean): Promise<ModelStatus> {
+  await sleep(40);
+  const p = state.preferences;
+  if (mode !== "local" && mode !== "hosted") throw commandError("invalid_argument", `invalid argument: unknown mode ${String(mode)}`);
+  if (mode === "hosted") {
+    if (route.key === null) throw commandError("hosted_no_key", "add an Anthropic API key in Setup first");
+    if (p.hosted_consent_at === null) {
+      if (!consent) throw commandError("hosted_not_consented", "confirm what Hosted mode sends before turning it on");
+      p.hosted_consent_at = new Date().toISOString();
+    }
+  }
+  p.model_mode = mode;
+  route.effective = null;
+  route.reason = null;
+  sendRoute(mode, mode, null);
+  return mockModelStatus();
+}
+
+export async function mockSetHostedModel(model: string): Promise<ModelStatus> {
+  await sleep(40);
+  if (!HOSTED_MODELS.some(([m]) => m === model)) {
+    throw commandError(
+      "invalid_argument",
+      `invalid argument: unknown hosted model ${model}; one of ${HOSTED_MODELS.map(([m]) => m).join(", ")}`,
+    );
+  }
+  state.preferences.hosted_model = model;
+  return mockModelStatus();
+}
+
+const MOCK_LATENCY_MS = 120 as unknown as bigint; // ts-rs types u64 as bigint; JSON carries a number
+
+export async function mockSetHostedKey(key: string | null): Promise<HostedKeyResult> {
+  await sleep(40);
+  const p = state.preferences;
+  if (key === null) {
+    route.key = null;
+    if (p.model_mode === "hosted") {
+      p.model_mode = "local";
+      sendRoute("local", "local", null);
+    }
+    return { status: mockModelStatus(), check: null, saved: false };
+  }
+  const k = key.trim();
+  if (!k) throw commandError("invalid_argument", "invalid argument: the API key is empty");
+  await sleep(160);
+  let check: KeyCheck;
+  let save: boolean;
+  if (mockSwitch("badkey")) {
+    check = { ok: false, latency_ms: null, error: KEY_REJECTED };
+    save = false;
+  } else if (mockSwitch("nohosted")) {
+    check = { ok: false, latency_ms: null, error: "saved; couldn't verify while offline (mock: Anthropic unreachable)" };
+    save = true;
+  } else {
+    check = { ok: true, latency_ms: MOCK_LATENCY_MS, error: null };
+    save = true;
+  }
+  if (save) {
+    route.key = k;
+    if (check.ok) {
+      route.lastOkAt = new Date().toISOString();
+      route.lastError = null;
+      if (route.reason === "key_rejected" || route.reason === "no_key") route.reason = null;
+    }
+  }
+  return { status: mockModelStatus(), check, saved: save };
+}
+
+export async function mockCheckHostedKey(): Promise<KeyCheck> {
+  await sleep(160);
+  if (route.key === null) return { ok: false, latency_ms: null, error: "no API key is stored" };
+  if (mockSwitch("badkey")) {
+    route.lastError = KEY_REJECTED;
+    return { ok: false, latency_ms: null, error: KEY_REJECTED };
+  }
+  if (mockSwitch("nohosted")) {
+    const e = "unavailable: Anthropic is unreachable (mock: no network)";
+    route.lastError = e;
+    return { ok: false, latency_ms: null, error: e };
+  }
+  route.lastOkAt = new Date().toISOString();
+  route.lastError = null;
+  return { ok: true, latency_ms: MOCK_LATENCY_MS, error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +515,9 @@ const state: MockState = {
     inference_endpoint: "http://localhost:11434",
     inference_model: "gemma-4 (mock)",
     embedding_model: "nomic-embed-text",
+    model_mode: "local",
+    hosted_model: "claude-opus-5-5",
+    hosted_consent_at: null,
   },
 };
 
@@ -561,8 +794,10 @@ const MOCK_BEATS = 6;
  *  best before any beat's second) and leaves out moments already saved as
  *  clips — before pooling and again when writing; a plain run never does. */
 async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unknown> {
-  const model = !mockSwitch("nomodel");
-  const method = model ? "llm" : "heuristic";
+  const localUp = !mockSwitch("nomodel");
+  // healthy(): in Hosted mode a key is enough (a missing or bad one must fail
+  // visibly, not fall back to rules); in Local mode the local server.
+  const model = state.preferences.model_mode === "hosted" || localUp;
   const scan = args.scan === true;
   const rawCount = Number(args.count ?? 8);
   const count = Math.min(60, Math.max(1, Number.isFinite(rawCount) ? Math.round(rawCount) : 8));
@@ -585,7 +820,7 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
   const firstWord = (s: string) => s.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z']/g, "") ?? "";
   type W = {
     first: number; last: number; start: number; end: number; duration: number;
-    rule: number; score: number; judged: boolean; beat: number;
+    rule: number; score: number; judged: boolean; beat: number; scorer: string | null;
   };
   const total = Math.max(1, p.timeline.duration);
   let windows: W[] = [];
@@ -603,7 +838,7 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
       if (/[.!?]$/.test(speech[j].text.trim())) rule += 8;
       rule += 10 - Math.min(10, Math.abs(duration - 35) / 3);
       const beat = Math.min(MOCK_BEATS - 1, Math.floor((start / total) * MOCK_BEATS));
-      windows.push({ first: i, last: j, start, end, duration, rule, score: rule, judged: false, beat });
+      windows.push({ first: i, last: j, start, end, duration, rule, score: rule, judged: false, beat, scorer: null });
     }
   }
 
@@ -614,7 +849,7 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
       p.clip_candidates = [];
       progress("find_clips", p.id, 1, "every moment that fits is already saved as a clip");
       emit("clips-changed", { project_id: p.id });
-      return { candidates: [], method, theme: theme || null };
+      return { candidates: [], method: model ? "llm" : "heuristic", theme: theme || null };
     }
   }
   if (windows.length === 0) {
@@ -677,21 +912,36 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
     }
   }
 
+  // Scored in batches, one route per batch like the core's HostedRouter: a
+  // Hosted run pins Local once Anthropic is unreachable or the user switches
+  // to Local, and never goes back within the run; a rejected key stops it.
+  const localName = state.preferences.inference_model;
   if (model) {
     const batches = Math.max(1, Math.ceil(pool.length / MOCK_BATCH));
+    const run = new MockRun("batch", batches > 1);
     for (let b = 1; b <= batches; b++) {
+      const by = run.next();
+      const label = by === "hosted" ? hostedName(state.preferences.hosted_model) : "the on-device model";
       await sleep((scan ? 2400 : 500) / batches);
-      progress("find_clips", p.id, 0.3 + (0.65 * b) / batches, `scoring candidates on-device — ${b}/${batches}`);
-    }
-    for (const w of pool) {
-      const r = mulberry32(w.first * 7919 + w.last * 104729 + 17)();
-      const judge = Math.min(98, Math.max(5, w.rule + (r - 0.5) * 80));
-      w.score = 0.8 * judge + 0.2 * w.rule;
-      w.judged = true;
+      progress(
+        "find_clips",
+        p.id,
+        0.3 + (0.65 * b) / batches,
+        by ? `scoring candidates with ${label} — ${b}/${batches}` : `keeping rule scores — ${b}/${batches}`,
+      );
+      if (!by) continue;
+      for (const w of pool.slice((b - 1) * MOCK_BATCH, b * MOCK_BATCH)) {
+        const r = mulberry32(w.first * 7919 + w.last * 104729 + 17)();
+        const judge = Math.min(98, Math.max(5, w.rule + (r - 0.5) * 80));
+        w.score = 0.8 * judge + 0.2 * w.rule;
+        w.judged = true;
+        w.scorer = by === "hosted" ? hostedName(state.preferences.hosted_model) : localName;
+      }
     }
   } else {
     await sleep(scan ? 900 : 300);
   }
+  const method = pool.some((w) => w.judged) ? "llm" : "heuristic";
 
   // min_score drops what the model judged below it; unjudged windows stay.
   let picked = diversify(
@@ -717,11 +967,12 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
       duration: w.duration,
       title: hook.split(/\s+/).slice(0, 8).join(" ").replace(/[,.;:]$/, ""),
       hook,
-      reason: model ? `${reasons[0]!.toUpperCase()}${reasons.slice(1)} (mock model)` : `Rule-based: ${reasons} (no model)`,
+      reason: w.judged ? `${reasons[0]!.toUpperCase()}${reasons.slice(1)} (mock model)` : `Rule-based: ${reasons}`,
       score: Math.round(Math.min(100, Math.max(0, w.score)) * 10) / 10,
       segment_ids: speech.slice(w.first, w.last + 1).map((s) => s.id),
       method,
       theme: theme || null,
+      scorer: w.scorer,
     };
   });
   progress("find_clips", p.id, 1, `found ${p.clip_candidates.length} clip candidates`);
@@ -898,7 +1149,20 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   set_preferences(args): Preferences {
     const incoming = (args.preferences ?? {}) as Partial<Preferences>;
-    state.preferences = { ...state.preferences, ...clone(incoming) };
+    const next = { ...state.preferences, ...clone(incoming) };
+    // The model switch is the user's, in the app (shell commands) — never here.
+    if (
+      next.model_mode !== state.preferences.model_mode ||
+      next.hosted_model !== state.preferences.hosted_model ||
+      next.hosted_consent_at !== state.preferences.hosted_consent_at
+    ) {
+      throw {
+        code: "invalid_argument",
+        message:
+          "invalid argument: model_mode, hosted_model and hosted_consent_at can only be changed in the app (the LOCAL / HOSTED switch and Setup)",
+      };
+    }
+    state.preferences = next;
     return clone(state.preferences);
   },
 
@@ -1060,6 +1324,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     p.updated_at = new Date().toISOString();
     emit("transcript-changed", { project_id: p.id });
     emit("timeline-changed", { project_id: p.id });
+    void mockCleanup();
     return clone(state.transcript);
   },
 
@@ -1370,6 +1635,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   outline_transcript(args): unknown {
     requireProject(args.project_id);
+    const by = new MockRun("batch", false).next(); // one chunk of 120 sentences
     const speech = (state.transcript?.segments ?? []).filter((s) => !s.is_silence && s.text);
     const third = Math.max(1, Math.floor(speech.length / 3));
     const beat = (segs: TranscriptSegment[], title: string, role: string) => ({
@@ -1382,7 +1648,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       end: segs[segs.length - 1]?.end ?? 0,
     });
     return {
-      method: "heuristic",
+      method: by ? "llm" : "heuristic",
       beats: [
         beat(speech.slice(0, third), "Opening", "hook"),
         beat(speech.slice(third, third * 2), "Middle", "point"),
@@ -1393,11 +1659,18 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   review_flow(args): unknown {
     requireProject(args.project_id);
-    return { coherent: true, boundaries_checked: 0, issues: [], method: "deterministic" };
+    const by = args.llm === true ? new MockRun("batch", false).next() : null;
+    return { coherent: true, boundaries_checked: 0, issues: [], method: by ? "llm" : "deterministic" };
   },
 
   async story_edit(args): Promise<unknown> {
     const p = requireProject(args.project_id);
+    // A conversation: outline, plan, flow review — one model throughout.
+    const run = new MockRun("conversation", true);
+    for (let request = 0; request < 3; request++) {
+      run.next(); // outline, plan, flow review
+      await sleep(250);
+    }
     const before = p.timeline.clips
       .filter((c) => c.included)
       .reduce((acc, c) => acc + (c.source_out - c.source_in), 0);
@@ -1434,6 +1707,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   async apply_instruction(args) {
     const p = requireProject(args.project_id);
+    // A conversation: each model step goes through one route. A rejected key
+    // stops before any edit (never the offline keyword cuts); losing
+    // Anthropic, or a switch to Local, after a Claude step stops the run —
+    // with its partial result when edits already landed.
+    const run = new MockRun("conversation", true);
     const instruction = String(args.instruction ?? "");
     const lower = instruction.toLowerCase();
     let step = 0;
@@ -1447,59 +1725,73 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
     const actions: EditAction[] = [];
     let summary: string;
+    try {
+      const restore = lower.includes("restore") || lower.includes("bring back") || lower.includes("undo");
 
-    const restore = lower.includes("restore") || lower.includes("bring back") || lower.includes("undo");
-
-    if (restore) {
-      say({ kind: "tool_call", tool: "undo", args: { project_id: p.id } });
-      await sleep(350);
-      const res = tools.undo!({ project_id: p.id }) as { action: EditAction | null };
-      say({ kind: "tool_result", tool: "undo", result: { action: res.action?.description ?? null } });
-      if (res.action) actions.push(res.action);
-      summary = res.action ? `Reverted: ${res.action.description}.` : "Nothing to revert.";
-    } else if (lower.includes("silence")) {
-      say({ kind: "tool_call", tool: "detect_silences", args: { project_id: p.id } });
-      await sleep(400);
-      const det = tools.detect_silences!({ project_id: p.id }) as { segments: { start: number; end: number }[] };
-      say({ kind: "tool_result", tool: "detect_silences", result: { count: det.segments.length } });
-      const ids = state.transcript?.segments.filter((s) => s.is_silence).map((s) => s.id) ?? [];
-      say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: ids } });
-      await sleep(400);
-      const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: ids }) as { action: EditAction };
-      say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
-      actions.push(res.action);
-      summary = `Cut ${ids.length} silence gap(s) from the timeline.`;
-    } else if (lower.includes("filler") || lower.includes("um") || lower.includes("uh")) {
-      say({ kind: "tool_call", tool: "detect_fillers", args: { project_id: p.id } });
-      await sleep(400);
-      const det = tools.detect_fillers!({ project_id: p.id }) as { segment_ids: string[] };
-      say({ kind: "tool_result", tool: "detect_fillers", result: { segment_ids: det.segment_ids } });
-      say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: det.segment_ids } });
-      await sleep(400);
-      const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: det.segment_ids }) as { action: EditAction };
-      say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
-      actions.push(res.action);
-      summary = `Removed ${det.segment_ids.length} filler segment(s).`;
-    } else {
-      // Generic path: try to find matching segments and cut them.
-      const keyword = lower.replace(/(cut|remove|delete|the|all|parts?|about|where i say)/g, " ").trim().split(/\s+/)[0] ?? "";
-      say({ kind: "tool_call", tool: "find_segments", args: { project_id: p.id, query: keyword } });
-      await sleep(450);
-      const found = tools.find_segments!({ project_id: p.id, query: keyword }) as { segments: TranscriptSegment[] };
-      say({ kind: "tool_result", tool: "find_segments", result: { count: found.segments.length, query: keyword } });
-      if (found.segments.length > 0 && keyword.length > 1) {
-        const ids = found.segments.slice(0, 5).map((s) => s.id);
+      if (restore) {
+        run.next();
+        say({ kind: "tool_call", tool: "undo", args: { project_id: p.id } });
+        await sleep(350);
+        const res = tools.undo!({ project_id: p.id }) as { action: EditAction | null };
+        say({ kind: "tool_result", tool: "undo", result: { action: res.action?.description ?? null } });
+        if (res.action) actions.push(res.action);
+        summary = res.action ? `Reverted: ${res.action.description}.` : "Nothing to revert.";
+      } else if (lower.includes("silence")) {
+        run.next();
+        say({ kind: "tool_call", tool: "detect_silences", args: { project_id: p.id } });
+        await sleep(400);
+        const det = tools.detect_silences!({ project_id: p.id }) as { segments: { start: number; end: number }[] };
+        say({ kind: "tool_result", tool: "detect_silences", result: { count: det.segments.length } });
+        const ids = state.transcript?.segments.filter((s) => s.is_silence).map((s) => s.id) ?? [];
+        run.next();
         say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: ids } });
         await sleep(400);
         const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: ids }) as { action: EditAction };
         say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
         actions.push(res.action);
-        summary = `Found ${found.segments.length} segment(s) mentioning “${keyword}” and cut ${ids.length}.`;
+        summary = `Cut ${ids.length} silence gap(s) from the timeline.`;
+      } else if (lower.includes("filler") || lower.includes("um") || lower.includes("uh")) {
+        run.next();
+        say({ kind: "tool_call", tool: "detect_fillers", args: { project_id: p.id } });
+        await sleep(400);
+        const det = tools.detect_fillers!({ project_id: p.id }) as { segment_ids: string[] };
+        say({ kind: "tool_result", tool: "detect_fillers", result: { segment_ids: det.segment_ids } });
+        run.next();
+        say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: det.segment_ids } });
+        await sleep(400);
+        const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: det.segment_ids }) as { action: EditAction };
+        say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
+        actions.push(res.action);
+        summary = `Removed ${det.segment_ids.length} filler segment(s).`;
       } else {
-        summary = "I could not map that instruction to an edit. Try “remove the filler words” or “cut the silences”.";
+        // Generic path: try to find matching segments and cut them.
+        const keyword = lower.replace(/(cut|remove|delete|the|all|parts?|about|where i say)/g, " ").trim().split(/\s+/)[0] ?? "";
+        run.next();
+        say({ kind: "tool_call", tool: "find_segments", args: { project_id: p.id, query: keyword } });
+        await sleep(450);
+        const found = tools.find_segments!({ project_id: p.id, query: keyword }) as { segments: TranscriptSegment[] };
+        say({ kind: "tool_result", tool: "find_segments", result: { count: found.segments.length, query: keyword } });
+        if (found.segments.length > 0 && keyword.length > 1) {
+          const ids = found.segments.slice(0, 5).map((s) => s.id);
+          run.next();
+          say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: ids } });
+          await sleep(400);
+          const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: ids }) as { action: EditAction };
+          say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
+          actions.push(res.action);
+          summary = `Found ${found.segments.length} segment(s) mentioning “${keyword}” and cut ${ids.length}.`;
+        } else {
+          summary = "I could not map that instruction to an edit. Try “remove the filler words” or “cut the silences”.";
+        }
       }
-    }
 
+      await sleep(300);
+      run.next(); // the final reply
+    } catch (e) {
+      // Edits that already landed are reported, never hidden behind an error.
+      if (actions.length === 0) throw e;
+      summary = `The model connection failed after ${actions.length} change(s) were applied — review the timeline or undo. (${(e as { message?: string }).message ?? String(e)})`;
+    }
     say({ kind: "final", text: summary });
     return { actions, summary };
   },
@@ -1508,6 +1800,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   generate_chapters(args) {
     requireProject(args.project_id);
+    new MockRun("batch", false).next();
     return {
       chapters: [
         { title: "Why I quit", start: 0 },
@@ -1521,6 +1814,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   generate_title_description(args) {
     requireProject(args.project_id);
+    new MockRun("batch", false).next();
     return {
       titles: ["Why I Finally Quit My Job", "I Quit — Here's the Data", "Quit With Data, Not Rage"],
       description: "The honest story of leaving a senior engineering job, with the numbers behind the decision.",
@@ -1762,21 +2056,28 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     await emitProgress("export", p.id, ["Resolving timeline…", "Writing file…"], 700);
     return { path: String(args.out_path ?? "~/Downloads/export.xml") };
   },
-
-  // ---- MCP client (opt-in) -------------------------------------------------------
-
-  connect_external() {
-    throw { code: "unsupported", message: "External connections are not available in mock mode" };
-  },
-
-  escalate_to_frontier() {
-    throw { code: "unsupported", message: "Frontier escalation is not available in mock mode" };
-  },
 };
+
+/** Tool errors reject as Tauri's `call_tool` does: `{ error: { code, message } }`.
+ *  Throw sites stay simple (`throw { code, message }`); this wraps them once. */
+function toolError(e: unknown): { error: { code: string; message: string } } {
+  const o = e as { code?: unknown; message?: unknown; error?: unknown } | null;
+  if (o && typeof o === "object" && o.error && typeof o.error === "object") {
+    return o as { error: { code: string; message: string } };
+  }
+  if (o && typeof o === "object" && typeof o.code === "string") {
+    return { error: { code: o.code, message: String(o.message ?? "") } };
+  }
+  return { error: { code: "internal", message: String((o as { message?: unknown } | null)?.message ?? e) } };
+}
 
 export async function mockCallTool(name: string, args: Args): Promise<unknown> {
   await sleep(30 + Math.random() * 50);
   const tool = tools[name];
-  if (!tool) throw { code: "unknown_tool", message: `Unknown tool: ${name}` };
-  return tool(args);
+  if (!tool) throw toolError({ code: "unknown_tool", message: `Unknown tool: ${name}` });
+  try {
+    return await tool(args);
+  } catch (e) {
+    throw toolError(e);
+  }
 }

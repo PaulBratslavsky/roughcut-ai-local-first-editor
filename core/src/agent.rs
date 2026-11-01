@@ -186,7 +186,9 @@ pub async fn run_instruction(
     history: &[HistoryTurn],
     source: ActionSource,
 ) -> Result<InstructionOutcome> {
-    let inference = editor.inference()?;
+    // A conversation: once a step ran on Claude, the run never switches to
+    // the local model half-way (see engine::route).
+    let inference = editor.inference_conversation()?;
     if !inference.healthy().await {
         // Graceful degradation: no local model server. Try the deterministic path.
         return run_instruction_offline(editor, project_id, instruction, source).await;
@@ -219,7 +221,8 @@ pub async fn run_instruction_with(
         "thinking",
         format!(
             "loaded the transcript — {seg_count} segments across {dur_min:.0} min; \
-             handing it to the local model"
+             handing it to {}",
+            editor.model_label()
         ),
     );
     let caller = tools::Caller::Agent { attribute_to: source };
@@ -274,10 +277,9 @@ pub async fn run_instruction_with(
             step,
             "thinking",
             if step == 0 {
-                "waiting on the local model — first pass over a long transcript is the slow part"
-                    .to_string()
+                format!("waiting on {} — first pass over a long transcript is the slow part", editor.model_label())
             } else {
-                format!("waiting on the local model (step {}/{MAX_STEPS})", step + 1)
+                format!("waiting on {} (step {}/{MAX_STEPS})", editor.model_label(), step + 1)
             },
         );
         let response = match inference
@@ -293,7 +295,9 @@ pub async fn run_instruction_with(
             Ok(r) => r,
             // Server up but model missing/broken before anything happened:
             // degrade to the deterministic offline editor instead of failing.
-            Err(e) if step == 0 => {
+            // Never for a Hosted error (no key, rejected key or request): the
+            // offline editor would cut the video under a wrong explanation.
+            Err(e) if step == 0 && !matches!(e, CoreError::Hosted { .. }) => {
                 step_text(editor, project_id, 0, "thinking", format!("{e} — falling back to offline editing"));
                 return run_instruction_offline(editor, project_id, instruction, source).await;
             }
@@ -766,7 +770,7 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
             .map(|(i, (_, t))| format!("{i}: {t}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let Ok(map) = crate::llm::ask_json_with::<std::collections::HashMap<String, String>>(
+        let map = match crate::llm::ask_json_with::<std::collections::HashMap<String, String>>(
             inference.as_ref(),
             &prefs.inference_model,
             "transcript cleanup",
@@ -784,8 +788,12 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
             0.0,
         )
         .await
-        else {
-            continue;
+        {
+            Ok(map) => map,
+            // A Hosted account problem ends the pass (the router has already
+            // put it on the chip and in Setup); the transcript stays as is.
+            Err(e) if e.is_fatal_model_error() => return Err(e),
+            Err(_) => continue,
         };
         for (k, corrected) in map {
             let Ok(i) = k.trim().parse::<usize>() else { continue };
@@ -810,10 +818,10 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
 pub async fn generate_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
     let inference = editor.inference()?;
     if inference.healthy().await {
-        if let Ok(chapters) = llm_chapters(editor, project_id).await {
-            if !chapters.is_empty() {
-                return Ok(chapters);
-            }
+        match llm_chapters(editor, project_id).await {
+            Ok(chapters) if !chapters.is_empty() => return Ok(chapters),
+            Err(e) if e.is_fatal_model_error() => return Err(e),
+            _ => {}
         }
     }
     heuristic_chapters(editor, project_id)
@@ -863,7 +871,7 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
     let prefs = editor.get_preferences()?;
     if inference.healthy().await {
         let context = project_context(editor, project_id)?;
-        if let Ok(v) = crate::llm::ask_json_with::<Value>(
+        match crate::llm::ask_json_with::<Value>(
             inference.as_ref(),
             &prefs.inference_model,
             "title/description",
@@ -874,7 +882,9 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
         )
         .await
         {
-            return Ok(v);
+            Ok(v) => return Ok(v),
+            Err(e) if e.is_fatal_model_error() => return Err(e),
+            Err(_) => {}
         }
     }
     // Fallback: first strong sentence as title, opening lines as description.

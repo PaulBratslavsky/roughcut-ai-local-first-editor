@@ -13,6 +13,7 @@ import {
   useTimeline,
 } from "../ipc/queries";
 import type { DurationCutPlan } from "../ipc/types";
+import { errText } from "./clipUtil";
 
 const fmtLen = (s: number) => {
   const m = Math.floor(s / 60);
@@ -196,7 +197,7 @@ function TargetLengthSection({ projectId }: { projectId: string }) {
         target_duration_s: targetS,
       })
         .then(setPlan)
-        .catch((err) => setPlanError(String((err as { message?: string })?.message ?? err)));
+        .catch((err) => setPlanError(errText(err)));
     }, 400);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);

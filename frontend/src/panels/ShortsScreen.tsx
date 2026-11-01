@@ -45,7 +45,8 @@ import {
   toggleTicked,
 } from "../state/shortsStore";
 import { CandidateCard } from "./CandidateCard";
-import { errText, slugify, useSecondsSince } from "./clipUtil";
+import { errText, scoredBy, slugify, useSecondsSince } from "./clipUtil";
+import { modelLabel, useModelStatus } from "../state/modelStore";
 import { PreviewPanel } from "./PreviewPanel";
 import { SavedClipRow } from "./SavedClipRow";
 import { TopBar } from "./TopBar";
@@ -136,7 +137,8 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
   const hasSpeech = !!transcript?.segments.some((seg) => !seg.is_silence);
   const chosen = candidates.filter((c) => picked.has(c.id));
   const toExport = clips.filter((c) => ticked.has(c.id));
-  const method = candidates[0]?.method ?? null;
+  const scorers = scoredBy(candidates);
+  const model = useModelStatus();
   const theme = candidates[0]?.theme ?? null;
 
   const runScan = () => {
@@ -254,8 +256,8 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
           )}
           {scanning && (
             <p className="clips-note">
-              A scan judges moments from every part of the video on-device — minutes on a long video. The rest of
-              the app stays usable.
+              A scan judges moments from every part of the video with {modelLabel(model)} — minutes on a long
+              video. The rest of the app stays usable.
             </p>
           )}
           {s.error && <p className="empty-error">{s.error}</p>}
@@ -322,11 +324,11 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
               </span>
             )}
           </div>
-          {method && (
-            <p className="clips-note">
-              {method === "heuristic"
-                ? "Scored without the on-device model: ranked by the rule-based score, single stretches only. Multi-moment shorts need the model."
-                : "Scored by the on-device model from the transcript: a hook, making sense alone, a payoff."}
+          {candidates.length > 0 && (
+            <p className="clips-note" title={scorers.raw ? `Scored by: ${scorers.raw}` : undefined}>
+              {scorers.text
+                ? `Scored by ${scorers.text} from the transcript: a hook, making sense alone, a payoff.`
+                : "Scored without a model: ranked by the rule-based score, single stretches only. Multi-moment shorts need a model."}
             </p>
           )}
           {candidates.length > 0 ? (

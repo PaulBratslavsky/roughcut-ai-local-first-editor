@@ -18,7 +18,8 @@ import {
 } from "../ipc/queries";
 import type { ClipCandidate, ClipFormat, ProgressEvent } from "../ipc/types";
 import { previewRanges, seekTo, setScreen } from "../state/viewStore";
-import { clock, errText, useElapsed } from "./clipUtil";
+import { clock, errText, scoredBy, useElapsed } from "./clipUtil";
+import { modelLabel, useModelStatus } from "../state/modelStore";
 import { SavedClipRow } from "./SavedClipRow";
 
 const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
@@ -36,9 +37,9 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
   // A find or scan for this project, from here or the Shorts screen: one at a time.
   const finding = useIsMutating({ mutationKey: clipRunKeys.find(projectId) }) > 0;
   const create = useCreateClip();
+  const model = useModelStatus();
   const [lengthIdx, setLengthIdx] = useState(1);
   const [theme, setTheme] = useState("");
-  const [method, setMethod] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const elapsed = useElapsed(finding);
   const [progress, setProgress] = useState<string | null>(null);
@@ -69,7 +70,6 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
         theme: theme.trim() || undefined,
       },
       {
-        onSuccess: (r) => setMethod(r.method),
         onError: (e) => setError(errText(e)),
       },
     );
@@ -102,7 +102,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
     );
   }
 
-  const shownMethod = method ?? candidates[0]?.method ?? null;
+  const scorers = scoredBy(candidates);
 
   return (
     <div className="clips-panel">
@@ -146,7 +146,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
       </div>
       {finding && (
         <p className="clips-note">
-          {progress ?? "Reading the transcript…"} Scoring on-device can take a minute or two.
+          {progress ?? "Reading the transcript…"} Scoring with {modelLabel(model)} can take a minute or two.
         </p>
       )}
       {error && <p className="empty-error">{error}</p>}
@@ -169,11 +169,9 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
               suggestions
               {candidates[0]?.theme && <span className="clips-method"> · about “{candidates[0].theme}”</span>}
             </span>
-            {shownMethod && (
-              <span className="clips-method">
-                {shownMethod === "llm" ? "scored by the on-device model" : "heuristic — no model reachable"}
-              </span>
-            )}
+            <span className="clips-method" title={scorers.raw ? `Scored by: ${scorers.raw}` : undefined}>
+              {scorers.text ? `scored by ${scorers.text}` : "rule-based — no model scored these"}
+            </span>
           </div>
           <div className="clips-list">
             {candidates.map((c) => (

@@ -222,9 +222,11 @@ No secrets in the repo. Everything below is optional:
 | `FFMPEG_PATH` / `FFPROBE_PATH` | auto (PATH, Homebrew, `<data dir>/bin`) | override the binaries |
 | `ROUGHCUT_NO_CONFIRM` | unset | `1` skips confirmation prompts (scripted/CI runs) |
 
-Optional frontier escalation (`connect_external` / `escalate_to_frontier`) is
-**opt-in only**, uses your own API key stored in the OS keychain, and is never
-auto-invoked.
+**Local or Hosted.** Every AI step runs on-device by default. The top bar's
+LOCAL / HOSTED switch lets you use Claude instead, with your own Anthropic API
+key (kept in the OS key store), when you're online: text only (transcripts,
+chat, prompts), never video or audio. Only you can turn it on, in the app
+(ADR-0007).
 
 ---
 

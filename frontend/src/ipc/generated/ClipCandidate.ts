@@ -30,4 +30,9 @@ method: string,
 /**
  * The theme it was found for, if the search asked for one.
  */
-theme: string | null, };
+theme: string | null, 
+/**
+ * The model that scored it ("Claude Opus 5.5", or the local model's
+ * name); None for a rule-based score.
+ */
+scorer: string | null, };

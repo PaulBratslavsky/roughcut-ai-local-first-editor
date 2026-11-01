@@ -1,8 +1,9 @@
 # Local or hosted models
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Draft, revised after a fresh-eyes review (four reviewers);
-    no open questions (D1–D3 decided by the owner 2026-10-31)
+*   **Status:** Implemented on branch `feat/hosted-models` (2026-10-31; see
+    "As built"). Live check with a real key and the quality measurement not
+    done yet. Decided: D1–D3 (owner, 2026-10-31); ADR-0007.
 *   **Date:** 2026-10-31
 
 --------------------------------------------------------------------------------
@@ -55,7 +56,7 @@ falling back.
     in the table below.
 *   Hosted uses Claude through the **native Messages API** with the user's
     key in the OS's secure key store (Keychain on macOS, Credential Manager
-    on Windows, Secret Service on Linux). Default model `claude-opus-5-5`;
+    on Windows, the kernel keyring on Linux — see "As built"). Default model `claude-opus-5-5`;
     Setup offers `claude-sonnet-5-5` and `claude-haiku-5-5`.
 *   **One model per run.** A scan, an outline, a chat instruction or a story
     edit uses one provider from start to finish, with one exception: a
@@ -115,7 +116,8 @@ None remain. Decided by the owner on 2026-10-31:
     Anthropic: transcripts, your chat messages, and the app's prompts and
     results (which can include file names). Video, audio and frames stay on
     this machine. After each transcription, the transcript clean-up runs on
-    Anthropic automatically." The user confirms; the chip reads **HOSTED ·
+    Anthropic automatically. Runs started by Claude Code or other MCP clients
+    use Hosted too." The user confirms; the chip reads **HOSTED ·
     Opus 5.5**. Cancel keeps Local.
 
 ### CUJ 2: Scan for shorts with Hosted
@@ -407,7 +409,7 @@ shell commands next to `setup_status`, each a thin wrapper over an Editor
 method (the core owns the state):
 
 *   `model_status() -> ModelStatus` — in memory, no network, no store read.
-*   `set_hosted_key(key: Option<String>) -> HostedKeyResult { status:
+*   `set_hosted_key(key: Option<String>) -> HostedKeyResult { saved, status:
     ModelStatus, check: Option<KeyCheck { ok, latency_ms, error } > }` —
     `Some`: checks the key with `GET /v1/models/{hosted_model}` (no tokens;
     proves the key and access to the model), saves it only when the check
@@ -469,6 +471,58 @@ or mode-aware.
     without a model").
 *   **Browser mock**: the commands are mocked (Hosted always works;
     `?nohosted` makes requests unreachable; `?badkey` rejects the key).
+
+## As built
+
+Where the code (branch `feat/hosted-models`) differs from the plan above:
+
+*   **Keys on Linux** use the kernel keyring (the `keyring` crate's
+    `linux-native` backend), which keeps the key until reboot. A persistent
+    Secret Service store needs `libdbus` at build time, which the CI's core
+    job doesn't install. macOS (Keychain) and Windows (Credential Manager) are
+    persistent. Checked on macOS: the real Keychain round trip passes without
+    a prompt.
+*   **Test seams**: `Editor::set_inference_for_tests(local, hosted)`,
+    `set_secret_store_for_tests`, `set_hosted_key_for_tests` (stores a key
+    without the network check). `test_instance()` always uses the in-memory
+    key store. The hosted side of the router is a `HostedBackend` trait so
+    tests script "unreachable" and "rejected" without a network.
+*   **Schemas** live in named functions (`clip_finder::short_scores_schema`,
+    `story::beats_schema`, `verdicts_schema`, `story_plan_schema`) so the
+    client's tests check normalisation against the real four.
+*   **`ask_json_schema_served`** returns which model answered; the scan uses
+    it to set each candidate's `scorer`, the outline to decide what it caches.
+*   **Flow review** builds its client only for the `llm` pass.
+*   **Story edit** changes nothing until its plan has passed its guards: the
+    dead-air cuts moved from before the outline to after the plan (the
+    outline and plan read the transcript, not the timeline, so results are
+    the same), and its outline and flow reviews run on its own conversation
+    client (`outline_using`, `review_flow_using`), so the whole edit is one
+    model.
+*   **Nested runs**: an AI tool the chat agent calls (`find_clips`,
+    `story_edit`, `review_flow`, …) builds its own router, so it is a run of
+    its own; a chat that fell back to the local model can still have a tool
+    it calls use Claude. Narrower than "a run never goes back to Claude"
+    across the whole chat.
+*   **Errors**: only a failed connection or a timeout counts as unreachable;
+    any other transport error (e.g. a key with a line break in a header) is
+    shown. Any 5xx is "Anthropic unavailable". A key-store read that fails is
+    remembered (no repeated OS prompts). Keys must be printable ASCII.
+    Preference writes are serialised (`Inner::prefs_write`) so a slow tool
+    call can't write back a mode the user just changed.
+*   **The chat's flow note** after edits drops a Hosted error quietly (the
+    edits are already reported).
+*   **Frontend**: the chip is `panels/ModelChip.tsx` (top bar and the import
+    screen's line), its state `state/modelStore.ts`. It has one extra label,
+    `HOSTED · no key`, for a key that disappeared (e.g. a Linux reboot);
+    clicking it, or `key rejected`, opens Setup. Links to the Anthropic
+    Console (and the existing Ollama / Resolve links) open through a new
+    allow-listed shell command, `open_external`, since a webview link can't
+    open the system browser by itself. The Shorts note names hosted models
+    and calls any other scorer "the on-device model".
+*   **Not built**: per-step effort (deferred, as planned), the cost line
+    (deferred); the live check with a real key and the quality measurement
+    (Verification Plan) are still to do.
 
 ## Alternatives Considered
 

@@ -33,23 +33,23 @@ examples in [`core/examples/`](../examples/README.md).
   OTIO), SRT, plain-text transcript, and MP4 via the video adapter;
   `Editor::export` / `Editor::export_clip`.
 - [mcp](./mcp/README.md) — the localhost MCP server (JSON-RPC over axum,
-  bearer token) and the opt-in frontier-provider client.
+  bearer token).
 
 ### Modules in this directory
 
 | Module | Role | Key public items |
 | --- | --- | --- |
-| `lib.rs` | Crate root | 24 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
-| `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `PlaySpan`, `ClipBatchError`, `ClipExportResult`, `pieces_overlap`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ExternalConnection`, `EPS` |
+| `lib.rs` | Crate root | 25 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
+| `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `PlaySpan`, `ClipBatchError`, `ClipExportResult`, `pieces_overlap`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ModelMode`, `ModelStatus`, `RouteReason`, `KeyCheck`, `HostedKeyResult`, `HOSTED_MODELS`, `hosted_model_name`, `EPS` |
 | `tools.rs` | The tool registry: one `ToolSpec` row per tool, three callers | `ToolSpec`, `ToolDef`, `Caller`, `defs`, `dispatch`, `registry`, `is_mutating`, `Handler`, `HandlerFuture` |
 | `agent.rs` | The chat agent loop and LLM-with-fallback helpers | `run_instruction`, `run_instruction_with`, `InstructionOutcome`, `HistoryTurn`, `clean_transcript`, `generate_chapters`, `Chapter`, `generate_title_description` |
 | `story.rs` | Story beats, cut snapping, flow review, the `story_edit` pipeline | `Outline`, `Beat`, `outline`, `outline_with`, `snap_cut_range`, `FlowReview`, `FlowIssue`, `review_flow`, `review_flow_mode`, `story_edit`, `StoryEditOutcome`, `outline_to_value` |
 | `clip_finder.rs` | Short-form clip candidates from the current cut | `find_clips`, `FindOptions` |
 | `detect.rs` | Non-LLM analysis: silences, fillers, takes, rough cut, suggestions, BM25 | `detect_silences`, `silence_candidates`, `refine_silences`, `RefinedSilence`, `detect_fillers`, `detect_takes`, `annotate`, `apply_annotations`, `generate_rough_cut`, `RoughCutOutcome`, `suggest_cuts`, `bm25_rank`, `find_segments`, `DEFAULT_FILLERS`, `TimeRange`, `TakeGroup`, `FillerFindings` |
-| `llm.rs` | The strict-JSON LLM call contract | `ask_json`, `ask_json_with`, `ask_json_schema`, `extract_json` |
+| `llm.rs` | The strict-JSON LLM call contract | `ask_json`, `ask_json_with`, `ask_json_schema`, `ask_json_schema_served` (also says which model answered), `extract_json` |
 | `store.rs` | Persistence: documents in SQLite | `Store` (trait), `SqliteStore` (`open`, `open_in_memory`, `default_path`), `data_dir` |
 | `events.rs` | The core → UI event contract | `CoreEvent`, `ProgressTask`, `EventSink`, `SharedSink`, `NullSink`, `send` |
-| `error.rs` | The crate error type | `CoreError` (`code`, `to_json`), `Result` |
+| `error.rs` | The crate error type | `CoreError` (`code`, `to_json`, `hosted`, `is_fatal_model_error`), `HostedErrorKind`, `Result` |
 | `time.rs` | Frame-exact time and timecode | `RationalTime`, `snap_to_frame`, `to_frame`, `fps_tick_rate`, `timecode`, `timecode_frames` |
 | `capabilities.rs` | What this machine can do right now; decides demo mode | `Capabilities`, `probe`, `system_ram_gb` |
 | `setup.rs` | First-run status and whisper model downloads from Hugging Face | `SetupStatus`, `TierStatus`, `RuntimeStatus`, `status`, `embeddings_reachable`, `MODEL_TIERS`, `ModelTier` (a whisper download tier, distinct from `model::ModelTier`), `download_whisper_model` |
@@ -60,11 +60,13 @@ examples in [`core/examples/`](../examples/README.md).
 | `pty.rs` | In-app terminal sessions | `spawn`, `write`, `resize`, `kill`, `kill_all` |
 | `resolve.rs` | DaVinci Resolve plugin install and timeline push | `status`, `ResolveStatus`, `install_plugin`, `send_timeline`, `SendToResolveOutcome` |
 | `demo.rs` | Fixture transcript for demo mode and tests | `fixture_transcript` |
+| `secrets.rs` | The Hosted API key in the OS key store (Keychain / Credential Manager / kernel keyring) | `SecretStore`, `KeyringStore`, `MemoryStore`, `remove_legacy_plaintext` |
 
 The registry (`tools.rs:REGISTRY`) has 66 rows. `Caller::can_use` shows the UI
-all 66, MCP clients 63 (every row except the 3 `meta` rows: `apply_instruction`,
-`connect_external`, `escalate_to_frontier`), and the agent loop the 27 rows
-marked `agent`. 20 rows are `mutating`. The names and contracts are documented
+all 66, MCP clients 65 (every row except the one `meta` row,
+`apply_instruction`), and the agent loop the 28 rows marked `agent`. 20 rows
+are `mutating`. The LOCAL / HOSTED switch and its key are not registry rows:
+they are Tauri commands (ADR-0004, ADR-0007). The names and contracts are documented
 in `docs/tool-api.md`.
 
 ## Invariants
@@ -105,10 +107,13 @@ in `docs/tool-api.md`.
 ### AI layer (`agent.rs`, `story.rs`, `clip_finder.rs`, `llm.rs`)
 
 - The agent loop runs at most `MAX_STEPS` = 12 model rounds and sends only the
-  last 12 history turns. When the model server is unhealthy (or the first chat
-  call fails) it falls back to the offline router, which checks silence
-  intent, then clip intent (`wants_shorts`, which never cuts the main video),
-  then a cut intent that cuts only the single best keyword match.
+  last 12 history turns, on `Editor::inference_conversation()` (one model per
+  run). When the model server is unhealthy (or the first chat call fails with
+  anything but a `CoreError::Hosted` error) it falls back to the offline
+  router, which checks silence intent, then clip intent (`wants_shorts`, which
+  never cuts the main video), then a cut intent that cuts only the single best
+  keyword match. A Hosted error (no key, rejected key or request) is returned
+  instead, with nothing edited.
 - Identical repeated tool calls are answered from a cache instead of being
   re-dispatched. The cache is cleared after any round in which a mutating tool
   succeeded. After 2 read-only rounds, one steering message is sent;
@@ -126,18 +131,29 @@ in `docs/tool-api.md`.
 - `llm::ask_json_schema` makes at most 2 attempts, the second with a repair
   message quoting the parse error. With a schema it asks the server for
   constrained decoding (`response_format`). If the first attempt's request is
-  rejected, it retries once without `response_format`; the repair attempt
-  sends `response_format` again and returns its error without retrying, so a
-  server that rejects schemas can cost three requests and then fail.
+  rejected by a local server, it retries once without `response_format` (never
+  for a `CoreError::Hosted` error); the repair attempt sends `response_format`
+  again and returns its error without retrying, so a server that rejects
+  schemas can cost three requests and then fail.
 - `story::outline_with` caches only LLM outlines, under KV key
-  `outline:{project_id}`, keyed by a transcript hash. LLM outlines are chunked
-  at 120 segments; beats under 60 s are merged into a neighbour.
+  `outline:{project_id}`, as `(transcript hash, outline, model)`; a cached
+  outline counts only when that model is the one the current mode would use
+  (an old two-part entry counts as the local model's), and an outline made
+  partly by each model (a Hosted run that fell back) isn't cached. LLM outlines
+  are chunked at 120 segments; beats under 60 s are merged into a neighbour.
+- Every AI step re-raises `CoreError::is_fatal_model_error()` (no key, no
+  consent, rejected key or request) instead of substituting its rule-based
+  result: `find_clips` and each scoring batch, the outline, flow review,
+  story edit, cleanup, chapters and title/description.
 - `story::story_edit` allows one run per project at a time
-  (`inflight::try_claim`). Without a healthy model server it cuts with the
-  duration planner (`Editor::plan_duration_cut`) when given a target, and
-  returns `Unavailable` otherwise. With a model it first cuts audio-confirmed
-  silences (`Editor::cut_confirmed_silences`), then outlines and asks the
-  model which whole beats to cut.
+  (`inflight::try_claim`). Without a healthy model server (Local mode only —
+  in Hosted mode the client is always "healthy" and problems come back as
+  errors) it cuts with the duration planner (`Editor::plan_duration_cut`) when
+  given a target, and returns `Unavailable` otherwise. With a model it
+  outlines and asks the model which whole beats to cut, all on its own
+  conversation client, and changes nothing before the plan passes its guards;
+  then it cuts audio-confirmed silences (`Editor::cut_confirmed_silences`) and
+  the planned beats.
 - `story_edit` refuses a plan (`Inference` error) that cuts every beat, all
   but one of more than 2 beats, or over 80% of the duration unless a target is
   set and what remains is at least half of it. It drops isolated mid-video

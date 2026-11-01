@@ -60,6 +60,31 @@ fn reveal_path(path: String) -> Result<(), Value> {
     Ok(())
 }
 
+/// Web pages the app links to, opened in the system browser (a link in the
+/// webview can't open one by itself). Only these sites: nothing a page could
+/// be talked into opening.
+const EXTERNAL_SITES: &[&str] = &[
+    "https://console.anthropic.com",
+    "https://ollama.com",
+    "https://www.blackmagicdesign.com/products/davinciresolve",
+];
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), Value> {
+    let allowed = EXTERNAL_SITES.iter().any(|site| url == *site || url.starts_with(&format!("{site}/")));
+    if !allowed {
+        return Err(serde_json::json!({ "error": { "code": "invalid_argument", "message": format!("not an allowed link: {url}") } }));
+    }
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("explorer").arg(&url).spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+    spawned.map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn confirm_action(state: State<'_, AppState>, id: String, approved: bool) -> Result<(), Value> {
     let id = uuid::Uuid::parse_str(&id)
@@ -73,6 +98,46 @@ async fn setup_status(
     state: State<'_, AppState>,
 ) -> Result<roughcut_core::setup::SetupStatus, Value> {
     Ok(roughcut_core::setup::status(&state.editor).await)
+}
+
+// ---- The LOCAL / HOSTED switch -----------------------------------------
+// Turning Hosted on and handling its API key are the user's actions in the
+// app, kept out of the tool registry (ADR-0004): no MCP client or agent can
+// reach them. Each is a thin wrapper over the Editor, which owns the state.
+
+#[tauri::command]
+async fn model_status(state: State<'_, AppState>) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.model_status().map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_model_mode(
+    state: State<'_, AppState>,
+    mode: roughcut_core::model::ModelMode,
+    consent: bool,
+) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.set_model_mode(mode, consent).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_hosted_model(
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.set_hosted_model(&model).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_hosted_key(
+    state: State<'_, AppState>,
+    key: Option<String>,
+) -> Result<roughcut_core::model::HostedKeyResult, Value> {
+    state.editor.set_hosted_key(key.as_deref()).await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn check_hosted_key(state: State<'_, AppState>) -> Result<roughcut_core::model::KeyCheck, Value> {
+    state.editor.check_hosted_key().await.map_err(|e| e.to_json())
 }
 
 #[tauri::command]
@@ -315,7 +380,13 @@ pub fn run() {
             demo_mode,
             confirm_action,
             reveal_path,
+            open_external,
             setup_status,
+            model_status,
+            set_model_mode,
+            set_hosted_model,
+            set_hosted_key,
+            check_hosted_key,
             ollama_pull_model,
             install_llama_server,
             download_gguf,

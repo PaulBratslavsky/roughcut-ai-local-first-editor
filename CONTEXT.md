@@ -108,14 +108,13 @@ Keep entries short. When a refactor names a new module, add the term here.
 
 - **ToolSpec** (`tools.rs`) — one registry row: name, description, JSON schema,
   handler, and flags `agent` (shown to agent loops), `meta` (starts an agent
-  loop / opts in to a frontier provider — UI only), `mutating` (lands
-  `EditAction`s).
+  loop — UI only), `mutating` (lands `EditAction`s).
 - **Caller** (`tools.rs`) — who invokes the registry: `Ui | Mcp | Agent {
   attribute_to }`. The single home of per-caller policy: which rows are visible
   AND callable (`defs(caller)` ≡ what `dispatch(…, caller)` accepts), whether
   args are schema-checked (not for `Ui`), and the `ActionSource` stamped on
-  edits. Visibility ≠ attribution: frontier escalation runs as `Agent` but
-  credits edits to `McpClient`.
+  edits. Visibility ≠ attribution: the in-app chat runs as `Agent` but credits
+  edits to `LocalAi`.
 - **ActionSource** (`model.rs`) — the attribution tag on an `EditAction`
   (`ui` / `local_ai` / `mcp_client`); derived from the `Caller`. Visibility is
   decided by `Caller` alone; handlers still key their confirmation prompts
@@ -132,6 +131,16 @@ Keep entries short. When a refactor names a new module, add the term here.
   runtime via `capabilities::probe`.
 - **EventSink** (`events.rs`) — core → UI push; `CoreEvent` is the one typed event
   vocabulary, serialized at a single choke point.
+- **ModelMode** (`model.rs`; the LOCAL / HOSTED chip) — where the AI steps run:
+  `local` (Ollama / llama-server, the default) or `hosted` (Claude through the
+  user's own API key, text only). Changed only by the user in the app (Tauri
+  commands), never by a tool (ADR-0007).
+- **HostedRouter** (`engine/route.rs`) — the per-run client `Editor::inference()`
+  hands out in Hosted mode: one model per run; only "unreachable" falls back to
+  the local model; no key / a rejected key or request is a visible
+  `CoreError::Hosted`. **AnthropicClient** (`adapters/anthropic.rs`) is the
+  Claude Messages API behind it; **SecretStore** (`secrets.rs`) keeps the key in
+  the OS key store.
 
 ## Implicit state machines (today inferred — make explicit in item 6)
 

@@ -4,14 +4,17 @@
 
 `crate::adapters` is where `roughcut-core` reaches outside the process: media
 toolchain binaries (ffmpeg, ffprobe, whisper-cli), local HTTP model servers,
-the macOS camera/mic/screen capture stack, and Apple Vision. Each capability
+Claude's Messages API (Hosted mode only), the macOS camera/mic/screen capture
+stack, and Apple Vision. Each capability
 sits behind a trait (or a small free-function API) so the rest of the core stays
 portable. `VideoEngine` and `Transcriber` each have a production
 implementation, a demo `Mock*`, and an `Auto*` selector that picks between them
 **on every call** using `crate::capabilities::probe()`. Because of that,
 installing ffmpeg or a whisper model mid-session takes effect without a
 restart. `Embedder` has `OllamaEmbedder` and `MockEmbedder` but no `Auto*`
-selector. `InferenceClient` has only `OpenAiCompatClient`, with no mock.
+selector. `InferenceClient` has `OpenAiCompatClient` (local servers) and
+`AnthropicClient` (Hosted mode, `anthropic.rs`), with no mock; the choice
+between them is made per run by `crate::engine::route`, not here.
 
 The module does not own project state; callers in `crate::engine`, `crate::agent`,
 `crate::export`, `crate::tools`, etc. pass in `Media`/`Timeline` values and
@@ -23,6 +26,7 @@ receive results or file paths.
 | `video.rs` | Probe, render, audio/frame extraction, timeline assets | `FfmpegCli` (ffmpeg/ffprobe CLIs) | `MockVideoEngine`, selected by `AutoVideoEngine` |
 | `transcribe.rs` | Speech-to-text | `WhisperRs` (feature `whisper-native`) or `WhisperCli` | `MockTranscriber`, selected by `AutoTranscriber` |
 | `inference.rs` | Chat completions / tool calls | `OpenAiCompatClient` (OpenAI-compatible HTTP) | — (no mock here) |
+| `anthropic.rs` | Hosted mode: Claude through the Messages API | `AnthropicClient` (`HostedBackend`) | tests use a local axum stub |
 | `embed.rs` | Text embeddings for semantic search | `OllamaEmbedder` (OpenAI-compatible HTTP) | `MockEmbedder` |
 | `face.rs` | Face finding and 9:16 crop math | Apple Vision (`#[cfg(target_os = "macos")]`) | Off macOS: `CoreError::Unavailable` |
 | `record.rs` | Camera / screen / dual capture sessions and the recordings library | ffmpeg `avfoundation` + `h264_videotoolbox` | — (macOS only at runtime) |
@@ -31,7 +35,7 @@ receive results or file paths.
 
 ### `mod.rs`
 
-- Declares `pub mod embed; face; inference; record; transcribe; video;`.
+- Declares `pub mod anthropic; embed; face; inference; record; transcribe; video;`.
 - Re-exports `Embedder`, `MockEmbedder`, `OllamaEmbedder`; `ChatMessage`,
   `ChatRequest`, `ChatResponse`, `InferenceClient`, `OpenAiCompatClient`,
   `ToolCall`; `AutoTranscriber`, `MockTranscriber`, `Transcriber`,
@@ -99,12 +103,36 @@ receive results or file paths.
   with `new(endpoint: &str, api_key: Option<String>)`. It works against
   llama-server, Ollama, or any OpenAI-compatible server.
 - Wire types:
-  - `ChatMessage { role, content, tool_calls, tool_call_id }`, with constructors
-    `system`, `user`, `assistant`, and `tool_result(id, content)`.
+  - `ChatMessage { role, content, tool_calls, tool_call_id, provider_blocks }`,
+    with constructors `system`, `user`, `assistant`, and `tool_result(id, content)`.
+    `provider_blocks` (`#[serde(skip)]`) carries a Claude reply's original
+    content blocks back on the next request of the same run.
   - `ToolCall { id, kind (serde "type"), function: FunctionCall }`.
   - `FunctionCall { name, arguments }`, where `arguments` is a JSON-encoded string.
   - `ChatRequest { model, messages, tools: Option<Vec<Value>>, temperature, response_format: Option<Value> }`.
-  - `ChatResponse { message }`.
+  - `ChatResponse { message, served_by: Option<ServedBy { model, hosted }>, usage: Option<Usage> }`
+    (`ChatResponse::new(message)` for doubles). `OpenAiCompatClient` fills
+    `served_by` with the request's model.
+
+### `anthropic.rs`
+
+- `AnthropicClient::new(key)`; `send(&ChatRequest) -> Result<ChatResponse, HostedFailure>`;
+  `check_model(model)` (`GET /v1/models/{model}`, no tokens). Implements
+  `InferenceClient` and `HostedBackend` (the router's seam, with test doubles).
+- Request: `POST /v1/messages`, `anthropic-version: 2026-10-21`, beta
+  `server-side-fallback-2026-07-01`; `system` messages joined into `system`;
+  same-role turns merged (tool results first); a leading assistant turn gets a
+  user turn before it; replies sent back with `provider_blocks` unchanged;
+  OpenAI tools → `{name, description, input_schema}`; `response_format` →
+  `output_config.format` after dropping unsupported keywords and closing every
+  object (a root array is wrapped as `{items}` and unwrapped from the reply);
+  `cache_control: ephemeral`, `fallbacks: "default"`, `max_tokens` 16000. Never
+  `temperature`, `tool_choice`, `thinking` or `effort`.
+- Errors: connect error / 5 s connect / 120 s request timeout → `Unreachable(Offline)`;
+  429 and 500/502/503/504/529 retried twice (1 s, 3 s; `retry-after` up to 10 s)
+  then `Unreachable(RateLimited | ServerError)`; 401/403 → `Hosted{KeyRejected}`;
+  other 4xx → `Hosted{BadRequest}` with the API's message; `stop_reason`
+  `refusal` / `max_tokens` → `Hosted{Refused | Truncated}`.
 
 ### `embed.rs`
 

@@ -67,28 +67,65 @@ pub async fn outline(editor: &Editor, project_id: Uuid) -> Result<Outline> {
 /// `refresh` bypasses and replaces the cache — the escape hatch when an LLM
 /// outline came out degenerate.
 pub async fn outline_with(editor: &Editor, project_id: Uuid, refresh: bool) -> Result<Outline> {
+    outline_using(editor, project_id, refresh, None).await
+}
+
+/// [`outline_with`] on a given client — a story edit passes its own, so the
+/// whole edit runs on one model.
+pub(crate) async fn outline_using(
+    editor: &Editor,
+    project_id: Uuid,
+    refresh: bool,
+    client: Option<&dyn crate::adapters::InferenceClient>,
+) -> Result<Outline> {
     let speech = speech_segments(editor, project_id)?;
     if speech.is_empty() {
         return Err(CoreError::InvalidArg("transcript has no speech".into()));
     }
     let hash = transcript_hash(&speech);
     let cache_key = format!("outline:{project_id}");
+    let prefs = editor.get_preferences()?;
+    // A cached outline counts only if the model that would run now made it:
+    // switching to Hosted must not keep the local model's beats.
+    let expected_model = match prefs.model_mode {
+        crate::model::ModelMode::Hosted => prefs.hosted_model.clone(),
+        crate::model::ModelMode::Local => prefs.inference_model.clone(),
+    };
     if let Ok(Some(raw)) = editor.store().get_kv(&cache_key) {
-        if refresh {
-            // fall through to recompute
-        } else
-        if let Ok((cached_hash, outline)) = serde_json::from_str::<(String, Outline)>(&raw) {
-            if cached_hash == hash {
-                return Ok(outline);
+        if !refresh {
+            let cached = serde_json::from_str::<(String, Outline, String)>(&raw).ok().or_else(|| {
+                // Written before Hosted mode existed: by the local model.
+                serde_json::from_str::<(String, Outline)>(&raw).ok().map(|(h, o)| (h, o, prefs.inference_model.clone()))
+            });
+            if let Some((cached_hash, outline, model)) = cached {
+                if cached_hash == hash && model == expected_model {
+                    return Ok(outline);
+                }
             }
         }
     }
 
-    let inference = editor.inference()?;
+    let owned;
+    let inference: &dyn crate::adapters::InferenceClient = match client {
+        Some(c) => c,
+        None => {
+            owned = editor.inference()?;
+            owned.as_ref()
+        }
+    };
+    let mut made_by: Option<String> = None;
     let outline = if inference.healthy().await {
-        let prefs = editor.get_preferences()?;
-        match llm_outline(&speech, inference.as_ref(), &prefs.inference_model).await {
-            Ok(beats) if beats.len() >= 2 => Outline { beats, method: "llm".into() },
+        match llm_outline(&speech, inference, &prefs.inference_model).await {
+            Ok((beats, served)) if beats.len() >= 2 => {
+                // One model for every chunk, or nobody (a run that fell back
+                // part-way isn't cached).
+                let first = served.first().cloned().flatten();
+                if served.iter().all(|s| s.as_ref().map(|s| &s.model) == first.as_ref().map(|s| &s.model)) {
+                    made_by = first.map(|s| s.model);
+                }
+                Outline { beats, method: "llm".into() }
+            }
+            Err(e) if e.is_fatal_model_error() => return Err(e),
             _ => Outline { beats: heuristic_beats(&speech), method: "heuristic".into() },
         }
     } else {
@@ -99,10 +136,10 @@ pub async fn outline_with(editor: &Editor, project_id: Uuid, refresh: bool) -> R
     // deterministic, and caching it would shadow the LLM forever after one
     // model outage (the cache key is the transcript hash, which edits never
     // change).
-    if outline.method == "llm" {
+    if outline.method == "llm" && made_by.as_deref() == Some(expected_model.as_str()) {
         let _ = editor
             .store()
-            .set_kv(&cache_key, &serde_json::to_string(&(hash, outline.clone()))?);
+            .set_kv(&cache_key, &serde_json::to_string(&(hash, outline.clone(), expected_model))?);
     }
     Ok(outline)
 }
@@ -113,9 +150,10 @@ async fn llm_outline(
     speech: &[TranscriptSegment],
     inference: &dyn crate::adapters::InferenceClient,
     model: &str,
-) -> Result<Vec<Beat>> {
+) -> Result<(Vec<Beat>, Vec<Option<crate::adapters::inference::ServedBy>>)> {
     const CHUNK: usize = 120;
     let mut beats = vec![];
+    let mut served = vec![];
     for chunk_start in (0..speech.len()).step_by(CHUNK) {
         let chunk_end = (chunk_start + CHUNK).min(speech.len());
         let numbered: String = (chunk_start..chunk_end)
@@ -140,22 +178,8 @@ async fn llm_outline(
         fn default_priority() -> u8 {
             3
         }
-        let beat_schema = serde_json::json!({
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "role": {"type": "string", "enum": ["hook","setup","point","example","tangent","recap","outro"]},
-                    "cut_priority": {"type": "integer", "minimum": 1, "maximum": 5},
-                    "first": {"type": "integer"},
-                    "last": {"type": "integer"}
-                },
-                "required": ["title", "first", "last"]
-            }
-        });
-        let mut raw: Vec<RawBeat> = crate::llm::ask_json_schema(
+        let beat_schema = beats_schema();
+        let (mut raw, by): (Vec<RawBeat>, _) = crate::llm::ask_json_schema_served(
             inference,
             model,
             "outline",
@@ -178,6 +202,7 @@ async fn llm_outline(
             Some(&beat_schema),
         )
         .await?;
+        served.push(by);
         // The prompt demands contiguous, non-overlapping beats; weak models
         // don't always comply. Sort and clip so a shared segment can never
         // belong to two beats (a cut "tangent" must not gut a kept "point").
@@ -223,7 +248,7 @@ async fn llm_outline(
             _ => merged.push(beat),
         }
     }
-    Ok(merged)
+    Ok((merged, served))
 }
 
 /// No model server: sections at speech pauses — still useful for navigation
@@ -349,6 +374,16 @@ pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview
 /// `llm=false` runs ONLY the cheap deterministic boundary checks (no model
 /// call) — the lightweight advisory tier for lower-risk edits.
 pub async fn review_flow_mode(editor: &Editor, project_id: Uuid, llm: bool) -> Result<FlowReview> {
+    review_flow_using(editor, project_id, llm, None).await
+}
+
+/// [`review_flow_mode`] on a given client (a story edit passes its own).
+pub(crate) async fn review_flow_using(
+    editor: &Editor,
+    project_id: Uuid,
+    llm: bool,
+    client: Option<&dyn crate::adapters::InferenceClient>,
+) -> Result<FlowReview> {
     let speech = speech_segments(editor, project_id)?;
     let included: Vec<bool> = editor.with_project(project_id, |p, _| {
         Ok(speech
@@ -429,10 +464,27 @@ pub async fn review_flow_mode(editor: &Editor, project_id: Uuid, llm: bool) -> R
     }
 
     // LLM pass — judges each boundary in context; capped to keep one call.
-    let inference = editor.inference()?;
+    // The client is only made for it: the default deterministic review must
+    // work whatever the model settings are.
     let mut method = "deterministic".to_string();
     const MAX_BOUNDARIES: usize = 40;
-    if llm && !boundaries.is_empty() && inference.healthy().await {
+    let owned;
+    let inference: Option<&dyn crate::adapters::InferenceClient> = if llm && !boundaries.is_empty() {
+        match client {
+            Some(c) => Some(c),
+            None => {
+                owned = editor.inference()?;
+                Some(owned.as_ref())
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(inference) = inference {
+        if !inference.healthy().await {
+            let coherent = !issues.iter().any(|i| i.severity == "high");
+            return Ok(FlowReview { coherent, boundaries_checked: boundaries.len(), issues, method });
+        }
         method = "llm".into();
         let prefs = editor.get_preferences()?;
         let listed: String = boundaries
@@ -459,21 +511,9 @@ pub async fn review_flow_mode(editor: &Editor, project_id: Uuid, llm: bool) -> R
             #[serde(default)]
             restore: bool,
         }
-        let verdict_schema = serde_json::json!({
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "b": {"type": "integer"},
-                    "ok": {"type": "boolean"},
-                    "why": {"type": "string"},
-                    "restore": {"type": "boolean"}
-                },
-                "required": ["b", "ok"]
-            }
-        });
+        let verdict_schema = verdicts_schema();
         let verdicts: Result<Vec<Verdict>> = crate::llm::ask_json_schema(
-            inference.as_ref(),
+            inference,
             &prefs.inference_model,
             "flow review",
             "You review CUT POINTS in an edited talking-head video. For each \
@@ -489,6 +529,11 @@ pub async fn review_flow_mode(editor: &Editor, project_id: Uuid, llm: bool) -> R
             Some(&verdict_schema),
         )
         .await;
+        if let Err(e) = &verdicts {
+            if e.is_fatal_model_error() {
+                return Err(verdicts.err().unwrap());
+            }
+        }
         {
             {
                 if let Ok(verdicts) = verdicts {
@@ -589,7 +634,9 @@ pub async fn story_edit(
 
     let before_s = editor.get_timeline(project_id)?.included_duration();
     let mut actions: Vec<EditAction> = vec![];
-    let inference = editor.inference()?;
+    // A conversation: its plan and checks build on each other, so it never
+    // switches models half-way.
+    let inference = editor.inference_conversation()?;
     if !inference.healthy().await {
         // Honest degradation: without a model there is no narrative judgment.
         if let Some(target) = target_s {
@@ -622,23 +669,10 @@ pub async fn story_edit(
         ));
     }
 
-    // 0. Dead air first: hybrid-CONFIRMED silences are uncontroversial and
-    // cutting them up front means beats are judged on their content, not
-    // their pauses. Shared with `remove_silences` — same code, can't drift.
-    let silence_actions = editor.cut_confirmed_silences(project_id, source).await?;
-    if !silence_actions.is_empty() {
-        narrate(
-            editor,
-            project_id,
-            0,
-            format!("cutting {} audio-confirmed dead-air range(s) first", silence_actions.len()),
-        );
-        actions.extend(silence_actions);
-    }
-
     // 1. Outline.
     narrate(editor, project_id, 0, "reading the full transcript and outlining the story…");
-    let outline = outline(editor, project_id).await?;
+    // On the edit's own client: the whole story edit is one model.
+    let outline = outline_using(editor, project_id, false, Some(inference.as_ref())).await?;
     narrate(
         editor,
         project_id,
@@ -675,14 +709,7 @@ pub async fn story_edit(
         #[serde(default)]
         rationale: String,
     }
-    let plan_schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "cut_beats": {"type": "array", "items": {"type": "integer"}},
-            "rationale": {"type": "string"}
-        },
-        "required": ["cut_beats"]
-    });
+    let plan_schema = story_plan_schema();
     let plan: Plan = crate::llm::ask_json_schema(
         inference.as_ref(),
         &prefs.inference_model,
@@ -746,6 +773,23 @@ pub async fn story_edit(
             "the plan removes over 80% of the video with no target to justify it — refusing"
                 .into(),
         ));
+    }
+
+    // Nothing has been changed until here: the outline and plan read the
+    // transcript, not the timeline, so a model error or a refused plan above
+    // leaves the video exactly as it was.
+    //
+    // Dead air: hybrid-CONFIRMED silences are uncontroversial. Shared with
+    // `remove_silences` — same code, can't drift.
+    let silence_actions = editor.cut_confirmed_silences(project_id, source).await?;
+    if !silence_actions.is_empty() {
+        narrate(
+            editor,
+            project_id,
+            2,
+            format!("cutting {} audio-confirmed dead-air range(s)", silence_actions.len()),
+        );
+        actions.extend(silence_actions);
     }
 
     let cut_ids: Vec<Uuid> =
@@ -840,7 +884,10 @@ pub async fn story_edit(
         narrate(editor, project_id, 4, label);
         let snapshot_s = or_partial!(editor.get_timeline(project_id), "reading the timeline")
             .included_duration();
-        let review = or_partial!(review_flow(editor, project_id).await, "the flow review");
+        let review = or_partial!(
+            review_flow_using(editor, project_id, true, Some(inference.as_ref())).await,
+            "the flow review"
+        );
         coherent = review.coherent;
         issues_remaining = review.issues.len();
 
@@ -956,8 +1003,85 @@ pub fn outline_to_value(o: &Outline) -> Value {
     serde_json::to_value(o).unwrap_or(Value::Null)
 }
 
+/// The outline: one object per beat.
+pub(crate) fn beats_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "role": {"type": "string", "enum": ["hook","setup","point","example","tangent","recap","outro"]},
+                "cut_priority": {"type": "integer", "minimum": 1, "maximum": 5},
+                "first": {"type": "integer"},
+                "last": {"type": "integer"}
+            },
+            "required": ["title", "first", "last"]
+        }
+    })
+}
+
+/// Flow review: one verdict per numbered cut point.
+pub(crate) fn verdicts_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "b": {"type": "integer"},
+                "ok": {"type": "boolean"},
+                "why": {"type": "string"},
+                "restore": {"type": "boolean"}
+            },
+            "required": ["b", "ok"]
+        }
+    })
+}
+
+/// Story edit: which beats to cut, and why.
+pub(crate) fn story_plan_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "cut_beats": {"type": "array", "items": {"type": "integer"}},
+            "rationale": {"type": "string"}
+        },
+        "required": ["cut_beats"]
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A cached outline is reused only when the model that would run now
+    /// made it; one cached before Hosted mode existed counts as the local
+    /// model's.
+    #[tokio::test]
+    async fn the_outline_cache_belongs_to_the_model_that_made_it() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        e.transcribe(p.id, None).await.unwrap();
+        let speech = speech_segments(&e, p.id).unwrap();
+        let hash = transcript_hash(&speech);
+        let llm = Outline { beats: heuristic_beats(&speech), method: "llm".into() };
+        let key = format!("outline:{}", p.id);
+        let local_model = e.get_preferences().unwrap().inference_model;
+
+        // Made by Claude: not reused in Local mode (no model in tests, so a
+        // fresh outline is the heuristic one).
+        e.store().set_kv(&key, &serde_json::to_string(&(&hash, &llm, "claude-opus-5-5")).unwrap()).unwrap();
+        assert_eq!(outline(&e, p.id).await.unwrap().method, "heuristic");
+
+        // Made by the local model: reused.
+        e.store().set_kv(&key, &serde_json::to_string(&(&hash, &llm, &local_model)).unwrap()).unwrap();
+        assert_eq!(outline(&e, p.id).await.unwrap().method, "llm");
+
+        // The old two-part entry: the local model's.
+        e.store().set_kv(&key, &serde_json::to_string(&(&hash, &llm)).unwrap()).unwrap();
+        assert_eq!(outline(&e, p.id).await.unwrap().method, "llm");
+    }
     /// The guardrail arithmetic the review caught failing open: cutting ALL
     /// beats refuses at ANY outline size; all-but-one refuses only for 3+.
     fn refuse(valid: &[usize], beats: usize) -> bool {

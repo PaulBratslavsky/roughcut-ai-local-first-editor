@@ -9,9 +9,7 @@
 //! keeps the same shape so swapping the transport layer to rmcp is contained
 //! here.
 //!
-//! Client: explicit, opt-in outbound path (`connect_external`,
-//! `escalate_to_frontier`). Never auto-invoked — local by default, frontier
-//! by choice.
+//! (The old outbound "frontier" client is gone: Hosted mode — the user's
+//! LOCAL / HOSTED switch, see `engine::route` — replaced it.)
 
-pub mod client;
 pub mod server;

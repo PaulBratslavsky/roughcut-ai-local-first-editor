@@ -16,20 +16,25 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Hosted only: a Claude reply's original content blocks (thinking
+    /// included), sent back unchanged on the next request of the same run.
+    /// Never serialised, so local servers never see them.
+    #[serde(skip)]
+    pub provider_blocks: Option<Value>,
 }
 
 impl ChatMessage {
     pub fn system(text: &str) -> Self {
-        Self { role: "system".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
+        Self { role: "system".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None, provider_blocks: None }
     }
     pub fn user(text: &str) -> Self {
-        Self { role: "user".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
+        Self { role: "user".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None, provider_blocks: None }
     }
     pub fn assistant(text: &str) -> Self {
-        Self { role: "assistant".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None }
+        Self { role: "assistant".into(), content: Some(text.into()), tool_calls: None, tool_call_id: None, provider_blocks: None }
     }
     pub fn tool_result(id: &str, content: String) -> Self {
-        Self { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(id.into()) }
+        Self { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(id.into()), provider_blocks: None }
     }
 }
 
@@ -66,9 +71,32 @@ pub struct ChatRequest {
     pub response_format: Option<Value>,
 }
 
+/// Which model produced a reply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServedBy {
+    pub model: String,
+    pub hosted: bool,
+}
+
+/// Tokens a reply cost (Hosted replies only).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     pub message: ChatMessage,
+    /// Who answered; None from test doubles (the router fills it in).
+    pub served_by: Option<ServedBy>,
+    pub usage: Option<Usage>,
+}
+
+impl ChatResponse {
+    pub fn new(message: ChatMessage) -> Self {
+        Self { message, served_by: None, usage: None }
+    }
 }
 
 #[async_trait]
@@ -104,6 +132,7 @@ impl OpenAiCompatClient {
 #[async_trait]
 impl InferenceClient for OpenAiCompatClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        let model_name = request.model.clone();
         let url = format!("{}/chat/completions", self.endpoint);
         let mut req = self.http.post(&url).json(&request);
         if let Some(key) = &self.api_key {
@@ -124,7 +153,11 @@ impl InferenceClient for OpenAiCompatClient {
         let msg = &body["choices"][0]["message"];
         let message: ChatMessage = serde_json::from_value(msg.clone())
             .map_err(|e| CoreError::Inference(format!("unexpected message shape: {e} in {msg}")))?;
-        Ok(ChatResponse { message })
+        Ok(ChatResponse {
+            message,
+            served_by: Some(ServedBy { model: model_name, hosted: false }),
+            usage: None,
+        })
     }
 
     async fn healthy(&self) -> bool {

@@ -15,7 +15,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | Link | Date | Author | Components | Description |
 | ---- | ---- | ------ | ---------- | ----------- |
 | [bulk-shorts.md](bulk-shorts.md) | 2026-10-30 | Paul Bratslavsky | core/clip_finder, core/engine/clips, core/export, frontend/shorts, frontend/clips | Phase 1 implemented (Phases 2–3 to do): scan the whole video for shorts, review them as cards on a Shorts screen, make and export them in a batch; pieces of a clip in any play order; multi-moment shorts by condensing a stretch. |
-| [hosted-models.md](hosted-models.md) | 2026-10-31 | Paul Bratslavsky | core/adapters, core/engine, core/tools, app/src-tauri, frontend/setup, frontend/topbar | Draft, no open questions: a Local / Hosted switch for every AI step; Hosted uses Claude's Messages API with the user's key in the OS key store, one model per run, visible errors instead of silent fallbacks, and only the user can turn it on; removes the hidden escalate_to_frontier path. |
+| [hosted-models.md](hosted-models.md) | 2026-10-31 | Paul Bratslavsky | core/adapters, core/engine, core/tools, app/src-tauri, frontend/setup, frontend/topbar | Implemented (live check pending): a Local / Hosted switch for every AI step; Hosted uses Claude's Messages API with the user's key in the OS key store, one model per run, visible errors instead of silent fallbacks, and only the user can turn it on; removes the hidden escalate_to_frontier path. |
 
 ## Existing design artifacts
 
@@ -36,6 +36,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | [ADR-0003](../adr/0003-generated-frontend-types.md) | 2026-06-10 | Paul Bratslavsky | core/model, frontend/ipc | Frontend model types are generated from Rust (ts-rs). |
 | [ADR-0004](../adr/0004-provisioning-outside-the-tool-registry.md) | 2026-06-10 | Paul Bratslavsky | core/tools, app | Model/toolchain provisioning stays outside the tool registry. |
 | [ADR-0005](../adr/0005-online-editor-architecture.md) | 2026-10-03 | Paul Bratslavsky | all | Proposed: the path to an online (browser-hosted) editor. |
+| [ADR-0007](../adr/0007-hosted-model-mode.md) | 2026-10-31 | Paul Bratslavsky | core/engine/route, core/adapters/anthropic, core/secrets, app | Hosted model mode: the user can switch the AI steps to Claude with their own key; only the user enables egress, in the app; one model per run; the hidden frontier tools removed. |
 | [architecture-audit.md](../architecture-audit.md) | 2026-09-30 | Paul Bratslavsky | all | Full architecture audit across every tier. |
 | [refactor-checklist.md](../refactor-checklist.md) | 2026-06-16 | Paul Bratslavsky | core | Deepening `core/src`: the refactor checklist and its status. |
 | [export-validation.md](../export-validation.md) | 2026-06-10 | Paul Bratslavsky | core/export | NLE export validation against real editors. |

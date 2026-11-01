@@ -9,6 +9,7 @@ import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from
 import { useEditorKeyboard } from "./hooks/useEditorKeyboard";
 import { setActiveTab, setProjectId, setScreen, viewStore } from "./state/viewStore";
 import { useShortsProgressListener } from "./state/shortsStore";
+import { useModelStatusSync } from "./state/modelStore";
 import { EmptyState } from "./EmptyState";
 import { RecorderPanel } from "./panels/RecorderPanel";
 import { ShortsScreen } from "./panels/ShortsScreen";
@@ -208,6 +209,8 @@ export default function App() {
   useCoreEventInvalidation();
   // Scan / make / export progress, kept per project while any screen shows.
   useShortsProgressListener();
+  // The LOCAL / HOSTED status, for the chip and every mode-aware string.
+  useModelStatusSync();
   useExternalConfirmations();
   useSuppressDefaultContextMenu();
   const projects = useProjects();

@@ -18,7 +18,6 @@ export type { Project } from "./generated/Project";
 export type { ProjectSummary } from "./generated/ProjectSummary";
 export type { Preferences } from "./generated/Preferences";
 export type { Aggressiveness } from "./generated/Aggressiveness";
-export type { ExternalConnection } from "./generated/ExternalConnection";
 export type { MediaAssets } from "./generated/MediaAssets";
 export type { Layout } from "./generated/Layout";
 export type { CutSuggestion } from "./generated/CutSuggestion";
@@ -33,9 +32,16 @@ export type { SourceRange } from "./generated/SourceRange";
 export type { PlaySpan } from "./generated/PlaySpan";
 export type { ClipBatchError } from "./generated/ClipBatchError";
 export type { ClipExportResult } from "./generated/ClipExportResult";
+export type { ModelMode } from "./generated/ModelMode";
+export type { ModelStatus } from "./generated/ModelStatus";
+export type { RouteReason } from "./generated/RouteReason";
+export type { KeyCheck } from "./generated/KeyCheck";
+export type { HostedKeyResult } from "./generated/HostedKeyResult";
 
 import type { Clip } from "./generated/Clip";
 import type { EditAction } from "./generated/EditAction";
+import type { ModelMode } from "./generated/ModelMode";
+import type { RouteReason } from "./generated/RouteReason";
 import type { ProjectSummary } from "./generated/ProjectSummary";
 import type { Timeline } from "./generated/Timeline";
 
@@ -72,7 +78,16 @@ export interface TranscriptChangedEvent { project_id: string }
 export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
   | "projects-changed" | "media-assets-changed" | "confirm-request"
-  | "terminal-output" | "terminal-exit" | "clips-changed";
+  | "terminal-output" | "terminal-exit" | "clips-changed" | "model-route";
+
+/** `model-route`: where the AI steps actually run changed (Hosted fell back
+ *  to Local, came back, or the key was rejected) — the top-bar chip follows
+ *  it. `reason` is absent when nothing is wrong. */
+export interface ModelRouteEvent {
+  mode: ModelMode;
+  effective: ModelMode;
+  reason?: RouteReason;
+}
 
 export interface ConfirmRequestEvent { id: string; summary: string }
 

@@ -1,5 +1,5 @@
-// Top chrome: project switcher, new-video button, the Shorts / Editor
-// screen switch, undo/redo, export menu.
+// Top chrome: project switcher, new-video button, the LOCAL / HOSTED model
+// chip, the Shorts / Editor screen switch, undo/redo, export menu.
 
 import { useState } from "react";
 import { useStore } from "@tanstack/react-store";
@@ -10,6 +10,7 @@ import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries
 import { setProjectId, setScreen, viewStore } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
+import { ModelChip } from "./ModelChip";
 import { currentTheme, toggleTheme } from "../theme";
 import { SetupPanel } from "./SetupPanel";
 
@@ -140,6 +141,7 @@ export function TopBar({
         </button>
       </div>
       <div className="topbar-right">
+        <ModelChip />
         <button
           className="screen-btn"
           title={onShorts ? "Back to the editor" : "Scan the video for shorts and make them in bulk"}

@@ -413,7 +413,7 @@ export interface FindClipsArgs extends Record<string, unknown> {
 
 export interface FindClipsResult {
   candidates: ClipCandidate[];
-  /** "llm" (scored by the on-device model) | "heuristic" (no model reachable). */
+  /** "llm" (scored by a model: see each candidate's `scorer`) | "heuristic" (rule-based). */
   method: string;
   theme: string | null;
 }
