@@ -1053,8 +1053,14 @@ handler!(h_delete_project, |e, a, s| {
     Ok(json!({ "deleted": true }))
 });
 
-handler!(h_open_project, |e, a, _s| {
-    Ok(serde_json::to_value(e.open_project(arg_uuid(a, "project_id")?)?)?)
+handler!(h_open_project, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let project = e.open_project(project_id)?;
+    // An MCP client asking to open a project means "show it": tell the app.
+    if s == ActionSource::McpClient {
+        crate::events::send(&e.sink(), crate::events::CoreEvent::ProjectOpened { project_id });
+    }
+    Ok(serde_json::to_value(project)?)
 });
 
 handler!(h_save_project, |e, a, _s| {
@@ -1329,7 +1335,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("restore_project", "Bring a trashed project back, edit state and all (see list_projects' trash field).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_restore_project),
-    tool!("open_project", "Open an existing project.",
+    tool!("open_project", "Open an existing project. Called by an MCP client, it also switches the app to show that project, so call it when the user asks to open or switch to one.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_open_project),
     tool!("save_project", "Persist a project.",

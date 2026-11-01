@@ -72,9 +72,12 @@ export interface TranscriptChangedEvent { project_id: string }
 export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
   | "projects-changed" | "media-assets-changed" | "confirm-request"
-  | "terminal-output" | "terminal-exit" | "clips-changed";
+  | "terminal-output" | "terminal-exit" | "clips-changed" | "project-opened";
 
 export interface ConfirmRequestEvent { id: string; summary: string }
+
+/** An MCP client (e.g. Claude Code in the terminal) opened this project. */
+export interface ProjectOpenedEvent { project_id: string }
 
 /** A chunk of PTY output: `data` is base64-encoded raw bytes (write to xterm
  *  as a Uint8Array — never as a string, to survive multibyte boundaries). */

@@ -67,6 +67,12 @@ pub enum CoreEvent {
     },
     /// Project created / duplicated / deleted — refetch the library list.
     ProjectsChanged {},
+    /// An MCP client opened a project: the app switches to show it. Sent only
+    /// for MCP callers, because the UI's own `open_project` calls are refetches
+    /// of the project already on screen.
+    ProjectOpened {
+        project_id: Uuid,
+    },
     TranscriptChanged {
         project_id: Uuid,
     },
@@ -130,6 +136,7 @@ impl CoreEvent {
             CoreEvent::TimelineChanged { .. } => "timeline-changed",
             CoreEvent::MediaAssetsChanged { .. } => "media-assets-changed",
             CoreEvent::ProjectsChanged {} => "projects-changed",
+            CoreEvent::ProjectOpened { .. } => "project-opened",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::ClipsChanged { .. } => "clips-changed",
             CoreEvent::McpReady { .. } => "mcp-ready",
