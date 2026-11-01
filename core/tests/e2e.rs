@@ -416,6 +416,45 @@ async fn external_destructive_ops_require_confirmation() {
 }
 
 #[tokio::test]
+async fn mcp_open_project_tells_the_app_to_show_it() {
+    use std::sync::Arc;
+    struct ChanSink(tokio::sync::mpsc::UnboundedSender<(String, Value)>);
+    impl roughcut_core::events::EventSink for ChanSink {
+        fn emit(&self, event: &str, payload: Value) {
+            let _ = self.0.send((event.to_string(), payload));
+        }
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let editor = Editor::new(
+        Box::new(roughcut_core::store::SqliteStore::open_in_memory().unwrap()),
+        Box::new(roughcut_core::adapters::MockVideoEngine),
+        Box::new(roughcut_core::adapters::MockTranscriber),
+        Arc::new(ChanSink(tx)),
+        true,
+    );
+    let p = call(&editor, "create_project", json!({ "name": "show me", "file_path": "/demo/x.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    let opened = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>| {
+        let mut ids = Vec::new();
+        while let Ok((name, payload)) = rx.try_recv() {
+            if name == "project-opened" {
+                ids.push(payload["project_id"].as_str().unwrap().to_string());
+            }
+        }
+        ids
+    };
+    opened(&mut rx);
+
+    // The app's own open (a refetch of what's on screen) must not move the view.
+    tools::dispatch(&editor, "open_project", &json!({ "project_id": pid }), Caller::Ui).await.unwrap();
+    assert!(opened(&mut rx).is_empty(), "UI opens must not send project-opened");
+
+    // An MCP client opening it does.
+    tools::dispatch(&editor, "open_project", &json!({ "project_id": pid }), Caller::Mcp).await.unwrap();
+    assert_eq!(opened(&mut rx), vec![pid]);
+}
+
+#[tokio::test]
 async fn open_project_backfills_a_missing_semantic_index() {
     let editor = Editor::test_instance();
     // Transcribe with NO embedder reachable: transcript persists, index doesn't

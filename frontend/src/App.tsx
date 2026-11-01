@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { onAppEvent } from "./ipc/api";
-import type { ConfirmRequestEvent } from "./ipc/types";
+import type { ConfirmRequestEvent, ProjectOpenedEvent } from "./ipc/types";
 import { useStore } from "@tanstack/react-store";
+import { useQueryClient } from "@tanstack/react-query";
 import { getDemoMode, isTauri } from "./ipc/api";
-import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from "./ipc/queries";
+import { queryKeys, useCoreEventInvalidation, useProject, useProjects, useTranscript } from "./ipc/queries";
 import { useEditorKeyboard } from "./hooks/useEditorKeyboard";
 import { setActiveTab, setProjectId, setScreen, viewStore } from "./state/viewStore";
 import { useShortsProgressListener } from "./state/shortsStore";
@@ -205,6 +206,22 @@ function useExternalConfirmations() {
   }, []);
 }
 
+/** "Open X" asked of Claude Code (or any MCP client) switches the app to X.
+ *  The screen stays as it is: the Shorts screen shows X's shorts. */
+function useExternalProjectOpen() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!isTauri) return;
+    return onAppEvent<ProjectOpenedEvent>("project-opened", (e) => {
+      // Refresh the list first: App falls back to the newest project when the
+      // pick isn't in it, which would undo the switch for a brand-new project.
+      void queryClient
+        .invalidateQueries({ queryKey: queryKeys.projects })
+        .then(() => setProjectId(e.project_id));
+    });
+  }, [queryClient]);
+}
+
 export default function App() {
   useCoreEventInvalidation();
   // Scan / make / export progress, kept per project while any screen shows.
@@ -212,6 +229,7 @@ export default function App() {
   // The LOCAL / HOSTED status, for the chip and every mode-aware string.
   useModelStatusSync();
   useExternalConfirmations();
+  useExternalProjectOpen();
   useSuppressDefaultContextMenu();
   const projects = useProjects();
   const selected = useStore(viewStore, (s) => s.projectId);

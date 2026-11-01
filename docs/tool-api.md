@@ -36,6 +36,7 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
 | `projects-changed` | `{}` — library changed (create/duplicate/delete/restore); refetch `list_projects` |
+| `project-opened` | `{ project_id }` — an MCP client called `open_project`; the app switches to show that project (never sent for the UI's own calls) |
 | `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers) |
 | `mcp-ready` | `{ url, token }` — MCP server is up |
 | `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background; refetch `get_media_assets` |
@@ -135,7 +136,7 @@ A saved clip is a standalone edit made of one or more pieces of the long-form vi
 - `get_media_assets { project_id } -> MediaAssets` (peaks/thumbnails/playable-copy file paths; generated and cached on first call)
 - `delete_project { project_id } -> { deleted: true }` — moves the project to the TRASH (restorable for 30 days, then purged at startup); never touches the media file
 - `restore_project { project_id } -> Project` — bring a trashed project back, edit state and all
-- `open_project { project_id } -> Project`
+- `open_project { project_id } -> Project` — from an MCP client it also switches the app to that project (`project-opened`)
 - `save_project { project_id } -> Project`
 - `list_projects {} -> { projects: [ProjectSummary], trash: [ProjectSummary] }`
 - `get_timeline { project_id } -> Timeline`
