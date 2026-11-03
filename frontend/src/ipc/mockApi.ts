@@ -68,6 +68,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               "one failure doesn't stop the rest" path shows.
 //   failtranscribe  transcribe fails part-way, with no final progress event
 //               (like the core), so an import's transcription error shows.
+//   failimport  create_project fails, as if the file couldn't be probed.
 //   nohosted    Anthropic is unreachable: a key check can't verify (Save
 //               keeps the key, "saved; couldn't verify while offline"), and
 //               Hosted requests fail — except a multi-request run's first
@@ -83,7 +84,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // ---------------------------------------------------------------------------
 
 export function mockSwitch(
-  name: "nomodel" | "failexport" | "failtranscribe" | "nohosted" | "badkey",
+  name: "nomodel" | "failexport" | "failtranscribe" | "failimport" | "nohosted" | "badkey",
 ): boolean {
   try {
     if (new URLSearchParams(window.location.search).has(name)) return true;
@@ -1001,6 +1002,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   },
 
   create_project(args): Project {
+    if (mockSwitch("failimport")) {
+      throw { code: "invalid_argument", message: "ffprobe could not read the file (mock failure)" };
+    }
     const now = new Date().toISOString();
     // Browser-harness real-video mode: an http file_path becomes playable
     // media with a known duration so engine paths run end to end.

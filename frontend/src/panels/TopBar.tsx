@@ -4,11 +4,12 @@
 import { useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { useQueryClient } from "@tanstack/react-query";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
 import { setProjectId, setScreen, viewStore } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
+import { errText } from "./clipUtil";
 import { ExportMenu } from "./ExportMenu";
 import { ModelChip } from "./ModelChip";
 import { currentTheme, toggleTheme } from "../theme";
@@ -31,7 +32,17 @@ export function TopBar({
   const onShorts = useStore(viewStore, (s) => s.screen === "shorts");
 
   const onNewVideo = async () => {
-    const id = await newProjectFromDialog();
+    let id: string | null;
+    try {
+      id = await newProjectFromDialog();
+    } catch (err) {
+      // No project was made (the file couldn't be probed, say), so there is
+      // no panel to show it in: tell the user here.
+      const text = `Couldn't open that video: ${errText(err)}`;
+      if (isTauri) await message(text, { title: "New video", kind: "error" });
+      else window.alert(text);
+      return;
+    }
     if (id) {
       setProjectId(id);
       await queryClient.invalidateQueries();

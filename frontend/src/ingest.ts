@@ -40,6 +40,7 @@ export async function ingestFile(
   });
   cb.onCreated?.(project.id);
   cb.onPhase?.("Starting transcription…");
+  setTranscribeError(project.id, null);
   try {
     await callTool("transcribe", { project_id: project.id });
   } catch (err) {

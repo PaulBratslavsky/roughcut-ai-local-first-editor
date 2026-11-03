@@ -640,7 +640,7 @@ in the terminal.
 - `mockApi.ts` implements every registry tool in memory (one project plus one
   in the trash), so `npm run dev` works with no Rust build; `core/tests/
   mock_parity.rs` fails if a tool is missing. URL flags like `?nomodel`,
-  `?failexport` or `?failtranscribe` simulate failures.
+  `?failexport`, `?failtranscribe` or `?failimport` simulate failures.
 - **Types are generated from Rust** by ts-rs into `ipc/generated/` (ADR-0003).
   `types.ts` re-exports them; only event payloads and result envelopes are
   written by hand.
