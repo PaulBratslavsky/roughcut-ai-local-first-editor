@@ -104,7 +104,9 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **Shorts screen** (`frontend/src/panels/ShortsScreen.tsx`) — the app screen
   for reviewing a scan: the player beside a grid of candidate cards and the
   saved clips, with "Scan for shorts", "Make N shorts" and "Export N". A
-  terminal drawer under the player shows the app's one Terminal session.
+  drawer under the player has two tabs: **chat** (the app's chat assistant,
+  the same conversation as the editor's Chat tab; the default) and
+  **terminal** (the app's one Terminal session).
 - **Footage tab** (`frontend/src/panels/FootagePanel.tsx`) — adds another video
   file to the end of the current project's source (`append_media`).
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.

@@ -12,7 +12,8 @@ interface PersistedPrefs {
   showCuts: boolean;
   skipCuts: boolean;
   previewCollapsed: boolean;
-  shortsTerminalOpen: boolean;
+  shortsDrawerOpen: boolean;
+  shortsDrawerTab: ShortsDrawerTab;
 }
 
 function loadPrefs(): PersistedPrefs {
@@ -20,11 +21,23 @@ function loadPrefs(): PersistedPrefs {
     showCuts: true,
     skipCuts: true,
     previewCollapsed: false,
-    shortsTerminalOpen: false,
+    shortsDrawerOpen: false,
+    shortsDrawerTab: "chat",
   };
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
-    if (raw) return { ...defaults, ...(JSON.parse(raw) as Partial<PersistedPrefs>) };
+    if (raw) {
+      // Before the drawer had a chat tab, its open flag was shortsTerminalOpen.
+      const { shortsTerminalOpen, ...saved } = JSON.parse(raw) as Partial<PersistedPrefs> & {
+        shortsTerminalOpen?: boolean;
+      };
+      return {
+        ...defaults,
+        ...saved,
+        shortsDrawerOpen: saved.shortsDrawerOpen ?? shortsTerminalOpen ?? defaults.shortsDrawerOpen,
+        shortsDrawerTab: saved.shortsDrawerTab === "terminal" ? "terminal" : "chat",
+      };
+    }
   } catch {
     /* first run / private mode */
   }
@@ -39,13 +52,17 @@ function savePrefs(s: PersistedPrefs): void {
         showCuts: s.showCuts,
         skipCuts: s.skipCuts,
         previewCollapsed: s.previewCollapsed,
-        shortsTerminalOpen: s.shortsTerminalOpen,
+        shortsDrawerOpen: s.shortsDrawerOpen,
+        shortsDrawerTab: s.shortsDrawerTab,
       }),
     );
   } catch {
     /* best-effort */
   }
 }
+
+/** The Shorts screen's drawer under the player: the chat or the terminal. */
+export type ShortsDrawerTab = "chat" | "terminal";
 
 export type ActiveTab = "tools" | "chat" | "footage" | "clips" | "history" | "terminal";
 /** The editor (default) or the Shorts review. */
@@ -73,8 +90,10 @@ export interface ViewState {
   activeTab: ActiveTab;
   /** Collapse the video picture to give the tabs room (audio keeps playing). */
   previewCollapsed: boolean;
-  /** The Shorts screen's terminal drawer (under the player) is open. */
-  shortsTerminalOpen: boolean;
+  /** The Shorts screen's drawer (under the player) is open, and which tab
+   *  it shows. Chat is the default: it needs no setup. */
+  shortsDrawerOpen: boolean;
+  shortsDrawerTab: ShortsDrawerTab;
   /** Auditioning a clip: play these pieces back to back, then pause. Gaps
    *  between pieces are skipped. Cleared by any seek. */
   audition: Range[] | null;
@@ -243,8 +262,13 @@ export const togglePreviewCollapsed = () => {
   patch({ previewCollapsed: !viewStore.state.previewCollapsed });
   savePrefs(viewStore.state);
 };
-export const toggleShortsTerminal = () => {
-  patch({ shortsTerminalOpen: !viewStore.state.shortsTerminalOpen });
+export const toggleShortsDrawer = () => {
+  patch({ shortsDrawerOpen: !viewStore.state.shortsDrawerOpen });
+  savePrefs(viewStore.state);
+};
+/** Show a drawer tab, opening the drawer if it is closed. */
+export const showShortsDrawerTab = (shortsDrawerTab: ShortsDrawerTab) => {
+  patch({ shortsDrawerOpen: true, shortsDrawerTab });
   savePrefs(viewStore.state);
 };
 export const setSelectedClipId = (selectedClipId: string | null) => patch({ selectedClipId });

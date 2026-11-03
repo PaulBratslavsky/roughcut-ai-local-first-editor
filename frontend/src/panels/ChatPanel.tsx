@@ -1,25 +1,14 @@
 // Chat panel: conversational editing. Sends instructions to apply_instruction
 // and renders streaming agent-step events (tool calls, results, final summary).
+// The conversation lives in state/chatStore (one per project), so the
+// editor's Chat tab and the Shorts drawer show the same one.
 
 import { useEffect, useRef, useState } from "react";
-import { callTool, onAppEvent } from "../ipc/api";
+import { useStore } from "@tanstack/react-store";
 import { useQueryClient } from "@tanstack/react-query";
-import { useApplyInstruction } from "../ipc/queries";
 import type { AgentStepEvent } from "../ipc/types";
 import { modelLabel, useModelStatus } from "../state/modelStore";
-import { errText } from "./clipUtil";
-
-interface AgentMessage {
-  id: string;
-  role: "user" | "agent";
-  text: string; // user text or final summary
-  steps: AgentStepEvent[];
-  pending: boolean;
-  actionCount: number;
-  actionIds: string[];
-  undone: boolean;
-  startedAt: number;
-}
+import { chatOf, chatStore, ensureChatListener, sendChat, undoChatTurn } from "../state/chatStore";
 
 /** Always-moving footer for an in-flight run: a model can sit on one
  *  inference call for a minute — a ticking clock says "working, not hung". */
@@ -36,9 +25,6 @@ function ElapsedRow({ startedAt }: { startedAt: number }) {
     </div>
   );
 }
-
-let msgCounter = 0;
-const nextId = () => `msg-${++msgCounter}`;
 
 // ---- friendly tool-call rendering (Claude-Desktop-style action cards) ----
 
@@ -172,33 +158,15 @@ function StepView({ step }: { step: AgentStepEvent }) {
 }
 
 export function ChatPanel({ projectId }: { projectId: string }) {
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const chat = useStore(chatStore, (all) => chatOf(all, projectId));
+  const { messages } = chat;
+  const running = chat.pendingId !== null;
   const [input, setInput] = useState("");
-  const applyInstruction = useApplyInstruction();
   const model = useModelStatus();
   const queryClient = useQueryClient();
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pendingIdRef = useRef<string | null>(null);
 
-  // Stream agent-step events into the in-flight agent message.
-  useEffect(() => {
-    return onAppEvent<AgentStepEvent>("agent-step", (step) => {
-      if (step.project_id !== projectId) return;
-      const id = pendingIdRef.current;
-      if (!id) return;
-      setMessages((msgs) =>
-        msgs.map((m) =>
-          m.id === id
-            ? {
-                ...m,
-                steps: [...m.steps, step],
-                text: step.kind === "final" && step.text ? step.text : m.text,
-              }
-            : m,
-        ),
-      );
-    });
-  }, [projectId]);
+  useEffect(() => ensureChatListener(), []);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -207,65 +175,9 @@ export function ChatPanel({ projectId }: { projectId: string }) {
 
   const send = () => {
     const instruction = input.trim();
-    if (!instruction || applyInstruction.isPending) return;
+    if (!instruction || running) return;
     setInput("");
-    const agentId = nextId();
-    pendingIdRef.current = agentId;
-    // Recent turns travel with the instruction so "apply the edits" / "do it"
-    // resolve against what the agent proposed last turn.
-    const history = messages
-      .filter((m) => m.text)
-      .slice(-8)
-      .map((m) => ({ role: m.role === "user" ? ("user" as const) : ("agent" as const), text: m.text }));
-    setMessages((msgs) => [
-      ...msgs,
-      { id: nextId(), role: "user", text: instruction, steps: [], pending: false, actionCount: 0, actionIds: [], undone: false, startedAt: Date.now() },
-      { id: agentId, role: "agent", text: "", steps: [], pending: true, actionCount: 0, actionIds: [], undone: false, startedAt: Date.now() },
-    ]);
-    applyInstruction.mutate(
-      { project_id: projectId, instruction, history },
-      {
-        onSuccess: (res) => {
-          setMessages((msgs) =>
-            msgs.map((m) =>
-              m.id === agentId
-                ? { ...m, pending: false, text: res.summary, actionCount: res.actions.length,
-                actionIds: res.actions.map((a) => a.id) }
-                : m,
-            ),
-          );
-          pendingIdRef.current = null;
-        },
-        onError: (err) => {
-          setMessages((msgs) =>
-            msgs.map((m) =>
-              m.id === agentId
-                ? { ...m, pending: false, text: `Something went wrong: ${errText(err)}` }
-                : m,
-            ),
-          );
-          pendingIdRef.current = null;
-        },
-      },
-    );
-  };
-
-  // Undo the WHOLE turn (every action it applied), and only while those
-  // actions are still the newest journal entries — a plain `undo` popped one
-  // global entry, so an old button could revert unrelated later edits.
-  const onUndo = async (msgId: string) => {
-    const msg = messages.find((m) => m.id === msgId);
-    if (!msg || msg.actionIds.length === 0) return;
-    try {
-      await callTool("undo_actions", { project_id: projectId, action_ids: msg.actionIds });
-      await queryClient.invalidateQueries();
-      setMessages((msgs) => msgs.map((m) => (m.id === msgId ? { ...m, undone: true } : m)));
-    } catch (e) {
-      const why = errText(e);
-      setMessages((msgs) =>
-        msgs.map((m) => (m.id === msgId ? { ...m, text: `${m.text}\n\n[undo: ${why}]` } : m)),
-      );
-    }
+    void sendChat(projectId, instruction, queryClient);
   };
 
   return (
@@ -293,7 +205,11 @@ export function ChatPanel({ projectId }: { projectId: string }) {
               {m.pending && <ElapsedRow startedAt={m.startedAt} />}
               {m.text && <div className="agent-summary">{m.text}</div>}
               {!m.pending && m.actionCount > 0 && (
-                <button className="undo-link" onClick={() => void onUndo(m.id)} disabled={m.undone}>
+                <button
+                  className="undo-link"
+                  onClick={() => void undoChatTurn(projectId, m.id, queryClient)}
+                  disabled={m.undone}
+                >
                   {m.undone
                     ? "Undone"
                     : m.actionCount > 1
@@ -318,8 +234,8 @@ export function ChatPanel({ projectId }: { projectId: string }) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />
-        <button className="primary-btn" type="submit" disabled={!input.trim() || applyInstruction.isPending}>
-          {applyInstruction.isPending ? "Working…" : "Send"}
+        <button className="primary-btn" type="submit" disabled={!input.trim() || running}>
+          {running ? "Working…" : "Send"}
         </button>
       </form>
     </div>

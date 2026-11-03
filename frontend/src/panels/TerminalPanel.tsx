@@ -16,9 +16,15 @@ import "@xterm/xterm/css/xterm.css";
 import { isTauri } from "../ipc/api";
 import { attachTerminal, restartTerminal, terminalStore, writeToTerminal } from "../state/terminalSession";
 
+// Safe to click again: drop this folder's earlier registration (it may hold
+// an old port or token), add the current one, and print one line instead of
+// the add command's own output (which could echo the token). Errors still
+// show. Typed at the shell prompt, so click it before starting `claude`.
 const CONNECT_CMD =
+  "claude mcp remove roughcut -s local >/dev/null 2>&1; " +
   'claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" ' +
-  '--header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"\n';
+  '--header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN" >/dev/null && ' +
+  'echo "RoughCut is connected. Now run: claude"\n';
 
 export function TerminalPanel() {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -43,12 +49,12 @@ export function TerminalPanel() {
         <button
           className="terminal-btn"
           onClick={() => writeToTerminal(CONNECT_CMD)}
-          title="Register this app's MCP server with Claude Code"
+          title="Register this app with Claude Code (refreshes it if already registered)"
         >
           Connect Claude Code
         </button>
         <span className="terminal-hint">
-          runs <code>claude mcp add</code> against the running server
+          at a shell prompt, then run <code>claude</code>
         </span>
       </div>
       <div className="terminal-host" ref={hostRef} />

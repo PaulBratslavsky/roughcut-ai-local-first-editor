@@ -45,6 +45,14 @@
 
   --radius: 2px;
   --radius-sm: 0px;
+
+  /* The in-app terminal is always dark (xterm's own theme), in both app
+     themes, so its chrome uses these instead of the theme's ink/paper. */
+  --term-bg: #0e0e0e;
+  --term-fg: #e6e6e6;
+  --term-muted: #8e939c;
+  --term-border: #2a2c31;
+  --term-hover: rgba(255, 255, 255, 0.07);
 }
 
 [data-theme="light"] {
@@ -408,29 +416,30 @@ input, select { font: inherit; }
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: #0e0e0e;
+  background: var(--term-bg);
+  color: var(--term-fg);
 }
 .terminal-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--term-border);
   flex: none;
 }
-.terminal-hint { font-size: 11px; color: var(--text-muted); }
+.terminal-hint { font-size: 11px; color: var(--term-muted); }
 .terminal-hint code { font-size: 11px; }
 .terminal-btn {
   font: inherit;
   font-size: 12px;
   padding: 3px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
+  border: 1px solid var(--term-border);
+  border-radius: var(--radius);
   background: transparent;
-  color: var(--text, #e6e6e6);
+  color: var(--term-fg);
   cursor: pointer;
 }
-.terminal-btn:hover { background: rgba(255, 255, 255, 0.06); }
+.terminal-btn:hover { background: var(--term-hover); }
 .terminal-host {
   flex: 1;
   min-height: 0;
@@ -441,7 +450,7 @@ input, select { font: inherit; }
 .terminal-host .terminal-surface { height: 100%; }
 .terminal-placeholder {
   padding: 18px;
-  color: var(--text-muted);
+  color: var(--term-muted);
   font-size: 13px;
 }
 .terminal-exit-bar {
@@ -450,9 +459,9 @@ input, select { font: inherit; }
   justify-content: space-between;
   gap: 10px;
   padding: 6px 12px;
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--term-border);
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--term-muted);
   flex: none;
 }
 
@@ -1982,35 +1991,51 @@ input, select { font: inherit; }
   overflow-y: auto;
 }
 .shorts-player-note { padding: 10px 14px; }
-/* The terminal drawer under the player: a toggle row; open, it takes the
-   rest of the column (never less than a usable height). */
-.shorts-terminal {
+/* The drawer under the player: a bar with chat | terminal tabs; open, it
+   takes the rest of the column (never less than a usable height). */
+.shorts-drawer {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border-soft);
   flex: none;
 }
-.shorts-terminal.open { flex: 1 0 280px; min-height: 280px; }
-.shorts-terminal-toggle {
+.shorts-drawer.open { flex: 1 0 300px; min-height: 300px; }
+.shorts-drawer-bar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  width: 100%;
-  padding: 8px 14px;
+  padding: 0 14px 0 8px;
+  border-bottom: 1px solid transparent;
+  flex: none;
+  min-width: 0;
+}
+.shorts-drawer.open .shorts-drawer-bar { border-bottom-color: var(--border-soft); }
+.shorts-drawer-toggle {
+  width: 22px;
+  padding: 6px 0;
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--text-muted);
   font: inherit;
   font-size: 12px;
-  text-align: left;
   cursor: pointer;
   flex: none;
 }
-.shorts-terminal-toggle:hover { background: var(--panel-2); }
-.shorts-terminal-caret { width: 1ch; color: var(--text-muted); }
-.shorts-terminal-hint { color: var(--text-muted); font-size: 11px; }
-.shorts-terminal .terminal-panel { flex: 1; min-height: 0; }
+.shorts-drawer-toggle:hover { color: var(--text); }
+.shorts-drawer-tabs { display: flex; flex: none; }
+.shorts-drawer-tabs .tab { font-size: 12px; margin-right: 12px; padding: 7px 2px 6px; }
+.shorts-drawer-hint {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shorts-drawer .terminal-panel,
+.shorts-drawer .chat-panel { flex: 1; min-height: 0; }
 .shorts-main {
   flex: 1;
   min-width: 0;

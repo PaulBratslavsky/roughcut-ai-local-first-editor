@@ -95,9 +95,10 @@ missing.
 ### Claude as your editor (MCP)
 
 **Claude Code, inside the app** — open the Terminal tab (or the terminal
-drawer under the Shorts player) and click **Connect Claude Code**. It runs
-`claude mcp add` against the running server for you; no shim needed. Then
-run `claude` in that terminal.
+tab of the drawer under the Shorts player) and click **Connect Claude Code**
+at the shell prompt. It registers the running server with `claude mcp add`
+for you (refreshing an earlier registration, so it's safe to click again);
+no shim needed. Then run `claude` in that terminal.
 
 **From outside the app** — run the app once (it writes the endpoint +
 per-install token to `~/Library/Application Support/roughcut/mcp.json`),
