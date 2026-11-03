@@ -481,7 +481,6 @@ pub enum EditOp {
     RestoreSegments { segment_ids: Vec<Uuid> },
     TrimClip { clip_id: Uuid, new_source_in: f64, new_source_out: f64 },
     SplitClip { clip_id: Uuid, at_time: f64 },
-    ReorderClip { clip_id: Uuid, new_order: u32 },
     SetGlobalPadding { start_s: f64, end_s: f64, linked: bool },
     RoughCut { aggressiveness: Aggressiveness },
     /// Restore a prior clip arrangement wholesale — the universal exact
@@ -496,7 +495,6 @@ impl EditOp {
             EditOp::RestoreRange { .. } | EditOp::RestoreSegments { .. } => "restore",
             EditOp::TrimClip { .. } => "trim",
             EditOp::SplitClip { .. } => "split",
-            EditOp::ReorderClip { .. } => "reorder",
             EditOp::SetGlobalPadding { .. } => "pad",
             EditOp::RoughCut { .. } => "ai_batch",
             EditOp::SetClips { .. } => "set_clips",
@@ -517,9 +515,6 @@ impl EditOp {
                 format!("Trim clip to {new_source_in:.2}s–{new_source_out:.2}s")
             }
             EditOp::SplitClip { at_time, .. } => format!("Split clip at {at_time:.2}s"),
-            EditOp::ReorderClip { new_order, .. } => {
-                format!("Move clip to position {new_order}")
-            }
             EditOp::SetGlobalPadding { start_s, end_s, .. } => {
                 format!("Set global padding start {start_s:.2}s / end {end_s:.2}s")
             }

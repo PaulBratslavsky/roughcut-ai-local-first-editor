@@ -207,8 +207,8 @@ impl Editor {
             // Undo/redo journal survives restarts.
             if let Some(doc) = self.inner.store.get_kv(&format!("journal:{project_id}"))? {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) {
-                    entry.undo = serde_json::from_value(v["undo"].clone()).unwrap_or_default();
-                    entry.redo = serde_json::from_value(v["redo"].clone()).unwrap_or_default();
+                    entry.undo = journal_entries(&v["undo"]);
+                    entry.redo = journal_entries(&v["redo"]);
                 }
             }
         }
@@ -227,5 +227,51 @@ impl Editor {
         let project =
             entry.project.as_ref().ok_or_else(|| CoreError::NotFound("project".into()))?;
         f(project, entry.transcript.as_ref())
+    }
+}
+
+/// Read a persisted undo or redo stack one entry at a time. An entry this
+/// build can't read is dropped instead of losing the whole stack. That covers
+/// the removed `reorder_clip` op: it never changed the timeline, and every
+/// entry's inverse and redo are full snapshots, so the entries around a
+/// dropped one still undo and redo exactly.
+fn journal_entries(stack: &serde_json::Value) -> Vec<JournalEntry> {
+    stack
+        .as_array()
+        .map(|items| items.iter().filter_map(|e| serde_json::from_value(e.clone()).ok()).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_journal_entry_with_a_removed_op_is_dropped_not_the_whole_history() {
+        let snapshot = |t: &Timeline| EditOp::SetClips {
+            clips: t.clips.clone(),
+            global_padding: t.global_padding,
+        };
+        let before = Timeline::new(60.0);
+        let mut after = before.clone();
+        after.set_range_included(10.0, 20.0, false, ClipOrigin::Manual);
+        let cut = JournalEntry {
+            action: EditAction::new(ActionSource::Ui, EditOp::CutRange { start: 10.0, end: 20.0 }),
+            inverse: snapshot(&before),
+            redo: snapshot(&after),
+        };
+        let cut = serde_json::to_value(&cut).unwrap();
+        // What a journal saved before reorder_clip was removed looks like.
+        let mut reorder = cut.clone();
+        reorder["action"]["kind"] = "reorder".into();
+        reorder["action"]["op"] =
+            serde_json::json!({ "type": "reorder_clip", "clip_id": Uuid::new_v4(), "new_order": 0 });
+        let saved = serde_json::json!({ "undo": [cut.clone(), reorder, cut], "redo": [] });
+
+        let undo = journal_entries(&saved["undo"]);
+        assert_eq!(undo.len(), 2, "only the unreadable entry is dropped");
+        assert!(undo.iter().all(|e| matches!(e.action.op, EditOp::CutRange { .. })));
+        assert!(journal_entries(&saved["redo"]).is_empty());
+        assert!(journal_entries(&serde_json::Value::Null).is_empty());
     }
 }

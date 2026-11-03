@@ -498,18 +498,6 @@ handler!(h_split_clip, |e, a, s| {
     Ok(json!({ "clips": outcome.split_clips, "timeline": outcome.timeline, "action": outcome.action }))
 });
 
-handler!(h_reorder_clip, |e, a, s| {
-    edit(
-        e,
-        arg_uuid(a, "project_id")?,
-        EditOp::ReorderClip {
-            clip_id: arg_uuid(a, "clip_id")?,
-            new_order: a["new_order"].as_u64().unwrap_or(0) as u32,
-        },
-        s,
-    )
-});
-
 handler!(h_set_global_padding, |e, a, s| {
     let start_s = arg_f64(a, "start_s")?;
     edit(
@@ -724,7 +712,7 @@ handler!(h_apply_edits, |e, a, s| {
     let ops: Vec<EditOp> = serde_json::from_value(edits_json)
         .map_err(|err| CoreError::InvalidArg(format!(
             "edits: {err}. Each edit is {{\"type\": one of cut_range|restore_range|cut_segments|\
-             restore_segments|trim_clip|split_clip|reorder_clip|set_global_padding, ...fields}}"
+             restore_segments|trim_clip|split_clip|set_global_padding, ...fields}}"
         )))?;
     if ops.is_empty() {
         return Err(CoreError::InvalidArg("edits must be a non-empty array".into()));
@@ -1214,9 +1202,6 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("split_clip", "Split a clip at a source time (playhead).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "at_time": {"type": "number"}}), &["project_id", "clip_id", "at_time"]),
         agent: true, meta: false, mutating: true, h_split_clip),
-    tool!("reorder_clip", "Move a clip to a new position in the timeline.",
-        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "new_order": {"type": "integer"}}), &["project_id", "clip_id", "new_order"]),
-        agent: false, meta: false, mutating: true, h_reorder_clip),
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
@@ -1250,7 +1235,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). With include_words each segment carries words: [{text, start, end, confidence}] (key is `text`). Use offset/limit for long videos instead of get_transcript.",
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_read_transcript),
-    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"reorder_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds, optional snap=\"word\"|\"sentence\" to land on clean boundaries; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
+    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds, optional snap=\"word\"|\"sentence\" to land on clean boundaries; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
         || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"oneOf": [
             {"type": "object", "properties": {"type": {"const": "cut_range"}, "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap to clean word/sentence boundaries (default none)"}}, "required": ["type", "start", "end"]},
             {"type": "object", "properties": {"type": {"const": "restore_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},
@@ -1258,7 +1243,6 @@ static REGISTRY: &[ToolSpec] = &[
             {"type": "object", "properties": {"type": {"const": "restore_segments"}, "segment_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "segment_ids"]},
             {"type": "object", "properties": {"type": {"const": "trim_clip"}, "clip_id": {"type": "string"}, "new_source_in": {"type": "number"}, "new_source_out": {"type": "number"}}, "required": ["type", "clip_id", "new_source_in", "new_source_out"]},
             {"type": "object", "properties": {"type": {"const": "split_clip"}, "clip_id": {"type": "string"}, "at_time": {"type": "number"}}, "required": ["type", "clip_id", "at_time"]},
-            {"type": "object", "properties": {"type": {"const": "reorder_clip"}, "clip_id": {"type": "string"}, "new_order": {"type": "integer"}}, "required": ["type", "clip_id", "new_order"]},
             {"type": "object", "properties": {"type": {"const": "set_global_padding"}, "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}, "required": ["type", "start_s", "end_s"]}
         ]}}}), &["project_id", "edits"]),
         agent: true, meta: false, mutating: true, h_apply_edits),

@@ -38,7 +38,7 @@ user's Mac.
 │  │     ▲ events             │ dispatch          │   │ Ollama /      │      │
 │  │     │                    ▼                   │   │ llama-server  │      │
 │  │  ┌─ roughcut-core ──────────────────────┐    │   ├───────────────┤      │
-│  │  │ Editor · registry (66) · agent loop  ├────┼──►│ Apple Vision  │      │
+│  │  │ Editor · registry (65) · agent loop  ├────┼──►│ Apple Vision  │      │
 │  │  │ whisper.cpp, in-process              │    │   ├───────────────┤      │
 │  │  │ MCP server 127.0.0.1:<port>/mcp      │    │   │ SQLite        │      │
 │  │  └─────────────────▲────────────────────┘    │   └───────────────┘      │
@@ -128,7 +128,7 @@ tools::dispatch(editor, name, args, caller)   // run a tool
 tools::defs(caller)                           // what this caller may see
 ```
 
-There are **66 rows**. **28** are `agent: true` (the in-app chat assistant may
+There are **65 rows**. **28** are `agent: true` (the in-app chat assistant may
 use them). **1** is `meta: true`: `apply_instruction`, which starts the agent
 loop itself.
 
@@ -137,9 +137,9 @@ never disagree:
 
 | Caller | Who | Sees | Extra rules | Edits credited to |
 |---|---|---|---|---|
-| `Ui` | the user's clicks, via the Tauri `call_tool` command | all 66 | none | `ui` |
+| `Ui` | the user's clicks, via the Tauri `call_tool` command | all 65 | none | `ui` |
 | `Agent { attribute_to }` | the chat assistant's loop | the 28 agent rows, never meta | arguments schema-checked | `attribute_to` (see §16) |
-| `Mcp` | Claude Code, Claude Desktop, any MCP client | 65 (all but meta) | arguments schema-checked; `export`, `export_clip`, `export_clips` and `delete_project` wait for the user's approval (§9) | `mcp_client` |
+| `Mcp` | Claude Code, Claude Desktop, any MCP client | 64 (all but meta) | arguments schema-checked; `export`, `export_clip`, `export_clips` and `delete_project` wait for the user's approval (§9) | `mcp_client` |
 
 Because the agent never sees meta tools, a loop can't start another loop: the
 recursion guard is structural, not a prompt. The LOCAL / HOSTED switch, the
@@ -154,7 +154,7 @@ on egress or read the key.
 | Media | `import_media`, `transcribe`, `append_media`, `attach_screen_media`, `set_layout`, `set_audio_offset`, `get_media_assets` |
 | Analysis | `detect_silences`\*, `remove_silences`\*, `detect_fillers`, `detect_takes`, `generate_rough_cut`\* |
 | Suggestions | `get_suggestions`\*, `accept_suggestion`\*, `accept_all_suggestions`\*, `dismiss_suggestion`\* |
-| Range edits | `cut_range`\*, `restore_range`\*, `trim_clip`\*, `split_clip`\*, `reorder_clip`, `set_global_padding`\*, `apply_edits`\* |
+| Range edits | `cut_range`\*, `restore_range`\*, `trim_clip`\*, `split_clip`\*, `set_global_padding`\*, `apply_edits`\* |
 | Transcript | `cut_by_transcript`\*, `restore_by_transcript`\*, `find_segments`\*, `read_transcript`\*, `get_transcript` |
 | Story | `outline_transcript`\*, `review_flow`\*, `story_edit`\*, `plan_duration_cut`\* |
 | Agent | `apply_instruction`† |
@@ -224,7 +224,7 @@ Every change to the cut goes through `apply_edit` / `apply_edit_labeled` in
 ```
 
 - **Edits are data.** An `EditOp` is one of `CutRange`, `RestoreRange`,
-  `CutSegments`, `RestoreSegments`, `TrimClip`, `SplitClip`, `ReorderClip`,
+  `CutSegments`, `RestoreSegments`, `TrimClip`, `SplitClip`,
   `SetGlobalPadding`, `RoughCut`, or `SetClips` (journal only). Tool handlers
   build the op; there are no per-edit Editor methods.
 - **Undo stores snapshots, not math** (ADR-0002). Each `JournalEntry` keeps the
@@ -339,7 +339,7 @@ Both end up calling the same tools through the same seam. The difference is
  │   agent loop (core, ≤ 12 steps) ◄─► app's model │                         │
  │              │                      (Local or ◄─┼── AI tools it calls     │
  │              ▼                       Hosted)    ▼   still use this model  │
- │        28 agent tools                    65 MCP tools (risky ones ask)    │
+ │        28 agent tools                    64 MCP tools (risky ones ask)    │
  │              └──────────────► Editor ◄──────────┘                         │
  └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -348,7 +348,7 @@ Both end up calling the same tools through the same seam. The difference is
 |---|---|---|
 | Who runs the loop | RoughCut, inside the core (`agent.rs`) | Claude Code, outside the app |
 | Model | the app's model: Local or Hosted | Claude Code's own model |
-| Tools | 28, about editing the open project | 65: projects, export, history, checkpoints, settings too |
+| Tools | 28, about editing the open project | 64: projects, export, history, checkpoints, settings too |
 | Works offline | yes, in Local mode | no |
 | Edits credited to | `ui` today; should be `local_ai` (§16) | `mcp_client` |
 
@@ -547,7 +547,7 @@ When the app starts, the shell spawns `mcp::server::start(editor)`:
 - A **stable port**: saved in kv `mcp_port` and reused when free; a new port
   only if another program took it. So a client registered once keeps working.
 - The endpoint and token are written to `<data dir>/mcp.json` for the shim.
-- `tools/list` returns the 65 non-meta tools; `tools/call` goes through
+- `tools/list` returns the 64 non-meta tools; `tools/call` goes through
   `dispatch(…, Caller::Mcp)`.
 
 Two MCP-only behaviours:
@@ -861,9 +861,6 @@ scripts/build-macos-app.sh             # signed release RoughCut.app
 
 ## 16. Known issues (found while writing this)
 
-- **`reorder_clip` does nothing.** `apply_op` moves the clip, then
-  `Timeline::normalize` sorts clips by `source_in` and undoes the move. No test
-  covers it; MCP clients can still call it. (`engine/edits.rs`)
 - **Chat edits are credited to `ui`.** `h_apply_instruction` passes the UI
   caller's source into the loop as `attribute_to`, so History shows the
   assistant's edits as the user's. The intent is `local_ai`. (`tools.rs`)

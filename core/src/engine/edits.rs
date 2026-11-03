@@ -669,19 +669,6 @@ fn apply_op(
                 project.timeline.split_clip(*clip_id, *at_time).map_err(CoreError::InvalidArg)?;
             split_ids.extend([l, r]);
         }
-        EditOp::ReorderClip { clip_id, new_order } => {
-            let clips = &mut project.timeline.clips;
-            let idx = clips
-                .iter()
-                .position(|c| c.id == *clip_id)
-                .ok_or_else(|| CoreError::NotFound(format!("clip {clip_id}")))?;
-            let clip = clips.remove(idx);
-            let new_idx = (*new_order as usize).min(clips.len());
-            clips.insert(new_idx, clip);
-            for (i, c) in clips.iter_mut().enumerate() {
-                c.order = i as u32;
-            }
-        }
         EditOp::SetGlobalPadding { start_s, end_s, linked } => {
             project.timeline.apply_padding(*start_s, *end_s, *linked);
         }

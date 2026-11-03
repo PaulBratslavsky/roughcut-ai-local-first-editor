@@ -50,8 +50,10 @@ Keep entries short. When a refactor names a new module, add the term here.
 ## Edits (the mutation language)
 
 - **EditOp** (`model.rs`) — the sum type of all timeline mutations (CutRange,
-  RestoreRange, CutSegments, RestoreSegments, TrimClip, SplitClip, ReorderClip,
-  SetGlobalPadding, RoughCut, SetClips). Both the **public edit vocabulary** and
+  RestoreRange, CutSegments, RestoreSegments, TrimClip, SplitClip,
+  SetGlobalPadding, RoughCut, SetClips). No op reorders clips: the main cut
+  plays in source order (the Timeline invariant); a different play order is a
+  SavedClip's pieces. Both the **public edit vocabulary** and
   the **internal journal format**. `SetClips` is the universal exact inverse/redo.
   ⚠ Adding a variant currently touches ~7 disjoint places (refactor item 1).
 - **EditAction** (`model.rs`) — the *audit record* of one applied `EditOp`:

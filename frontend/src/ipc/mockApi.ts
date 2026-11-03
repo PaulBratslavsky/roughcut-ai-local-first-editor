@@ -1493,18 +1493,6 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return { clips: [clone(clip), clone(right)], timeline: clone(p.timeline), action };
   },
 
-  reorder_clip(args) {
-    const p = requireProject(args.project_id);
-    const clip = p.timeline.clips.find((c) => c.id === args.clip_id);
-    if (!clip) throw { code: "not_found", message: `Unknown clip ${String(args.clip_id)}` };
-    const action = recordEdit(p, "reorder_clip", `Reordered clip ${clip.id}`);
-    clip.order = Number(args.new_order);
-    p.timeline.clips.sort((a, b) => a.order - b.order);
-    p.timeline.clips.forEach((c, i) => { c.order = i; });
-    refreshTimeline(p);
-    return { action, timeline: clone(p.timeline) };
-  },
-
   set_global_padding(args) {
     const p = requireProject(args.project_id);
     const action = recordEdit(p, "set_global_padding", "Set global clip padding");

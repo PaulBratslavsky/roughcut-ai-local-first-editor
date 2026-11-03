@@ -53,8 +53,8 @@ ends in `other => other` (`edits.rs:603`) and the range-bounds check is an
 `if let` (`edits.rs:59`). A new op silently skips frame-snapping and bounds
 checks. Real touch-count is ~11 for `TrimClip` / ~14 for `CutRange` (add
 `describe()`, the bounds check, `apply_edits`' blacklist + hand-written `oneOf`,
-`story.rs:862`). So this is a **correctness** win, not only locality — and
-`ReorderClip` is already a journaled no-op (`normalize()` re-sorts it away).
+`story.rs:862`). So this is a **correctness** win, not only locality. (`ReorderClip` was a
+journaled no-op — `normalize()` re-sorted it away — and has been removed.)
 - [ ] Inventory every `EditOp` variant and its touch-points (enum, `kind`,
       `apply_op`, `frame_snap`, `tools.rs` handler/schema/registry, `mockApi` parity).
 - [ ] Choose the co-location shape (per-op module, or a trait each op implements
@@ -71,8 +71,7 @@ checks. Real touch-count is ~11 for `TrimClip` / ~14 for `CutRange` (add
 **Problem:** each tool's JSON schema and its handler's arg parsing are two
 independent descriptions of one interface, and they drift (*audit*):
 `remove_silences` advertises `min_duration_s` and ignores it; `set_global_padding`
-marks `end_s` required but defaults it; `reorder_clip` `unwrap_or(0)`s a required
-field. 58 handlers (not 45); `arg_uuid(a,"project_id")?` ×52, 26 raw `a["x"]`
+marks `end_s` required but defaults it. 58 handlers (not 45); `arg_uuid(a,"project_id")?` ×52, 26 raw `a["x"]`
 reads. Visibility is no longer disjoint — see item 8.
 - [ ] Catalogue the arg-parsing patterns (`arg_uuid`/`arg_f64`/`arg_str`/raw
       `a["x"]`) and the handler→engine-method shapes.

@@ -70,7 +70,7 @@ checklist item 8.
 |---|---|---|
 | B1 | ✔ `trim_clip` can **panic** (`f64::clamp` with min > max) when adjacent included clips total < 50 ms (reachable at ≥ ~41 fps). It runs under the global `state` lock → mutex poisoned → every later `.lock().unwrap()` panics, for every project, until restart. | `model.rs:280`, `engine/edits.rs:45` |
 | B2 | ✔ `llm_outline` **panics** on the weak-model overlap it says it handles: `b.last.clamp(first, chunk_end-1)` with `first == chunk_end`. | `story.rs:187-188` |
-| B3 | ✔ `reorder_clip` is a **journaled no-op**: `normalize()` re-sorts by `source_in` and resets `order`. The mock really reorders. | `edits.rs:672-684`, `model.rs:167, 192` |
+| B3 | ✔ `reorder_clip` is a **journaled no-op**: `normalize()` re-sorts by `source_in` and resets `order`. The mock really reorders. **Resolved: the tool and the `ReorderClip` op were removed; the main cut plays in source order, and a saved clip's pieces carry any other play order.** | `edits.rs:672-684`, `model.rs:167, 192` |
 | B4 | `append_media` / `import_media` (existing project) change `duration` outside `apply_edit`; every older undo snapshot and checkpoint stops at the old duration, so undo strands the appended span. | `engine/media.rs:26, 176-188` |
 | B5 | `rough_cut_peaks` is one global slot any `apply_edit` consumes — concurrent rough cuts on two projects refine against each other's audio. | `engine/mod.rs:72`, `edits.rs:74` |
 | B6 | In-memory state and disk can diverge: three separate autocommit writes after mutating memory; a failed journal write leaves an undo entry that restores two edits back. | `edits.rs:94-98`, `store.rs` |

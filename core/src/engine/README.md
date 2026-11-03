@@ -178,8 +178,10 @@ This package depends on the following crate modules but does not own them:
 - `ensure_loaded` loads a project once. It reads `load_project`,
   `load_transcript`, and the `journal:{project_id}` KV entry only while
   `entry.project` is `None`, and never refreshes from the store afterwards. If
-  the journal JSON fails to parse, the journal is silently treated as empty
-  (`mod.rs:ensure_loaded`).
+  the journal JSON fails to parse, the journal is silently treated as empty;
+  an undo or redo entry that doesn't parse (an op this build no longer has,
+  such as the removed `reorder_clip`) is dropped on its own
+  (`mod.rs:journal_entries`).
 - A single `std::sync::Mutex` (`Inner.state`) guards every project, transcript,
   and journal. Async methods read through `with_project` and release the lock
   before they `.await`. Store writes do happen while `state` is held.
@@ -220,8 +222,6 @@ This package depends on the following crate modules but does not own them:
 - `apply_op`: `CutSegments` and `RestoreSegments` need a transcript (otherwise
   `InvalidArg`) and fail with `NotFound("segment {id}")` for an unknown
   segment.
-- `apply_op`: `ReorderClip` clamps `new_order` to the clip count and
-  renumbers every clip's `order` from `0..n`.
 - `apply_op`: `RoughCut` only adds exclusions, tagged `ClipOrigin::AiCut`, on
   top of the existing cut, then applies `prefs.default_padding` if it is
   non-zero.

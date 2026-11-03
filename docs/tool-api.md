@@ -112,7 +112,6 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `restore_by_transcript { project_id, segment_ids } -> { action, timeline }`
 - `trim_clip { project_id, clip_id, new_source_in, new_source_out } -> { action, timeline }`
 - `split_clip { project_id, clip_id, at_time } -> { clips: [Clip, Clip], timeline, action }`
-- `reorder_clip { project_id, clip_id, new_order } -> { action, timeline }`
 - `attach_screen_media { project_id, file_path } -> { attached }` — attach a screen recording that started at the same moment as the camera file (offset 0: both play on one clock)
 - `set_layout { project_id, mode?, shape?, corner?, size? } -> Layout` — presentation compositing for projects with a screen recording (pip|camera|screen; rounded|round; tl/tr/bl/br; size 0.10-0.45); metadata, applied at preview/export
 - `set_audio_offset { project_id, offset_s } -> { audio_offset_s }` — A/V sync nudge (±2s; positive delays audio); non-destructive metadata, applied at preview + MP4 export; not journaled
@@ -211,7 +210,6 @@ type EditOp =
   | { type: "restore_segments"; segment_ids: string[] }
   | { type: "trim_clip"; clip_id: string; new_source_in: number; new_source_out: number }
   | { type: "split_clip"; clip_id: string; at_time: number }
-  | { type: "reorder_clip"; clip_id: string; new_order: number }
   | { type: "set_global_padding"; start_s: number; end_s: number; linked: boolean }
   | { type: "rough_cut"; aggressiveness: "natural" | "aggressive" }
   | { type: "set_clips"; clips: Clip[]; global_padding: Padding };
