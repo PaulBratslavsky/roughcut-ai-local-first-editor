@@ -138,7 +138,7 @@ never disagree:
 | Caller | Who | Sees | Extra rules | Edits credited to |
 |---|---|---|---|---|
 | `Ui` | the user's clicks, via the Tauri `call_tool` command | all 65 | none | `ui` |
-| `Agent { attribute_to }` | the chat assistant's loop | the 28 agent rows, never meta | arguments schema-checked | `attribute_to` (see §16) |
+| `Agent { attribute_to }` | the chat assistant's loop | the 28 agent rows, never meta | arguments schema-checked | `attribute_to`: `local_ai` for the chat |
 | `Mcp` | Claude Code, Claude Desktop, any MCP client | 64 (all but meta) | arguments schema-checked; `export`, `export_clip`, `export_clips` and `delete_project` wait for the user's approval (§9) | `mcp_client` |
 
 Because the agent never sees meta tools, a loop can't start another loop: the
@@ -350,7 +350,7 @@ Both end up calling the same tools through the same seam. The difference is
 | Model | the app's model: Local or Hosted | Claude Code's own model |
 | Tools | 28, about editing the open project | 64: projects, export, history, checkpoints, settings too |
 | Works offline | yes, in Local mode | no |
-| Edits credited to | `ui` today; should be `local_ai` (§16) | `mcp_client` |
+| Edits credited to | `local_ai` | `mcp_client` |
 
 AI-backed tools that Claude Code calls (`find_clips`, `story_edit`,
 `outline_transcript`, `review_flow` with `llm`, `generate_chapters`) still run
@@ -861,9 +861,6 @@ scripts/build-macos-app.sh             # signed release RoughCut.app
 
 ## 16. Known issues (found while writing this)
 
-- **Chat edits are credited to `ui`.** `h_apply_instruction` passes the UI
-  caller's source into the loop as `attribute_to`, so History shows the
-  assistant's edits as the user's. The intent is `local_ai`. (`tools.rs`)
 - **A failed transcription after a new import is silent.**
   `newProjectFromDialog` resolves as soon as the project exists, so a later
   transcription error is dropped. (`frontend/src/newProject.ts`)

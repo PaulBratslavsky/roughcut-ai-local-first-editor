@@ -782,12 +782,20 @@ handler!(h_apply_instruction, |e, a, s| {
     // so follow-ups ("apply the edits", "do it") resolve against them.
     let history: Vec<agent::HistoryTurn> =
         serde_json::from_value(a.get("history").cloned().unwrap_or(json!([]))).unwrap_or_default();
+    // The user starts the chat from the UI, but the edits are the
+    // assistant's: History credits them to `local_ai`, not to the user's
+    // clicks. A run started for an MCP client would stay credited to it
+    // (none today: MCP clients never see meta tools).
+    let attribute_to = match s {
+        ActionSource::Ui => ActionSource::LocalAi,
+        other => other,
+    };
     let outcome = agent::run_instruction(
         e,
         arg_uuid(a, "project_id")?,
         arg_str(a, "instruction")?,
         &history,
-        s,
+        attribute_to,
     )
     .await?;
     Ok(serde_json::to_value(outcome)?)

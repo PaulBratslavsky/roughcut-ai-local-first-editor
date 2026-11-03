@@ -95,6 +95,16 @@ async fn poc_loop_through_the_tool_registry() {
     )
     .await;
     assert!(outcome["summary"].as_str().unwrap().len() > 5);
+    // The chat's edits are the assistant's, not the user's clicks — even
+    // though the UI started the run.
+    let chat_edits = outcome["actions"].as_array().unwrap();
+    assert!(!chat_edits.is_empty(), "the offline agent should cut the hiking tangent");
+    for action in chat_edits {
+        assert_eq!(action["source"], "local_ai", "chat edit credited to {}", action["source"]);
+    }
+    let history = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    let newest = &history["entries"][history["current_index"].as_u64().unwrap() as usize];
+    assert_eq!(newest["source"], "local_ai", "History shows the chat edit as the assistant's");
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert!(undone["action"].is_object() || undone["action"].is_null());
 
