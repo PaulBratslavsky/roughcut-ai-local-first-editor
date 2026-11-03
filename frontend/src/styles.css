@@ -906,6 +906,21 @@ input, select { font: inherit; }
   pointer-events: none;
 }
 
+.preview-preparing {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 6px 9px;
+  background: rgba(0, 0, 0, 0.78);
+  /* Over video, which is dark in both themes: fixed light-on-dark. */
+  border: 1px solid #34373e;
+  color: #c7c9cc;
+  font-size: 11.5px;
+  pointer-events: none;
+}
+
 .preview-video {
   width: 100%;
   height: 100%;
@@ -1688,194 +1703,10 @@ input, select { font: inherit; }
 [data-theme="light"] .project-select:hover { background: rgba(0, 0, 0, 0.05); }
 [data-theme="light"] .chapter-list li:hover { background: rgba(0, 0, 0, 0.05); }
 
-/* ---- recorder (M1) ---------------------------------------------------- */
-.recorder {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
-  color: var(--text);
-  padding: 12px 16px;
-  gap: 10px;
-}
-.recorder-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.recorder-title {
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-variant-numeric: tabular-nums;
-}
-.rec-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #e5484d;
-  animation: rec-pulse 1.2s ease-in-out infinite;
-}
-@keyframes rec-pulse {
-  50% { opacity: 0.25; }
-}
-.recorder-stage {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #000;
-  border: 1px solid var(--border-soft);
-}
-.recorder-preview {
-  max-width: 100%;
-  max-height: 100%;
-  transform: scaleX(-1); /* mirror like every camera UI */
-}
-.recorder-countdown {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: 120px;
-  font-weight: 700;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.45);
-  font-variant-numeric: tabular-nums;
-}
-.recorder-preview-note {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 6px 10px;
-  font-size: 12px;
-  background: rgba(0, 0, 0, 0.7);
-  color: #ddd;
-}
-.recorder-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px 14px;
-  flex-wrap: wrap;
-  justify-content: center;
-  min-height: 44px;
-}
-.recorder-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.recorder-field select { max-width: 180px; }
-.recorder-go { min-width: 130px; }
-.recorder-stop { min-width: 130px; background: #e5484d; border-color: #e5484d; }
-.recorder-hint, .recorder-note {
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-muted);
-  margin: 0;
-}
-
-/* + New video is a tiny menu: load a file or record a new one */
-.new-video-menu { position: relative; }
-.new-video-menu .export-dropdown { left: 0; right: auto; }
-
-/* recorder layout mirrors the editor: stage left, panel right */
-.recorder-body {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  gap: 12px;
-}
-.recorder-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.rec-library {
-  width: 320px;
-  flex-shrink: 0;
-  border-left: 1px solid var(--border-soft);
-  padding-left: 12px;
-  overflow-y: auto;
-}
-.rec-library-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-.rec-library-title {
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-.rec-library-list { overflow-y: auto; }
-.rec-library-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 2px;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 12px;
-}
-.rec-library-pick {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  cursor: pointer;
-}
-.rec-library-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.rec-library-meta {
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.recorder-stop-ghost { border-color: #e5484d; color: #e5484d; }
-
-.rec-delete { color: var(--text-muted); }
-.rec-delete:hover { color: #e5484d; }
-
 /* footage tab */
 .footage-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; }
 .footage-note { font-size: 12px; color: var(--text-muted); margin: 0; }
 .footage-actions { display: flex; gap: 8px; }
-.footage-lib-label {
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
-
-.recorder-source { display: inline-flex; gap: 2px; border: 1px solid var(--border-soft); flex-shrink: 0; }
-.recorder-source .tab { white-space: nowrap; padding: 4px 10px; }
-.recorder-screen-ph {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-  color: var(--text-muted);
-  font-size: 13px;
-  padding: 24px;
-  text-align: center;
-}
-.recorder-screen-sub { font-size: 11px; }
 
 /* audio sync slider */
 .audio-sync-row { display: flex; align-items: center; gap: 10px; }
@@ -1901,63 +1732,6 @@ input, select { font: inherit; }
 }
 
 .playback-meter { width: 52px; }
-
-/* screen-recording permission banner */
-.perm-banner {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  border: 1px solid #e5484d;
-  padding: 8px 12px;
-  font-size: 12px;
-}
-.perm-hint { color: var(--text-muted); }
-
-/* recorder file preview (confirm-before-import) */
-.preview-confirm-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  font-size: 12px;
-}
-.preview-confirm-name {
-  color: var(--text-muted);
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.file-preview { transform: none; } /* never mirror a file */
-.rec-library-name.as-btn {
-  background: none;
-  border: none;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  padding: 0;
-  font: inherit;
-  flex: 1;
-  min-width: 0;
-}
-.rec-library-name.as-btn:hover { text-decoration: underline; }
-.rec-library-name.as-btn.current { text-decoration: underline; font-weight: 600; }
-
-/* bigger, stateful mic meter */
-.mic-meter-wrap { display: inline-flex; align-items: center; gap: 8px; }
-.mic-meter.big {
-  width: 120px;
-  height: 10px;
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-}
-.mic-meter-fill.hot { background: #e5484d; }
-.mic-meter-status {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
 
 /* dual-capture compositing */
 .screen-layer {
@@ -1992,64 +1766,6 @@ input, select { font: inherit; }
 }
 .corner-cell.active, .corner-cell:hover { background: var(--text); }
 .chip-btn.active { background: var(--text); color: var(--bg); }
-
-.rec-library-actions { display: inline-flex; gap: 6px; }
-.rec-bulk-delete { color: #e5484d; border-color: #e5484d; }
-
-/* dual-mode recorder stage: screen backdrop + docked live camera bubble */
-.recorder-stage.dual { overflow: hidden; }
-/* The stage is black in both themes, so what's drawn on it (backdrop, corner
-   dots) uses the dark theme's ink values as literals instead of tokens. */
-.screen-backdrop {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #8e939c;
-  font-size: 12px;
-  background:
-    repeating-linear-gradient(45deg, transparent, transparent 14px,
-      rgba(232, 234, 237, 0.05) 14px,
-      rgba(232, 234, 237, 0.05) 15px);
-  border: 1px dashed #24262c;
-}
-.recorder-preview.as-pip {
-  position: absolute;
-  max-width: none;
-  max-height: none;
-  z-index: 2;
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
-}
-.corner-dot {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  border: 1px solid #8e939c;
-  background: #0c0d0f;
-  cursor: pointer;
-  z-index: 3;
-  padding: 0;
-}
-.corner-dot.tl { top: 8px; left: 8px; }
-.corner-dot.tr { top: 8px; right: 8px; }
-.corner-dot.bl { bottom: 8px; left: 8px; }
-.corner-dot.br { bottom: 8px; right: 8px; }
-.corner-dot.active, .corner-dot:hover { background: #e8eaed; border-color: #e8eaed; }
-.stage-chips {
-  position: absolute;
-  left: 50%;
-  bottom: 10px;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  z-index: 3;
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  padding: 6px 10px;
-  border: 1px solid var(--border-soft);
-}
-.stage-chips input[type="range"] { width: 110px; }
-.icon-tab { display: inline-grid; place-items: center; padding: 6px 10px; }
 
 /* rough-cut Tier-2 suggestions (repeated takes / repetition) */
 .segment.suggested { border-left: 2px solid #d9a441; padding-left: 8px; }

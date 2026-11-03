@@ -30,7 +30,6 @@ export function TopBar({
   const [theme, setTheme] = useState(currentTheme());
   const onShorts = useStore(viewStore, (s) => s.screen === "shorts");
 
-  const [newOpen, setNewOpen] = useState(false);
   const onNewVideo = async () => {
     const id = await newProjectFromDialog();
     if (id) {
@@ -96,39 +95,13 @@ export function TopBar({
             {projectName}
           </span>
         )}
-        <div className="export-menu new-video-menu">
-          <button
-            className="new-video-btn"
-            title="Load a video file or record a new one"
-            onClick={() => setNewOpen((v) => !v)}
-          >
-            + New video
-          </button>
-          {newOpen && (
-            <div className="export-dropdown">
-              <button
-                className="export-item"
-                onClick={() => {
-                  setNewOpen(false);
-                  void onNewVideo();
-                }}
-              >
-                ▸ Open a video file…
-              </button>
-              {isTauri && (
-                <button
-                  className="export-item"
-                  onClick={() => {
-                    setNewOpen(false);
-                    setScreen("recorder");
-                  }}
-                >
-                  ● Record camera
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <button
+          className="new-video-btn"
+          title="Open a video file (an OBS recording, a camera file, …) as a new project"
+          onClick={() => void onNewVideo()}
+        >
+          + New video
+        </button>
         <button
           className="icon-btn delete-project-btn"
           title="Delete this project (keeps the video file)"

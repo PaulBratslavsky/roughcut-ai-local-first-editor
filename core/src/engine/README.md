@@ -30,7 +30,7 @@ This package depends on the following crate modules but does not own them:
 `core/src/model.rs` (`Project`, `Timeline`, `EditOp`, `EditAction`,
 `Transcript`, `Preferences`, ...), `core/src/store.rs` (`Store`, `SqliteStore`,
 `data_dir`), `core/src/adapters/` (`VideoEngine`, `Transcriber`, `Embedder`,
-`InferenceClient`, `face`, `record`, `video`), `core/src/events.rs`
+`InferenceClient`, `face`, `video`), `core/src/events.rs`
 (`CoreEvent`, `send`), `core/src/detect.rs`, `core/src/time.rs`
 (`snap_to_frame`), `core/src/agent.rs` (`clean_transcript`),
 `core/src/inflight.rs` (`try_claim`), and `core/src/capabilities.rs`
@@ -92,7 +92,7 @@ This package depends on the following crate modules but does not own them:
 | `delete_project(id)` / `restore_project(id)`                             | Soft delete (sets `deleted_at`) and undelete.                                                                      |
 | `purge_trash(days) -> Result<u32>`                                       | Hard-deletes projects trashed more than `days` days ago.                                                           |
 | `get_timeline(id)`, `get_transcript(id)`                                 | Read accessors.                                                                                                    |
-| `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths. Builds a playable copy in the background when one is missing.                  |
+| `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths, plus the playable copy (`playback_path`) or why it failed (`playback_error`). Starts building a missing copy in the background. |
 | `get_preferences()`, `set_preferences(prefs)`                            | Full load and full replace. `set_preferences` does no validation.                                                  |
 | `update_preferences(patch: &serde_json::Value, source: ActionSource)`    | Partial JSON merge with an unknown-key check, a loopback guard, and a guard on the model-switch fields.            |
 | `set_layout(id, Layout)`, `set_audio_offset(id, offset_s)`               | Project metadata: persisted, not journaled.                                                                        |
@@ -104,8 +104,8 @@ This package depends on the following crate modules but does not own them:
 | `async import_media(project_id: Option<Uuid>, file_path) -> Result<Media>` | Probes the file. Given a project: no media yet → sets it with `Timeline::new(media.duration)`; same video moved → relinks; a different video → `InvalidArg`. |
 | `async transcribe(id, language: Option<&str>) -> Result<Transcript>`      | On-device transcription, then a background LLM cleanup and semantic-index pass.                                    |
 | `update_segment_texts(id, &[(Uuid, String)]) -> Result<u32>`              | Replaces segment text and keeps every timestamp. Used by the LLM cleanup pass.                                     |
-| `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source, swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
-| `async attach_screen_media(id, file_path) -> Result<()>`                  | Sets `project.screen_media` to the dual-capture screen file.                                                       |
+| `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source (a new file in `<data dir>/media/`), swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
+| `async attach_screen_media(id, file_path) -> Result<()>`                  | Sets `project.screen_media` to a screen file that started with the camera file (probed; offset 0).                 |
 
 ### Edits, history, checkpoints, and suggestions (`edits.rs`)
 
@@ -302,8 +302,8 @@ This package depends on the following crate modules but does not own them:
   Any other video is refused with `InvalidArg` (create a new project, or use
   `append_media`).
 - `append_media` requires existing media and that the file exists
-  (`NotFound("file {path}")`). The codec and resolution guard lives in
-  `adapters::record::combine_recordings`.
+  (`NotFound("file {path}")`). The guard (same video codec and resolution,
+  same audio format) lives in `adapters::video::concat_media`.
 - `append_media` keeps the history valid (`extend_history`): every undo/redo
   `SetClips` snapshot and every checkpoint gets the same included clip over the
   appended span, and the journal is persisted. An undo or restore afterwards
@@ -345,8 +345,15 @@ This package depends on the following crate modules but does not own them:
   (a failed read is cached too, until the key is set or forgotten); one
   `AnthropicClient` is kept per key.
 - `RouteState` sends `model-route` only when the chip's text would change.
-- `media_assets` builds a playable copy only when `playback_path` is `None`,
-  demo mode is off, and a tokio runtime is present.
+- `media_assets` starts the playable copy (a background
+  `ensure_playable_copy`) **before** it awaits peaks and thumbnails, and only
+  when demo mode is off, a tokio runtime is present, and there is neither a
+  copy (`playable_copy_path`) nor a failure recorded in this run
+  (`playable_copy_failure`); otherwise the event below would bring the
+  refetch straight back here. When the copy lands **or** fails it sends
+  `MediaAssetsChanged`, and the refetch returns `playback_path` or
+  `playback_error`. "Plays as-is" and "another call is building it" send
+  nothing.
 
 ### Semantic (`semantic.rs`)
 
@@ -431,7 +438,8 @@ This package depends on the following crate modules but does not own them:
   - `TranscriptChanged`: transcribe, annotate, and segment text updates.
   - `ProjectsChanged`: create, duplicate, delete, and restore.
   - `ClipsChanged`: clip and candidate mutations.
-  - `MediaAssetsChanged`: `append_media` and the background playable copy.
+  - `MediaAssetsChanged`: `append_media` and the background playable copy
+    (when it lands or fails).
   - `ConfirmRequest`: `request_confirmation`.
   - `progress(ProgressTask::Transcribe, ..)`: transcription stages.
   - `RoughCut` mutates the transcript but sends only `TimelineChanged`.
@@ -443,7 +451,8 @@ This package depends on the following crate modules but does not own them:
     by `index_transcript`.
   - `backfill_index_if_missing` spawns `index_transcript`.
   - `auto_center_clip` spawns the face pass.
-  - `media_assets` spawns `ensure_playable_copy`.
+  - `media_assets` spawns `ensure_playable_copy` when there is neither a copy
+    nor a recorded failure.
   - `find_faces` runs face detection in `spawn_blocking`.
 - **Filesystem:**
   - `transcribe` writes `temp_dir()/roughcut-<media.id>.wav` and removes it
@@ -453,17 +462,18 @@ This package depends on the following crate modules but does not own them:
     removes the directory afterwards.
   - `load_raw_peaks` reads or writes `data_dir()/cache/<key>/peaks_raw.bin`
     for the rough cut and confirmed-silence cuts.
-  - `append_media` writes `~/Movies/RoughCut/combined-<timestamp>.mp4`
-    through `adapters::record::combine_recordings`. The original files are
-    left untouched.
+  - `append_media` writes `data_dir()/media/joined-<timestamp>-<8 hex>.mp4`
+    (`.mkv` unless every input is MP4 / MOV; the folder is created on demand)
+    through `adapters::video::concat_media`. The original files are left
+    untouched.
 - **Network:**
   - `embedder().embed(..)` (indexing and `semantic_find` queries) sends
     transcript text to `prefs.inference_endpoint`.
   - The background LLM cleanup also sends transcript text to that endpoint.
   - `update_preferences` limits non-UI callers to loopback endpoints.
 - **Subprocesses:** media probing, audio extraction, peak decoding, and frame
-  grabs go through the video adapter. `combine_recordings` runs `ffprobe` and
-  then concatenates the inputs. In demo mode the auto adapters use fixtures
+  grabs go through the video adapter. `concat_media` runs `ffprobe` and then
+  concatenates the inputs. In demo mode the auto adapters use fixtures
   instead.
 - **Environment:**
   - `bootstrap_with_store` reads `ROUGHCUT_NO_CONFIRM`.

@@ -163,7 +163,8 @@ There are no subdirectories.
     `<file id=".."/>`.
   - Clipitem ids are `clipitem-v{n}` (camera), `clipitem-a{n}` (audio), and
     `clipitem-s{n}` (screen), with `n` starting at 1.
-- **xmeml with `screen_media` (dual capture)**:
+- **xmeml with `screen_media` (a screen file that starts with the camera
+  file)**:
   - Screen clipitems use the camera's record and source frames and the
     camera's fps.
   - Each screen clip's out point is clamped to

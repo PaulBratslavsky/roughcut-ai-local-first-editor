@@ -148,28 +148,37 @@ impl Editor {
     /// Waveform peaks + thumbnails for the project's media (generated on
     /// first call, cached after). Returns file PATHS for the asset protocol.
     /// A missing playable copy (sources WebKit can't stream) builds in the
-    /// background; `media-assets-changed` fires when it lands.
+    /// background, started BEFORE the peaks and thumbnails so the preview
+    /// doesn't wait on them; `media-assets-changed` fires when it lands or
+    /// fails (then `playback_error` says why, and it isn't retried this run).
     pub async fn media_assets(
         &self,
         project_id: Uuid,
     ) -> Result<crate::adapters::video::MediaAssets> {
+        use crate::adapters::video::{ensure_playable_copy, playable_copy_failure, playable_copy_path};
         let media = self
             .with_project(project_id, |p, _| Ok(p.media.clone()))?
             .ok_or_else(|| CoreError::InvalidArg("project has no media".into()))?;
-        let assets = self.inner.video.media_assets(&media).await?;
-        if assets.playback_path.is_none() && !self.demo_mode() {
+        // Only when there's neither a copy nor a recorded failure: otherwise
+        // the event below would trigger a refetch that lands here again.
+        if !self.demo_mode()
+            && playable_copy_path(&media).is_none()
+            && playable_copy_failure(&media).is_none()
+        {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let editor = self.clone();
+                let media = media.clone();
                 handle.spawn(async move {
-                    if let Ok(Some(_)) =
-                        crate::adapters::video::ensure_playable_copy(&media).await
-                    {
-                        send(&editor.inner.sink, CoreEvent::MediaAssetsChanged { project_id });
+                    match ensure_playable_copy(&media).await {
+                        Ok(Some(_)) | Err(_) => {
+                            send(&editor.inner.sink, CoreEvent::MediaAssetsChanged { project_id })
+                        }
+                        Ok(None) => {} // plays as-is, or another call is building it
                     }
                 });
             }
         }
-        Ok(assets)
+        self.inner.video.media_assets(&media).await
     }
 
     pub fn get_transcript(&self, project_id: Uuid) -> Result<Option<Transcript>> {

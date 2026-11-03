@@ -50,9 +50,15 @@ export function PreviewPanel({
   );
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
-  // Some sources can't stream in a <video> tag (mp4 index at the end); the
-  // core then provides a remuxed playable copy alongside peaks/thumbnails.
+  // Some sources can't stream in a <video> tag (an mp4 index at the end, an
+  // OBS .mkv); the core then builds a playable copy in the background and
+  // media-assets-changed swaps it in.
   const { data: assets } = useMediaAssets(projectId);
+  const preparing =
+    isTauri &&
+    !!project?.media &&
+    !assets?.playback_path &&
+    !/\.(mp4|mov|m4v)$/i.test(project.media.file_path);
   const src = useMemo(() => {
     if (!project?.media) return null;
     const path = assets?.playback_path ?? project.media.file_path;
@@ -63,6 +69,15 @@ export function PreviewPanel({
 
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
   const [videoError, setVideoError] = useState<string | null>(null);
+  // Until the copy lands, a file WebKit can't open just fails: say it's
+  // being prepared instead of showing a player error.
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    // A new source (the copy landing) starts clean: the original's error
+    // mustn't flash while the copy loads.
+    setLoaded(false);
+    setVideoError(null);
+  }, [src]);
 
   // A/V sync nudge: with a non-zero offset the <video> is muted and a shadow
   // <audio> of the same source carries the sound, shifted by the offset and
@@ -212,7 +227,7 @@ export function PreviewPanel({
             playsInline
             onError={() =>
               setVideoError(
-                "screen track missing or unplayable (was the file deleted from the library?) — Tools ▸ Layout ▸ camera only",
+                "screen track missing or unplayable (was the file moved or deleted?) — Tools ▸ Layout ▸ camera only",
               )
             }
           />
@@ -226,7 +241,10 @@ export function PreviewPanel({
             className="preview-video"
             onTimeUpdate={onTimeUpdate}
             onEnded={() => setPlaying(false)}
-            onLoadedData={() => setVideoError(null)}
+            onLoadedData={() => {
+              setVideoError(null);
+              setLoaded(true);
+            }}
             onError={() => {
               const err = videoRef.current?.error;
               setVideoError(
@@ -247,10 +265,21 @@ export function PreviewPanel({
           </div>
         )}
 
-        {videoError && (
+        {preparing && !loaded && assets?.playback_error ? (
           <div className="preview-error" role="alert">
-            {videoError}
+            Couldn't make a copy this player can open: {assets.playback_error}. Editing,
+            transcription and export still use the original file.
           </div>
+        ) : preparing && !loaded ? (
+          <div className="preview-preparing" role="status">
+            Preparing preview… (making a copy this player can open; the original is untouched)
+          </div>
+        ) : (
+          videoError && (
+            <div className="preview-error" role="alert">
+              {videoError}
+            </div>
+          )
         )}
 
         {/* A 9:16 clip's crop, when one is being framed (Clips ▸ crop). */}

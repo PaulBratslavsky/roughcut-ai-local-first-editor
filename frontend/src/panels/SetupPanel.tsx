@@ -4,7 +4,7 @@
 // ships lean; models arrive on demand.
 
 import { useEffect, useRef, useState } from "react";
-import { openExternal, recordDevices, type CaptureDevices } from "../ipc/api";
+import { openExternal } from "../ipc/api";
 import {
   checkHostedKey,
   setHostedKey,
@@ -30,32 +30,6 @@ import { errText } from "./clipUtil";
 
 /** Typo-proof: the compiler rejects a name the core can't emit. */
 const PROVISIONING_TASKS: ProgressTask[] = ["model_download", "model_pull", "runtime_install"];
-
-function RecordingRow() {
-  const [devices, setDevices] = useState<CaptureDevices | null>(null);
-  useEffect(() => {
-    void recordDevices().then(setDevices).catch(() => setDevices(null));
-  }, []);
-  const ok = !!devices && devices.cameras.length > 0 && devices.microphones.length > 0;
-  return (
-    <div className="setup-row">
-      <StatusDot ok={ok} />
-      <div className="setup-row-body">
-        <strong>Recording</strong>
-        {devices ? (
-          <span className="setup-detail">
-            {devices.cameras.length} camera{devices.cameras.length === 1 ? "" : "s"} ·{" "}
-            {devices.microphones.length} mic{devices.microphones.length === 1 ? "" : "s"} ·{" "}
-            {devices.screens.length} display{devices.screens.length === 1 ? "" : "s"} — macOS asks
-            for camera &amp; mic permission on the first recording
-          </span>
-        ) : (
-          <span className="setup-detail">device check needs ffmpeg</span>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function StatusDot({ ok }: { ok: boolean }) {
   return <span className={`status-dot${ok ? " ok" : ""}`} aria-hidden />;
@@ -530,9 +504,6 @@ export function SetupPanel({
                 )}
               </p>
             </section>
-
-            {/* ---- Recording devices ---- */}
-            <RecordingRow />
 
             {/* ---- DaVinci Resolve hand-off ---- */}
             <section className="setup-row">

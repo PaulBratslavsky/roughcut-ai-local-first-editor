@@ -12,10 +12,10 @@ registry (`src/tools.rs`), which dispatch to the stateful `Editor`
 Global Invariants). The `Editor` keeps projects, transcripts, and undo
 journals in memory and persists them to SQLite. Video, transcription,
 inference, and embeddings sit behind the adapter traits in `src/adapters`.
-Face finding and capture are free functions there. Model-server probes and
+Face finding is a set of free functions there. Model-server probes and
 the Ollama/llama-server runtime (`src/setup.rs`, `src/llm_runtime.rs`), and
 the ffmpeg helpers `video::load_raw_peaks`, `video::ensure_playable_copy`, and
-`record::combine_recordings`, call out without a trait.
+`video::concat_media`, call out without a trait.
 
 Build features (`core/Cargo.toml`):
 
@@ -23,8 +23,8 @@ Build features (`core/Cargo.toml`):
   so core builds and tests stay light; the app crate turns it on). On macOS
   `whisper-rs` is built with `metal`.
 - `ts-bindings` — `ts-rs` exports to `frontend/src/ipc/generated` (dev-time
-  only) of the model types plus `ProgressTask` and the setup, Resolve,
-  `MediaAssets`/`ThumbnailRef`, and recording types.
+  only) of the model types plus `ProgressTask` and the setup, Resolve, and
+  `MediaAssets`/`ThumbnailRef` types.
 - macOS-only dependencies: `objc2`, `objc2-foundation`, and `objc2-vision` for
   on-device face finding.
 
@@ -47,7 +47,7 @@ Environment variables (read at runtime):
   provisioning, in-app terminals (`pty`), and the DaVinci Resolve bridge
   (`resolve`). Child packages:
   - [./src/adapters/README.md](./src/adapters/README.md) - `VideoEngine`,
-    `Transcriber`, `InferenceClient`, `Embedder`, face finding, and capture.
+    `Transcriber`, `InferenceClient`, `Embedder`, and face finding.
     Video, transcription, and embeddings have `Mock*` fixtures.
   - [./src/engine/README.md](./src/engine/README.md) - `Editor`: the project
     cache, the journaled edit path, media and transcription, saved clips,
@@ -71,10 +71,9 @@ Environment variables (read at runtime):
   alone decides who may see and call it (the UI sees all 66 tools, MCP clients
   65, the agent loop 28), and `tools::dispatch` is their single entry point.
   The Tauri app (`app/src-tauri/src/lib.rs`) also calls the core outside the
-  registry: recording, setup and model downloads, the LLM runtime, terminals,
-  Resolve, and confirmation answers are app commands only, and
-  `send_to_resolve` and `attach_screen_media` call `Editor::export` and
-  `Editor::attach_screen_media` directly.
+  registry: setup and model downloads, the LLM runtime, terminals, Resolve,
+  and confirmation answers are app commands only, and `send_to_resolve` calls
+  `Editor::export` directly.
 - The core owns all state. Projects, transcripts, and journals live in the
   `Editor`'s cache and the `Store`; front ends read through tools and refresh
   on `CoreEvent`s (`src/events.rs`).
@@ -113,8 +112,8 @@ Environment variables (read at runtime):
   is installed only by `set_embedder_for_tests`); with no embedding server,
   indexing is skipped and search falls back to BM25. With no model server, AI
   features fall back to heuristics, except `story_edit` without a target
-  duration, which returns `Unavailable`. Capture and face finding have no
-  fallback and need macOS.
+  duration, which returns `Unavailable`. Face finding has no fallback and
+  needs macOS.
 
 ## Global Side Effects
 
@@ -124,24 +123,23 @@ Environment variables (read at runtime):
   plaintext keys the removed frontier path left under `<data dir>/secrets/`.
 - **Files**: media caches under `<data dir>/roughcut/cache/`, downloaded models
   under `<data dir>/roughcut/models`, binaries under `<data dir>/roughcut/bin`,
-  recordings under `~/Movies/RoughCut`, `mcp.json`
+  joined footage (`append_media`) under `<data dir>/roughcut/media/`, `mcp.json`
   (URL and bearer token for `mcp-shim`), the Resolve plugin scripts in
   Resolve's `Fusion/Scripts/Utility` folder, `roughcut-*` temp files (the
   transcription WAV, ffmpeg concat lists, the Resolve import script), and
   export files at caller-supplied paths.
-- **Subprocesses**: ffmpeg/ffprobe (probe, render, capture, peaks, frames),
-  whisper-cli (when not built with `whisper-native`), Ollama and llama-server,
-  a login shell for in-app terminals, `python3` for DaVinci Resolve,
-  `tar` (llama-server install), and `which`,
-  `sysctl`, and `df` for capability, RAM, and disk-space checks.
+- **Subprocesses**: ffmpeg/ffprobe (probe, render, preview copies, joins,
+  peaks, frames), whisper-cli (when not built with `whisper-native`), Ollama
+  and llama-server, a login shell for in-app terminals, `python3` for DaVinci
+  Resolve, `tar` (llama-server install), and `which` and `sysctl` for
+  capability and RAM checks.
 - **Network**: the inference endpoint (chat, embeddings, health probes),
   user-triggered downloads (Hugging Face, GitHub releases, `.gguf` URLs), the
   MCP server on `127.0.0.1`, and — only in Hosted mode, or when the user saves
   or tests a key in Setup — `api.anthropic.com`.
 - **OS key store** (`keyring` crate): the Hosted API key — Keychain on macOS,
   Credential Manager on Windows, the kernel keyring on Linux.
-- **macOS services**: Apple Vision face detection, and the camera, microphone,
-  and Screen Recording permissions used by capture.
+- **macOS services**: Apple Vision face detection.
 
 ## System Verification
 

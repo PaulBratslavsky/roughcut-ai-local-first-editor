@@ -1,6 +1,5 @@
 // THE ingest seam: create → attach media → transcribe, one implementation
-// for every entry point (drop zone, file dialog, demo button — and the
-// recorder, whose output lands through this exact path). EmptyState and
+// for every entry point (drop zone, file dialog, demo button). EmptyState and
 // newProject each had a copy; EmptyState's double-probed the file
 // (create_project(file_path) probes, then import_media probed AGAIN and
 // replaced the media) and newProject's swallowed transcription errors.

@@ -7,7 +7,6 @@ pub mod anthropic;
 pub mod embed;
 pub mod face;
 pub mod inference;
-pub mod record;
 pub mod transcribe;
 pub mod video;
 

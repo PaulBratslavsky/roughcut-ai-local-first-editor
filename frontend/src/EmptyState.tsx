@@ -7,7 +7,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { downloadWhisperModel, getSetupStatus, isTauri, onAppEvent } from "./ipc/api";
 import { ingestFile } from "./ingest";
-import { setScreen } from "./state/viewStore";
 import { useProjects, useRestoreProject } from "./ipc/queries";
 import { useModelStatus } from "./state/modelStore";
 import { ModelChip } from "./panels/ModelChip";
@@ -256,11 +255,7 @@ export function EmptyState() {
               onChange={onPick}
             />
           </div>
-          {isTauri ? (
-            <button className="ghost-btn" onClick={() => setScreen("recorder")}>
-              ● or record something new
-            </button>
-          ) : (
+          {!isTauri && (
             <button
               className="primary-btn"
               onClick={() => void start("i-quit-rough-draft", "/demo/talking-head.mp4")}

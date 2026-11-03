@@ -162,7 +162,7 @@ impl Editor {
 
 impl super::Editor {
     /// Append another video to the END of this project's source: lossless
-    /// concat into a new file in ~/Movies/RoughCut (originals untouched),
+    /// concat into a new file in `<data dir>/media/` (originals untouched),
     /// media swapped, timeline extended with an included clip over the new
     /// span. Existing cuts keep their timestamps. Caller re-transcribes.
     /// Inputs must match codec/resolution (stream copy) — mismatches refuse.
@@ -174,8 +174,8 @@ impl super::Editor {
         if !std::path::Path::new(file_path).is_file() {
             return Err(CoreError::NotFound(format!("file {file_path}")));
         }
-        // combine_recordings carries the codec/resolution guard.
-        let combined = crate::adapters::record::combine_recordings(&[
+        // concat_media carries the codec/resolution guard.
+        let combined = crate::adapters::video::concat_media(&[
             current.file_path.clone(),
             file_path.to_string(),
         ])
@@ -220,7 +220,7 @@ impl super::Editor {
 }
 
 impl super::Editor {
-    /// Attach the dual-capture screen file (probed) to a project.
+    /// Attach a screen file that started with the camera file (probed; offset 0).
     pub async fn attach_screen_media(&self, project_id: uuid::Uuid, file_path: &str) -> crate::error::Result<()> {
         let media = self.video().probe(file_path).await?;
         self.ensure_loaded(project_id)?;

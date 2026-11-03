@@ -13,7 +13,12 @@ export type MediaAssets = {
 peaks_path: string | null, peaks_per_second: number, thumbnails: Array<ThumbnailRef>, 
 /**
  * Web-playable copy when the source itself isn't (mp4 with the moov
- * index at the END streams as an endless black frame in WebKit; ffmpeg
- * remuxes it losslessly with +faststart). None = play the source.
+ * index at the END streams as an endless black frame in WebKit; an OBS
+ * .mkv doesn't open at all). None = play the source, or the copy isn't
+ * built yet.
  */
-playback_path: string | null, };
+playback_path: string | null, 
+/**
+ * Why building the playable copy failed in this run, if it did.
+ */
+playback_error: string | null, };

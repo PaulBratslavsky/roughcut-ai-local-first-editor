@@ -22,23 +22,21 @@ invoke("mcp_endpoint_info")   // -> { url: string, token: string } for the MCP s
 // plus bespoke shell commands OUTSIDE the registry (ADR-0004): demo_mode,
 // setup_status, download_whisper_model, ollama_pull_model,
 // install_llama_server, download_gguf, start_managed_llm, reveal_path,
-// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve,
-// record_devices, record_start, record_status, record_stop, record_pause,
-// record_resume, list_recordings, combine_recordings
+// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve
 ```
 
 Events emitted by the core (listen via `@tauri-apps/api/event`):
 
 | event | payload |
 |---|---|
-| `progress` | `{ task: ProgressTask, project_id?, fraction: number (0..1), message: string }` — task names are GENERATED (`core/src/events.rs` → `generated/ProgressTask.ts`): `transcribe`, `rough_cut`, `export`, `model_download`, `recording`, `model_pull`, `runtime_install`, `find_clips`, `make_clips` (framing in `create_clips`), `export_clips` (the whole batch; `project_id` set) |
+| `progress` | `{ task: ProgressTask, project_id?, fraction: number (0..1), message: string }` — task names are GENERATED (`core/src/events.rs` → `generated/ProgressTask.ts`): `transcribe`, `rough_cut`, `export`, `model_download`, `model_pull`, `runtime_install`, `find_clips`, `make_clips` (framing in `create_clips`), `export_clips` (the whole batch; `project_id` set) |
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
 | `projects-changed` | `{}` — library changed (create/duplicate/delete/restore); refetch `list_projects` |
 | `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers) |
 | `mcp-ready` | `{ url, token }` — MCP server is up |
-| `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background; refetch `get_media_assets` |
+| `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background, or the playable copy failed; refetch `get_media_assets` |
 | `model-route` | `{ mode, effective, reason? }` — where the AI steps actually run changed (Hosted fell back to Local, came back, or the key was rejected); `reason`: `offline` \| `rate_limited` \| `server_error` \| `key_rejected` \| `no_key`. The app's LOCAL / HOSTED chip follows it |
 
 ### Model switch (app commands, not tools)
@@ -94,8 +92,8 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `trim_clip { project_id, clip_id, new_source_in, new_source_out } -> { action, timeline }`
 - `split_clip { project_id, clip_id, at_time } -> { clips: [Clip, Clip], timeline, action }`
 - `reorder_clip { project_id, clip_id, new_order } -> { action, timeline }`
-- `attach_screen_media { project_id, file_path } -> { attached }` — attach the dual-capture screen file (same clock as primary)
-- `set_layout { project_id, mode?, shape?, corner?, size? } -> Layout` — presentation compositing for dual-capture projects (pip|camera|screen; rounded|round; tl/tr/bl/br; size 0.10-0.45); metadata, applied at preview/export
+- `attach_screen_media { project_id, file_path } -> { attached }` — attach a screen recording that started at the same moment as the camera file (offset 0: both play on one clock)
+- `set_layout { project_id, mode?, shape?, corner?, size? } -> Layout` — presentation compositing for projects with a screen recording (pip|camera|screen; rounded|round; tl/tr/bl/br; size 0.10-0.45); metadata, applied at preview/export
 - `set_audio_offset { project_id, offset_s } -> { audio_offset_s }` — A/V sync nudge (±2s; positive delays audio); non-destructive metadata, applied at preview + MP4 export; not journaled
 - `set_global_padding { project_id, start_s, end_s, linked } -> { action, timeline }`
 
@@ -132,7 +130,7 @@ A saved clip is a standalone edit made of one or more pieces of the long-form vi
 ### Project / state
 - `create_project { name, file_path? } -> Project`
 - `duplicate_project { project_id, name } -> Project` (save-as: same media + cut state, fresh undo history)
-- `get_media_assets { project_id } -> MediaAssets` (peaks/thumbnails/playable-copy file paths; generated and cached on first call)
+- `get_media_assets { project_id } -> MediaAssets` (peaks/thumbnails/playable-copy file paths, plus `playback_error` when the playable copy failed in this run; generated and cached on first call)
 - `delete_project { project_id } -> { deleted: true }` — moves the project to the TRASH (restorable for 30 days, then purged at startup); never touches the media file
 - `restore_project { project_id } -> Project` — bring a trashed project back, edit state and all
 - `open_project { project_id } -> Project`

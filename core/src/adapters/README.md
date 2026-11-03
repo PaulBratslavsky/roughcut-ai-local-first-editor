@@ -4,8 +4,7 @@
 
 `crate::adapters` is where `roughcut-core` reaches outside the process: media
 toolchain binaries (ffmpeg, ffprobe, whisper-cli), local HTTP model servers,
-Claude's Messages API (Hosted mode only), the macOS camera/mic/screen capture
-stack, and Apple Vision. Each capability
+Claude's Messages API (Hosted mode only), and Apple Vision. Each capability
 sits behind a trait (or a small free-function API) so the rest of the core stays
 portable. `VideoEngine` and `Transcriber` each have a production
 implementation, a demo `Mock*`, and an `Auto*` selector that picks between them
@@ -23,26 +22,25 @@ receive results or file paths.
 | File | Boundary | Production impl | Fallback / mock |
 | --- | --- | --- | --- |
 | `mod.rs` | Module root, re-exports, `demo_mode()` | — | — |
-| `video.rs` | Probe, render, audio/frame extraction, timeline assets | `FfmpegCli` (ffmpeg/ffprobe CLIs) | `MockVideoEngine`, selected by `AutoVideoEngine` |
+| `video.rs` | Probe, render, audio/frame extraction, timeline assets, the preview's playable copy, joining footage | `FfmpegCli` (ffmpeg/ffprobe CLIs) | `MockVideoEngine`, selected by `AutoVideoEngine` |
 | `transcribe.rs` | Speech-to-text | `WhisperRs` (feature `whisper-native`) or `WhisperCli` | `MockTranscriber`, selected by `AutoTranscriber` |
 | `inference.rs` | Chat completions / tool calls | `OpenAiCompatClient` (OpenAI-compatible HTTP) | — (no mock here) |
 | `anthropic.rs` | Hosted mode: Claude through the Messages API | `AnthropicClient` (`HostedBackend`) | tests use a local axum stub |
 | `embed.rs` | Text embeddings for semantic search | `OllamaEmbedder` (OpenAI-compatible HTTP) | `MockEmbedder` |
 | `face.rs` | Face finding and 9:16 crop math | Apple Vision (`#[cfg(target_os = "macos")]`) | Off macOS: `CoreError::Unavailable` |
-| `record.rs` | Camera / screen / dual capture sessions and the recordings library | ffmpeg `avfoundation` + `h264_videotoolbox` | — (macOS only at runtime) |
 
 ## Interface
 
 ### `mod.rs`
 
-- Declares `pub mod anthropic; embed; face; inference; record; transcribe; video;`.
+- Declares `pub mod anthropic; embed; face; inference; transcribe; video;`.
 - Re-exports `Embedder`, `MockEmbedder`, `OllamaEmbedder`; `ChatMessage`,
   `ChatRequest`, `ChatResponse`, `InferenceClient`, `OpenAiCompatClient`,
   `ToolCall`; `AutoTranscriber`, `MockTranscriber`, `Transcriber`,
   `WhisperCli`; `AutoVideoEngine`, `FfmpegCli`, `MockVideoEngine`,
-  `VideoEngine`. Everything else (e.g. `face::*`, `record::*`,
-  `embed::cosine`, `inference::FunctionCall`, `transcribe::WhisperRs`,
-  `video::RenderJob`) is reached by its module path.
+  `VideoEngine`. Everything else (e.g. `face::*`, `embed::cosine`,
+  `inference::FunctionCall`, `transcribe::WhisperRs`, `video::RenderJob`) is
+  reached by its module path.
 - `pub fn demo_mode() -> bool`: returns `crate::capabilities::probe().demo()`.
 
 ### `video.rs`
@@ -63,17 +61,27 @@ receive results or file paths.
 - `pub struct RenderJob<'a> { media, pieces: &[Vec<PlaySpan>], out_path, audio_offset_s, screen: Option<(&Media, &crate::model::Layout)>, vertical_crop_x: Option<f64> }`:
   `pieces` is what plays, grouped by piece, in output order (the main cut is
   one piece: `Timeline::play_spans()`; a saved clip is
-  `SavedClip::piece_spans()`); `screen` is dual-capture compositing;
+  `SavedClip::piece_spans()`); `screen` is the project's screen file (one that
+  starts with the camera file, `project.screen_media`) and its layout, for
+  compositing;
   `vertical_crop_x` renders 9:16 at 1080×1920 (0 = left, 0.5 = centre, 1 =
   right).
-- `pub struct MediaAssets { peaks_path: Option<String>, peaks_per_second: u32, thumbnails: Vec<ThumbnailRef>, playback_path: Option<String> }`
-  and `pub struct ThumbnailRef { time: f64, path: String }`. Both are
+- `pub struct MediaAssets { peaks_path: Option<String>, peaks_per_second: u32, thumbnails: Vec<ThumbnailRef>, playback_path: Option<String>, playback_error: Option<String> }`
+  and `pub struct ThumbnailRef { time: f64, path: String }`. `playback_error`
+  is why building the playable copy failed in this run; it is set only when
+  there is no copy. Both are
   `Serialize`, and `ts_rs::TS`-exported under feature `ts-bindings`. They carry
   **file paths, not payloads**.
 - `pub const PEAKS_PER_SECOND: u32 = 50`.
 - Binary resolution: `ffmpeg_path()`, `ffprobe_path() -> Option<PathBuf>`,
   `ffmpeg_available() -> bool` (true only when both resolve).
-- Playback: `pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>>`.
+- Playback: `pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>>`
+  (builds the copy), `pub fn playable_copy_path(&Media) -> Option<String>`
+  (the copy, if it is already on disk) and
+  `pub fn playable_copy_failure(&Media) -> Option<String>` (why it failed in
+  this run).
+- Joining footage: `pub async fn concat_media(paths: &[String]) -> Result<String>`
+  (used by `Editor::append_media`).
 - Cache and peaks: `asset_cache_key(&Media) -> String`, `raw_peaks`,
   `normalize_peaks`, `compute_peaks` (pure), `decode_raw_peaks(file_path)`,
   `load_raw_peaks(&Media) -> Option<Vec<u8>>`.
@@ -159,25 +167,6 @@ receive results or file paths.
 - `pub fn png_size(path: &Path) -> Result<(u32, u32)>`: reads the size from
   the IHDR chunk.
 
-### `record.rs`
-
-- Session lifecycle (one global session):
-  - `start_capture_full(sink, video_index, microphone, is_screen, screen_index: Option<u32>) -> Result<String>`.
-    Returns the take-1 path. `screen_index = Some` turns on dual camera+screen capture.
-  - `start_capture(sink, video_index, microphone, is_screen)` and
-    `start_camera(sink, camera, microphone)` are thin wrappers.
-  - `pause() -> Result<RecordingStatus>`, `resume(sink) -> Result<RecordingStatus>`,
-    `status() -> RecordingStatus`, `stop() -> Result<RecordingOutcome>`.
-  - `abort_on_exit()` is the app-exit hook.
-- Devices and permission: `list_devices() -> Result<CaptureDevices>`,
-  `parse_devices(&str) -> CaptureDevices` (pure),
-  `screen_permission() -> bool`, `request_screen_permission() -> bool`.
-- Library: `list_recordings() -> Result<Vec<RecordingFile>>`,
-  `combine_recordings(paths: &[String]) -> Result<String>`,
-  `delete_recording(path: &str) -> Result<()>`.
-- Serializable DTOs (`ts_rs::TS` under `ts-bindings`): `CaptureDevice`,
-  `CaptureDevices`, `RecordingStatus`, `RecordingFile`, `RecordingOutcome`.
-
 There are no child directories with contracts.
 
 ## Invariants
@@ -206,8 +195,7 @@ There are no child directories with contracts.
   3. Each `PATH` entry.
   4. `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
 
-  `data_dir` is `crate::store::data_dir()`. Nothing is cached. `record.rs` uses
-  the same `video::ffmpeg_path()` / `ffprobe_path()`.
+  `data_dir` is `crate::store::data_dir()`. Nothing is cached.
 - `WhisperCli` runs the bare name `whisper-cli`, so it depends on `PATH`
   rather than `resolve_binary`.
 - `resolve_whisper_model`: `WHISPER_MODEL` wins if it names an existing file.
@@ -283,21 +271,86 @@ There are no child directories with contracts.
   `VideoEngine::media_assets` doc comment still says `<media id>`.)
 - `media_assets` regenerates peaks only when `peaks.bin` is missing, and
   thumbnails only when `thumb_0001.jpg` is missing. The thumbnail interval is
-  `(duration/240).clamp(1, 10)` s. It never builds `play.mp4`; it only reports
-  it when it exists.
+  `(duration/240).clamp(1, 10)` s. It never builds `play.mp4`: it reports it
+  when it exists (`playable_copy_path`), and otherwise reports the failure
+  recorded in this run, if any (`playable_copy_failure`).
 - Peaks: `raw_peaks` takes the max |sample| per bucket scaled to `0..=255`,
   where `bucket = sample_rate / peaks_per_second`. A trailing partial bucket is
   kept. `decode_raw_peaks` decodes at 8 kHz. `normalize_peaks` rescales to a
   240 ceiling only when `4 <= loudest < 240`; silence and already-loud files
   are left untouched. `peaks_raw.bin` holds raw analysis levels and
   `peaks.bin` holds normalized display levels.
-- `ensure_playable_copy` builds a copy only when `moov` comes after `mdat`
-  (`needs_faststart`) or the first audio stream has more than 2 channels.
+- `ensure_playable_copy` makes the preview's copy, `play.mp4`. Only the
+  preview uses the copy: transcription, render and export read the original
+  through ffmpeg. In order:
+  1. A `play.mp4` already on disk is returned at once, before any probing.
+  2. A failure recorded for this source in this run is returned again as
+     `CoreError::Other(<reason>)`, without re-running ffmpeg.
+  3. Otherwise `build_playable_copy` runs, and any error it returns (probe or
+     ffmpeg) is recorded under the source's `asset_cache_key`. The record is
+     in memory, not on disk, so a restart (say, after fixing ffmpeg) tries
+     again.
+- `build_playable_copy`: one ffprobe call (`container_info`: `format_name`,
+  the first video and audio streams' codecs, the audio channel count) and the
+  pure `playable_fix(&ContainerInfo, index_at_end)` decide whether a copy is
+  needed and how (unit tests in `playable_tests`). ffprobe output that
+  `parse_container_info` can't read (no JSON, no format name) is an error,
+  not "not an MP4, no audio".
+  - **MP4 / MOV** (`format_name` lists `mp4` or `mov`): a copy only when
+    `moov` comes after `mdat` (`needs_faststart`) or the first audio stream has
+    more than 2 channels. Video is copied; audio is copied, or converted to
+    stereo AAC when it has more than 2 channels.
+  - **Any other container** (OBS's `.mkv`, `.webm`, `.avi`, …): always a copy.
+    H.264 or HEVC video is copied; any other video codec (VP9, AV1, …) is
+    converted to H.264 (`libx264 -preset fast -crf 18 -pix_fmt yuv420p`),
+    which takes minutes rather than seconds. AAC audio with at most 2 channels
+    is copied; anything else becomes stereo AAC (192k); no audio stream
+    gives `-an`.
+  - HEVC copied into the MP4 is tagged `hvc1` (`-tag:v hvc1`); Apple players
+    refuse it otherwise.
+  - Only the first video track and the first audio track are mapped
+    (`-map 0:v:0?`, plus `-map 0:a:0?` when there is audio): the tracks
+    `ContainerInfo` describes, the render plays (`[0:a]`), and transcription
+    (`extract_audio_wav`) and the waveform (`decode_raw_peaks`) read. Left to itself,
+    ffmpeg would pick the audio track with the most channels (OBS's track 2,
+    say). Subtitle and data tracks are dropped (`-sn -dn`, e.g. OBS
+    chapters), and the copy is `+faststart`.
+  - The H.264 conversion also scales to even dimensions
+    (`-vf scale=trunc(iw/2)*2:trunc(ih/2)*2`), because `yuv420p` needs them
+    (a browser screen recording can be 1365×767).
+  - ffmpeg runs with `-hide_banner -v error`, so a failure's message carries
+    the real reason.
+  - When ffprobe fails, an MP4 whose index is at the end is still copied
+    (video and audio copied as-is); otherwise the probe failure is the
+    error.
   - It returns `Ok(None)` when the source plays as-is **or** when another task
     already holds the per-key claim (`IN_FLIGHT` + `crate::inflight::try_claim`).
     Callers must retry later.
   - It writes `play.mp4.part` and then renames it, so a crash never leaves a
-    `play.mp4` that looks complete.
+    `play.mp4` that looks complete. A failed build deletes the `.part` (a
+    re-encode's partial output can be gigabytes).
+
+### Joining footage (`concat_media`)
+
+- Needs at least 2 files (`InvalidArg("pick at least two files to join")`),
+  each existing (`NotFound`), whose signatures (`join_signature`, one ffprobe
+  call per file) match exactly. The signature covers only the first video
+  track (codec, width×height) and the first audio track (codec, channels,
+  sample rate), e.g. `h264 1920x1080 + aac 2ch 48000Hz` (`no audio` when
+  there is none). A mismatch is `InvalidArg("the files don't match (… vs …):
+  adding footage needs the same codec, resolution and audio format")`,
+  because a stream copy of mismatched files plays broken. Unreadable ffprobe
+  output is an error.
+- The join is lossless (`-f concat -safe 0 … -c copy`) and keeps only the
+  tracks the signature compared (`-map 0:v:0 -map 0:a:0?`). The inputs may be
+  anywhere and are not changed. ffmpeg is resolved before anything is
+  written.
+- The output is `<data_dir>/media/joined-<Local %Y%m%d-%H%M%S>-<8 hex>.<ext>`
+  (the folder is created on demand). `<ext>` is `mp4` (with `+faststart`)
+  only when every input is MP4 / MOV; otherwise it is `mkv`, so the preview
+  copy still fixes what an MP4 couldn't play (HEVC's `hvc1` tag, Opus or PCM
+  audio). The random suffix keeps two joins in the same second apart. A
+  failed join removes its partial output.
 
 ### Transcription
 
@@ -346,89 +399,18 @@ There are no child directories with contracts.
   requires a UTF-8 path. Off macOS it always returns
   `CoreError::Unavailable("face detection needs macOS (Apple Vision)")`.
 
-### Capture (`record.rs`)
-
-- **At most one session**, held in the global `active()` mutex.
-  `start_capture_full` refuses with `InvalidArg("a recording is already running")`
-  while a session is live **or paused**. A session whose ffmpeg child has
-  exited is dropped and replaced; its take files stay on disk.
-- `start_capture_full` checks free disk space with `df -Pk` and needs at least
-  2.0 GB. The check is best-effort: parse failures pass. `resume` does not
-  re-check.
-- File naming: `base = "{presentation|screen|recording}-{Local %Y%m%d-%H%M%S}"`.
-  - Takes are `{base}-take{n}.mp4`, plus `{base}-screen-take{n}.mp4` for dual
-    sessions.
-  - `stop` writes `{base}.mp4` and, for dual sessions, `{base}-screen.mp4`.
-  - Take files are never deleted.
-- `pause` and `resume` both refuse while `transitioning` (a pause is still
-  finalizing). `pause` errors with `"no recording is running"` or
-  `"already paused"`. `resume` errors with `"no recording session"` or
-  `"not paused"`.
-- `finalize_take` writes `q\n` to ffmpeg's stdin and waits up to 10 s. On
-  timeout it calls `start_kill()` and returns an error that points at the macOS
-  Screen Recording privacy setting.
-- `pause` pushes a take only when finalize succeeded **and** the primary file
-  exists. A missing screen file degrades that take to camera-only.
-- `status()` is not read-only. If the child has died, it records the take
-  (when the primary file exists) and reports the session as paused so the user
-  can resume or stop.
-- `stop` always removes the session. A finalize error does not abort it.
-  - With no usable takes: `CoreError::Other("capture produced no usable takes ...")`.
-  - The screen stream is concatenated only when **every** take has a screen
-    file. A screen concat failure degrades to `screen_path: None`.
-- Concatenation is lossless (`-f concat -safe 0 -c copy -movflags +faststart`).
-  `combine_recordings` requires at least 2 existing files whose ffprobe stream
-  signatures (`codec_type,codec_name,width,height,channels`) match exactly.
-  The inputs may be anywhere. The output goes to `~/Movies/RoughCut`, which
-  `combine_recordings` does not create.
-- `delete_recording` only deletes canonical paths inside `~/Movies/RoughCut`
-  (otherwise `InvalidArg("not a RoughCut recording")`). It is idempotent: a
-  path that is already gone returns `Ok`.
-- `list_recordings` returns up to 50 `*.mp4` files in `~/Movies/RoughCut`,
-  newest mtime first.
-- Camera mode choice (`pick_mode`) prefers, in order: landscape, closest to
-  16:9, largest area. fps is `30.clamp(fps_min, fps_max)`. Screens capture at
-  30 fps with the cursor and an even-dimension crop. Output 1 always maps
-  `0:a`, so a microphone is required.
-- Capture code is not `cfg`-gated, but it uses `avfoundation` and
-  `h264_videotoolbox`, so it only works on macOS. Elsewhere it fails at runtime.
-  `screen_permission()` / `request_screen_permission()` return `true` off macOS.
-
 ### Known hazards (from reading the code; not covered by tests)
 
 - `render_mp4` uses `[k:a]` without checking that the source has an audio
   stream.
-- `record::resume` numbers the next take `takes.len() + 1 + 1`, so after
-  take 1 the next file is `-take3.mp4`. This also disagrees with
-  `status().take`.
-- `record::stop` does not check `transitioning`. A `stop` that races an
-  in-flight `pause` can drop the take being finalized.
-- `start_capture_full` and `resume` release the session lock while
-  `spawn_take` runs. Concurrent calls can each spawn ffmpeg, and the last write
-  wins, orphaning the other child.
-- Recording progress emits the `"recording… M:SS"` message about once per take.
-  The parser always reports fraction `0.0`, and `crate::progress::stream_progress`
-  only emits when the integer percent changes.
-- `pick_mode` calls `f64::clamp`, which panics if a probed `fps_min > fps_max`.
-- A dead capture's take can be discarded. If ffmpeg has already exited
-  non-zero and `status()` has not run since, `pause` (and `stop`, through
-  `pause`) gets a finalize error and does not push the take, although its file
-  is on disk. `status()` would have recorded it.
-- Capture outputs are opened without `-y`. A take path that already exists
-  (after a failed finalize, `resume` reuses the same take number; two sessions
-  started in the same second share a `base`) can leave ffmpeg waiting at its
-  overwrite prompt on stdin while `status()` reports recording.
 
 ## Side Effects
 
 - **Process spawns.** All are `tokio::process` unless noted.
-  - `video.rs`: `ffprobe` (probe, audio channel count); `ffmpeg` (render,
-    16 kHz WAV extract, frame grab, thumbnails, peaks decode to `pipe:1`,
-    playable remux).
-  - `record.rs`: `ffmpeg -f avfoundation` (device listing, mode probing,
-    capture); `ffmpeg -f concat -safe 0 … -c copy` (`stop`,
-    `combine_recordings`); `ffprobe` (durations, combine signatures); `df -Pk`
-    (blocking `std::process`).
+  - `video.rs`: `ffprobe` (probe, container and codecs for the playable copy,
+    stream signatures for joins); `ffmpeg` (render, 16 kHz WAV extract, frame
+    grab, thumbnails, peaks decode to `pipe:1`, playable copy,
+    `-f concat -safe 0 … -c copy` joins).
   - `transcribe.rs`: `whisper-cli`; `which whisper-cli` (blocking
     `std::process`, also run inside every `capabilities::probe()`).
 - **Filesystem writes.**
@@ -437,43 +419,39 @@ There are no child directories with contracts.
   - Caller-supplied `out_path` (MP4, WAV, PNG). Existing files are overwritten
     with `-y`.
   - `<wav_path>.transcript.json`, written by `whisper-cli` and never cleaned up.
-  - `~/Movies/RoughCut/` (created if missing by `start_capture_full` only):
-    take files, concatenated outputs, `combined-<timestamp>.mp4`. Files are
-    deleted only through `delete_recording`.
-  - A temp concat list in `std::env::temp_dir()`, removed after use. It leaks
-    if spawning ffmpeg fails.
+  - `<data_dir>/media/joined-<timestamp>-<8 hex>.mp4` or `.mkv`
+    (`concat_media`; the folder is created on demand). Nothing in the core
+    deletes them.
+  - A temp concat list (`roughcut-concat-<uuid>.txt`) in
+    `std::env::temp_dir()`, removed after the join.
 - **Network.** HTTP to the configured local or remote endpoint only:
   - `POST {endpoint}/chat/completions`, with an optional `Authorization: Bearer`.
   - `POST {endpoint}/embeddings`.
   - `GET {endpoint}/models`.
 - **Environment reads.** `FABLE_DEMO` (via `capabilities`), `FFMPEG_PATH`,
   `FFPROBE_PATH`, `PATH`, `WHISPER_MODEL`, `HOME` (via `dirs`, for
-  `~/Movies/RoughCut` and `crate::store::data_dir()`), and `TMPDIR` (via
+  `crate::store::data_dir()`), and `TMPDIR` (via
   `std::env::temp_dir()`, for the concat list).
-- **Global state.**
-  - `record.rs`: `active()` session (`Mutex<Option<Session>>`, holding the live
-    ffmpeg `Child`); `device_cache()` (20 s TTL); `mode_cache()` (per camera,
-    no TTL, empty results cached).
-  - `video.rs`: `ensure_playable_copy`'s `IN_FLIGHT` set.
+- **Global state.** `video.rs`: the playable copy's `IN_FLIGHT` set (one
+  build per cache key at a time) and `playable_failures()` (cache key → the
+  reason the copy failed in this run; memory only, never cleared during a
+  run).
 - **Events.** `crate::events::send` emits `CoreEvent::progress` with
-  `ProgressTask::Export` (render), `ProgressTask::Transcribe` (`WhisperRs`,
-  `MockTranscriber`) and `ProgressTask::Recording` (capture).
-- **OS frameworks (macOS).**
-  - Apple Vision through `objc2-vision`: `VNDetectFaceRectanglesRequest`.
-  - CoreGraphics TCC FFI: `CGPreflightScreenCaptureAccess`,
-    `CGRequestScreenCaptureAccess` (the latter shows a one-time system prompt).
-  - The first `avfoundation` capture triggers camera, microphone and
-    screen-recording permission prompts.
-- **Process lifetime.** `abort_on_exit` kills a live capture child without
-  finalizing it, leaving a fragmented take on disk. `finalize_take` kills
-  ffmpeg after its 10 s timeout.
+  `ProgressTask::Export` (render) and `ProgressTask::Transcribe` (`WhisperRs`,
+  `MockTranscriber`).
+- **OS frameworks (macOS).** Apple Vision through `objc2-vision`:
+  `VNDetectFaceRectanglesRequest`.
 
 ## Verification
 
 - Run (from the workspace root `/Users/paul/fable`): `cargo test -p roughcut-core`
 - This module's unit tests only: `cargo test -p roughcut-core --lib adapters::`
-  (pure tests in `embed.rs`, `face.rs`, `video.rs` (`compute_peaks`), and
-  `record.rs` (`parse_devices`)). `tests/e2e.rs` exercises `MockVideoEngine`,
+  (pure tests in `embed.rs`, `face.rs`, and `video.rs` (`compute_peaks`,
+  `render_plan`, and `playable_tests`: the playable-copy decision, its
+  ffmpeg arguments, the ffprobe parsing and `join_signature`)). `tests/e2e.rs` exercises `MockVideoEngine`,
   `MockTranscriber` and `MockEmbedder` offline.
+- Against real ffmpeg: `cargo run -p roughcut-core --example playable_check`
+  (playable copies of `.mkv` / `.webm` test clips, `.mp4` and `.mkv` joins;
+  prints `PLAYABLE-OK`).
 - `WhisperRs` compiles only with `--features whisper-native`, which the default
   test run leaves out.

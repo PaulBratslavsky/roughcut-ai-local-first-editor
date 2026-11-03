@@ -211,107 +211,6 @@ async fn send_to_resolve(state: State<'_, AppState>, project_id: String) -> Resu
     Ok(serde_json::to_value(outcome).unwrap_or_default())
 }
 
-#[tauri::command]
-async fn record_devices() -> Result<roughcut_core::adapters::record::CaptureDevices, Value> {
-    roughcut_core::adapters::record::list_devices().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_start(
-    state: State<'_, AppState>,
-    video: u32,
-    microphone: u32,
-    screen: bool,
-    dual_screen: Option<u32>,
-) -> Result<String, Value> {
-    roughcut_core::adapters::record::start_capture_full(
-        &state.editor.sink(),
-        video,
-        microphone,
-        screen,
-        dual_screen,
-    )
-    .await
-    .map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn attach_screen_media(
-    state: State<'_, AppState>,
-    project_id: String,
-    file_path: String,
-) -> Result<(), Value> {
-    let pid = uuid::Uuid::parse_str(&project_id)
-        .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
-    state.editor.attach_screen_media(pid, &file_path).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-fn record_status() -> roughcut_core::adapters::record::RecordingStatus {
-    roughcut_core::adapters::record::status()
-}
-
-#[tauri::command]
-async fn record_stop() -> Result<roughcut_core::adapters::record::RecordingOutcome, Value> {
-    roughcut_core::adapters::record::stop().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_pause() -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
-    roughcut_core::adapters::record::pause().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_resume(
-    state: State<'_, AppState>,
-) -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
-    roughcut_core::adapters::record::resume(&state.editor.sink()).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn list_recordings() -> Result<Vec<roughcut_core::adapters::record::RecordingFile>, Value> {
-    roughcut_core::adapters::record::list_recordings().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
-    roughcut_core::adapters::record::combine_recordings(&paths).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-fn screen_permission_status() -> bool {
-    roughcut_core::adapters::record::screen_permission()
-}
-
-#[tauri::command]
-fn request_screen_permission() -> bool {
-    roughcut_core::adapters::record::request_screen_permission()
-}
-
-/// Open System Settings at a privacy pane (whitelisted).
-#[tauri::command]
-fn open_privacy_settings(pane: String) -> Result<(), Value> {
-    let anchor = match pane.as_str() {
-        "screen" => "Privacy_ScreenCapture",
-        "camera" => "Privacy_Camera",
-        "microphone" => "Privacy_Microphone",
-        _ => return Err(serde_json::json!({ "error": { "code": "invalid_argument", "message": "unknown pane" } })),
-    };
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
-        .spawn()
-        .map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
-    #[cfg(not(target_os = "macos"))]
-    let _ = anchor;
-    Ok(())
-}
-
-#[tauri::command]
-fn delete_recording(path: String) -> Result<(), Value> {
-    roughcut_core::adapters::record::delete_recording(&path).map_err(|e| e.to_json())
-}
-
 /// Open an in-app terminal session. The MCP endpoint (when up) is injected
 /// into the shell env so a one-click connect can wire Claude Code to it.
 #[tauri::command]
@@ -398,27 +297,13 @@ pub fn run() {
             pty_kill,
             install_resolve_plugin,
             resolve_status,
-            send_to_resolve,
-            record_devices,
-            record_start,
-            record_status,
-            record_stop,
-            record_pause,
-            record_resume,
-            list_recordings,
-            combine_recordings,
-            delete_recording,
-            attach_screen_media,
-            screen_permission_status,
-            request_screen_permission,
-            open_privacy_settings
+            send_to_resolve
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 roughcut_core::llm_runtime::stop_managed();
-                roughcut_core::adapters::record::abort_on_exit();
                 roughcut_core::pty::kill_all();
             }
         });

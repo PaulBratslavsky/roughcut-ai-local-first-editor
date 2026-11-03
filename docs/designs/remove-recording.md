@@ -1,7 +1,7 @@
 # Remove in-app recording
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Approved (not built): the owner chose the one-file option
+*   **Status:** Implemented on `feat/remove-recording` (the owner chose the one-file option)
 *   **Date:** 2026-11-03 (first drafted 2026-10-31)
 
 --------------------------------------------------------------------------------
@@ -132,16 +132,25 @@ project) must keep working without it.
 *   **Change**: also make the copy when the container isn't MP4 / MOV (a
     quick ffprobe of `format_name`, like the existing `audio_channels`
     check; `probe` reads the format but doesn't keep its name). Video is copied
-    (H.264 / HEVC: OBS's encoders); audio is copied when it is AAC and
-    converted to AAC otherwise (same as the existing >2-channel path). A
-    video codec MP4 can't carry (rare from OBS) is converted to H.264, with
-    a progress note, since that copy takes minutes rather than seconds.
-*   The copy is already built in the background on the first
-    `get_media_assets` call, and `media-assets-changed` switches the preview
-    to it when it lands (`engine/projects.rs`). Until then the preview plays
-    the original, which for a `.mkv` shows no picture, so `PreviewPanel.tsx`
-    shows "Preparing preview…" over the player when the file isn't
-    `.mp4` / `.mov` / `.m4v` and there is no `playback_path` yet.
+    (H.264 / HEVC: OBS's encoders; HEVC is tagged `hvc1`, which Apple
+    players need); audio is copied when it is AAC and converted to stereo
+    AAC otherwise (same as the existing >2-channel path). Video WebKit can't
+    play (VP9, AV1, …; rare from OBS) is converted to H.264, which takes
+    minutes rather than seconds; "Preparing preview…" covers the wait.
+*   The copy is built in the background on the first `get_media_assets`
+    call (now started before the peaks and thumbnails, so it doesn't wait on
+    them), and `media-assets-changed` switches the preview to it when it
+    lands (`engine/projects.rs`). Until then the preview plays the original,
+    which for a `.mkv` shows no picture, so `PreviewPanel.tsx` shows
+    "Preparing preview…" over the player when the file isn't `.mp4` /
+    `.mov` / `.m4v` and there is no `playback_path` yet.
+*   The copy takes the first video and the first audio track (the ones the
+    render plays), not ffmpeg's pick of the audio track with the most
+    channels.
+*   A failed copy is remembered for the rest of the run (not retried on
+    every refetch; a restart retries) and reported as
+    `MediaAssets.playback_error`; the preview shows the reason instead of
+    "Preparing preview…" forever.
 *   Everything else already works on the original file: transcription,
     render and export read it through ffmpeg; the copy is only for the
     preview.
@@ -156,6 +165,11 @@ project) must keep working without it.
 *   Move the join (`combine_recordings`, its private `concat` and its codec
     check) to `video.rs` as `concat_media`, writing to `<data dir>/media/`
     (created on demand), with errors that say "footage", not "recordings".
+*   It joins only the first video and first audio track, and requires them
+    to match (codec, size; codec, channels, sample rate), so a two-track
+    OBS file can be added more than once. The result is an MP4 when every
+    input is MP4 / MOV and an `.mkv` otherwise, so the preview copy still
+    fixes what an MP4 couldn't play (HEVC's tag, Opus or PCM audio).
 
 ### 3. Remove recording
 
@@ -274,8 +288,6 @@ project) must keep working without it.
 *   Separate files lined up by sound (Alternative B), if layouts are wanted
     while editing.
 *   Pick an OBS audio track when a file has several.
-*   Allow `.mkv` in the Footage tab's "add a video file…" (today mp4, mov,
-    m4v, since joining needs matching containers).
 
 --------------------------------------------------------------------------------
 
@@ -289,17 +301,20 @@ build green.
 *   `ensure_playable_copy` remuxes non-MP4 containers (the copy rules in
     Technical Plan §1). Tests: the decision function (container and codecs →
     copy or not, and which audio / video arguments) as unit tests;
-    `core/examples/playable_check.rs` (new) makes a 10-second `lavfi` clip as
-    `.mkv` (H.264 + AAC) and as `.mkv` with Opus audio, runs
-    `ensure_playable_copy` on each, and checks the result is a faststart MP4
-    with AAC audio (ffprobe), printing `PLAYABLE-OK`. The preview's
-    "Preparing preview…" state.
+    `core/examples/playable_check.rs` (new) makes 10-second `lavfi` clips
+    as `.mkv` (H.264 + AAC, H.264 + Opus, HEVC + AAC) and `.webm` (VP9 +
+    Opus), runs `ensure_playable_copy` on each, and checks the result is a
+    faststart MP4 with AAC audio (HEVC tagged `hvc1`), that a second call
+    hits the cache, and that a faststart MP4 gets no copy; it prints
+    `PLAYABLE-OK`. The preview's "Preparing preview…" state.
 
 ### 2. `concat_media` (`core/src/adapters/video.rs`, `core/src/engine/media.rs`)
 
 *   Move and rename; write to `<data dir>/media/`; `append_media` calls it.
-    Test: `playable_check` also joins two `lavfi` MP4s into a fresh data
-    dir and checks the length.
+    The Footage tab's picker also accepts `.mkv`. Test: `playable_check`
+    joins two MP4s (→ `.mp4`), two HEVC `.mkv` files (→ `.mkv` whose copy
+    is tagged `hvc1`) and a two-track `.mkv` twice in a row, checks the
+    lengths, and checks that an H.264 file and an HEVC file are refused.
 
 ### 3. Remove recording (Delete / Modify)
 

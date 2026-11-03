@@ -22,10 +22,10 @@ examples in [`core/examples/`](../examples/README.md).
 
 - [adapters](./adapters/README.md) — the boundary to everything outside the
   process: `VideoEngine` (ffmpeg/ffprobe), `Transcriber` (whisper),
-  `InferenceClient` (OpenAI-compatible chat), `Embedder`, Apple Vision face
-  finding, and avfoundation capture. Video and transcription have production
-  impls, `Mock*` fixtures, and `Auto*` selectors that re-check
-  `capabilities::probe()` per call.
+  `InferenceClient` (OpenAI-compatible chat), `Embedder`, and Apple Vision
+  face finding. Video and transcription have production impls, `Mock*`
+  fixtures, and `Auto*` selectors that re-check `capabilities::probe()` per
+  call.
 - [engine](./engine/README.md) — `Editor`: the in-memory project cache, the
   journaled edit path (`apply_edit`, undo/redo, checkpoints), media and
   transcription, saved clips, semantic search, and UI confirmations.

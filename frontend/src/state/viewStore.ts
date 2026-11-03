@@ -41,11 +41,11 @@ function savePrefs(s: PersistedPrefs): void {
 }
 
 export type ActiveTab = "tools" | "chat" | "footage" | "clips" | "history" | "terminal";
-/** The editor (default), the full-screen recorder, or the Shorts review. */
-export type AppScreen = "editor" | "recorder" | "shorts";
+/** The editor (default) or the Shorts review. */
+export type AppScreen = "editor" | "shorts";
 
 export interface ViewState {
-  /** App-level screen: the editor (default), the recorder, or Shorts. */
+  /** App-level screen: the editor (default) or Shorts. */
   screen: AppScreen;
   projectId: string | null;
   playhead: number; // seconds, source time

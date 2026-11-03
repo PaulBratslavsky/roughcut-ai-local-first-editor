@@ -1091,9 +1091,15 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return clone(p);
   },
 
-  get_media_assets(args): { peaks_path: null; peaks_per_second: number; thumbnails: []; playback_path: null } {
+  get_media_assets(args): {
+    peaks_path: null;
+    peaks_per_second: number;
+    thumbnails: [];
+    playback_path: null;
+    playback_error: null;
+  } {
     requireProject(args.project_id);
-    return { peaks_path: null, peaks_per_second: 50, thumbnails: [], playback_path: null };
+    return { peaks_path: null, peaks_per_second: 50, thumbnails: [], playback_path: null, playback_error: null };
   },
 
   get_suggestions(args): unknown {

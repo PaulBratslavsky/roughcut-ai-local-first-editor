@@ -23,7 +23,6 @@ pub enum ProgressTask {
     RoughCut,
     Export,
     ModelDownload,
-    Recording,
     ModelPull,
     RuntimeInstall,
     FindClips,

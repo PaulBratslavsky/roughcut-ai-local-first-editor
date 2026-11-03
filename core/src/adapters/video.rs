@@ -26,9 +26,12 @@ pub struct MediaAssets {
     pub peaks_per_second: u32,
     pub thumbnails: Vec<ThumbnailRef>,
     /// Web-playable copy when the source itself isn't (mp4 with the moov
-    /// index at the END streams as an endless black frame in WebKit; ffmpeg
-    /// remuxes it losslessly with +faststart). None = play the source.
+    /// index at the END streams as an endless black frame in WebKit; an OBS
+    /// .mkv doesn't open at all). None = play the source, or the copy isn't
+    /// built yet.
     pub playback_path: Option<String>,
+    /// Why building the playable copy failed in this run, if it did.
+    pub playback_error: Option<String>,
 }
 
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
@@ -270,8 +273,10 @@ impl VideoEngine for FfmpegCli {
     async fn extract_audio_wav(&self, media: &Media, out_path: &str) -> Result<()> {
         let mut cmd = ffmpeg_cmd()?;
         cmd.args([
-            "-y", "-i", &media.file_path, "-vn", "-ac", "1", "-ar", "16000", "-c:a",
-            "pcm_s16le", out_path,
+            // The first audio track (OBS's track 1), like the render and the
+            // preview copy; ffmpeg's own pick is the track with most channels.
+            "-y", "-i", &media.file_path, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le", out_path,
         ]);
         Self::run(&mut cmd, "ffmpeg audio extract").await?;
         Ok(())
@@ -336,77 +341,328 @@ impl VideoEngine for FfmpegCli {
         // Playable copy if a PREVIOUS remux produced one. Building a missing
         // one is slow on multi-GB sources — the engine kicks that off in the
         // background (ensure_playable_copy) so peaks/thumbnails return now.
-        let play = cache.join("play.mp4");
-        let playback_path = play.is_file().then(|| play.to_string_lossy().into_owned());
+        let playback_path = playable_copy_path(media);
+        let playback_error = if playback_path.is_none() { playable_copy_failure(media) } else { None };
 
         Ok(MediaAssets {
             peaks_path: Some(peaks_file.to_string_lossy().into_owned()),
             peaks_per_second: PEAKS_PER_SECOND,
             thumbnails,
             playback_path,
+            playback_error,
         })
     }
 }
 
-/// Build the web-playable copy when the source needs one (moov after mdat).
-/// Lossless stream copy with +faststart, written to `.part` then renamed, so
-/// a crash never leaves a half-copy that looks playable. Idempotent and
-/// deduplicated; Ok(None) = the source plays as-is.
+/// The preview copy, if one was already built for this source.
+pub fn playable_copy_path(media: &Media) -> Option<String> {
+    let play = crate::store::data_dir().join("cache").join(asset_cache_key(media)).join("play.mp4");
+    play.is_file().then(|| play.to_string_lossy().into_owned())
+}
+
+/// Preview copies that failed in this run, by cache key, with the reason.
+/// Kept in memory, not on disk: within a run a failure isn't retried on
+/// every asset refetch; after a restart (say, with ffmpeg fixed) it is.
+fn playable_failures() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static FAILED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    FAILED.get_or_init(Default::default)
+}
+
+/// Why this source's preview copy failed in this run, if it did.
+pub fn playable_copy_failure(media: &Media) -> Option<String> {
+    playable_failures().lock().unwrap().get(&asset_cache_key(media)).cloned()
+}
+
+/// Build the web-playable copy when the source needs one: an MP4 whose index
+/// sits at the end, audio WebKit can't play, or a container WebKit can't open
+/// at all (OBS's `.mkv`, `.webm`, `.avi`, …). Stream copy where the codecs
+/// allow it, with +faststart, written to `.part` then renamed, so a crash
+/// never leaves a half-copy that looks playable. Idempotent and deduplicated;
+/// Ok(None) = the source plays as-is (or another task is building the copy).
+/// A failure is remembered for the rest of the run (`playable_copy_failure`)
+/// and returned again instead of re-running ffmpeg. Only the preview uses the
+/// copy: transcription, render and export read the original through ffmpeg.
 pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
-    let fix_index = needs_faststart(&media.file_path);
-    // CoreAudio/WebKit refuse >2-channel AAC outright (the MacBook mic array
-    // records 3ch) — those files play SILENT; downmix to stereo in the copy.
-    let fix_audio = audio_channels(&media.file_path).await.unwrap_or(0) > 2;
-    if !fix_index && !fix_audio {
-        return Ok(None);
+    if let Some(play) = playable_copy_path(media) {
+        return Ok(Some(play));
     }
+    if let Some(reason) = playable_copy_failure(media) {
+        return Err(CoreError::Other(reason));
+    }
+    let result = build_playable_copy(media).await;
+    if let Err(e) = &result {
+        playable_failures().lock().unwrap().insert(asset_cache_key(media), e.to_string());
+    }
+    result
+}
+
+async fn build_playable_copy(media: &Media) -> Result<Option<String>> {
+    let index_at_end = needs_faststart(&media.file_path);
+    let fix = match container_info(&media.file_path).await {
+        Ok(info) => playable_fix(&info, index_at_end),
+        // ffprobe failed: still fix an MP4's late index, copying the first
+        // video and audio track as they are.
+        Err(_) if index_at_end => {
+            Some(PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy })
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(fix) = fix else {
+        return Ok(None);
+    };
     let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
     std::fs::create_dir_all(&cache)?;
     let play = cache.join("play.mp4");
+    // One copy per cache key at a time (RAII: released even on panic).
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let set = IN_FLIGHT.get_or_init(Default::default);
+    let Some(_claim) = crate::inflight::try_claim(set, asset_cache_key(media)) else {
+        return Ok(None); // someone else is building it; caller retries later
+    };
     if play.is_file() {
-        return Ok(Some(play.to_string_lossy().into_owned()));
+        return Ok(Some(play.to_string_lossy().into_owned())); // built while we probed
     }
-    // One remux per cache key at a time (RAII: released even on panic).
-    {
-        static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-            std::sync::OnceLock::new();
-        let set = IN_FLIGHT.get_or_init(Default::default);
-        let Some(_claim) = crate::inflight::try_claim(set, asset_cache_key(media)) else {
-            return Ok(None); // someone else is building it; caller retries later
-        };
-        let result = async {
-            let part = cache.join("play.mp4.part");
-            let mut cmd = ffmpeg_cmd()?;
-            cmd.arg("-y").args(["-i", &media.file_path, "-c:v", "copy"]);
-            if fix_audio {
-                cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "192k"]);
-            } else {
-                cmd.args(["-c:a", "copy"]);
-            }
-            cmd.args(["-movflags", "+faststart", "-f", "mp4", &part.to_string_lossy()]);
-            FfmpegCli::run(&mut cmd, "ffmpeg playable remux").await?;
-            std::fs::rename(&part, &play)?;
-            Ok::<_, crate::error::CoreError>(Some(play.to_string_lossy().into_owned()))
-        }
-        .await;
-        result
+    let part = cache.join("play.mp4.part");
+    let mut cmd = ffmpeg_cmd()?;
+    cmd.args(["-hide_banner", "-v", "error", "-y", "-i", &media.file_path]);
+    cmd.args(playable_args(&fix));
+    cmd.arg(&part);
+    if let Err(e) = FfmpegCli::run(&mut cmd, "ffmpeg playable copy").await {
+        // A re-encode's partial output can be gigabytes.
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    std::fs::rename(&part, &play)?;
+    Ok(Some(play.to_string_lossy().into_owned()))
+}
+
+/// What ffprobe says about a file's container and its first video and audio
+/// streams: enough to decide whether WebKit can play it as-is.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ContainerInfo {
+    /// ffprobe `format_name`: "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi", …
+    format_name: String,
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+    audio_channels: u32,
+}
+
+impl ContainerInfo {
+    /// MP4 and MOV (and .m4v / .3gp): ffprobe names them all "mov,mp4,…".
+    fn is_mp4(&self) -> bool {
+        self.format_name.split(',').any(|f| f == "mp4" || f == "mov")
     }
 }
 
-/// Audio channel count of the first audio stream (0 when probing fails).
-async fn audio_channels(path: &str) -> Result<u32> {
+/// How to build the preview copy.
+#[derive(Debug, Clone, PartialEq)]
+struct PlayableFix {
+    /// Convert the video to H.264 (a codec WebKit can't play, in a container
+    /// it can't open); otherwise the video is copied as-is.
+    reencode_video: bool,
+    /// HEVC copied into MP4 needs the `hvc1` tag, or Apple players refuse it.
+    tag_hvc1: bool,
+    audio: AudioFix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AudioFix {
+    /// No audio stream.
+    None,
+    Copy,
+    /// To stereo AAC: CoreAudio/WebKit refuse >2-channel AAC outright (the
+    /// MacBook mic array records 3ch — those files play SILENT), and audio
+    /// that isn't AAC (OBS can write Opus or PCM) doesn't play from an MP4.
+    StereoAac,
+}
+
+async fn container_info(path: &str) -> Result<ContainerInfo> {
     let probe = ffprobe_path()
         .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
     let mut cmd = Command::new(probe);
     cmd.args([
         "-v", "quiet",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=channels",
-        "-of", "csv=p=0",
+        "-show_entries", "format=format_name:stream=codec_type,codec_name,channels",
+        "-of", "json",
         path,
     ]);
-    let out = FfmpegCli::run(&mut cmd, "ffprobe channels").await?;
-    Ok(out.trim().parse().unwrap_or(0))
+    let out = FfmpegCli::run(&mut cmd, "ffprobe container").await?;
+    parse_container_info(&out)
+        .ok_or_else(|| CoreError::Other(format!("ffprobe container: unreadable output for {path}")))
+}
+
+/// None when the output isn't ffprobe JSON with a format name.
+fn parse_container_info(json: &str) -> Option<ContainerInfo> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let format_name = v["format"]["format_name"].as_str()?.to_string();
+    let streams = v["streams"].as_array().cloned().unwrap_or_default();
+    let first = |kind: &str| streams.iter().find(|s| s["codec_type"] == kind).cloned();
+    let video = first("video");
+    let audio = first("audio");
+    Some(ContainerInfo {
+        format_name,
+        video_codec: video.and_then(|s| s["codec_name"].as_str().map(str::to_string)),
+        audio_codec: audio.as_ref().and_then(|s| s["codec_name"].as_str().map(str::to_string)),
+        audio_channels: audio.and_then(|s| s["channels"].as_u64()).unwrap_or(0) as u32,
+    })
+}
+
+/// None = the original plays in the preview as-is.
+fn playable_fix(info: &ContainerInfo, index_at_end: bool) -> Option<PlayableFix> {
+    let is_mp4 = info.is_mp4();
+    let hevc = info.video_codec.as_deref() == Some("hevc");
+    let audio = match info.audio_codec.as_deref() {
+        None => AudioFix::None,
+        Some(_) if info.audio_channels > 2 => AudioFix::StereoAac,
+        Some("aac") => AudioFix::Copy,
+        // An MP4's own audio has always been copied; only other containers
+        // bring codecs that need converting.
+        Some(_) if is_mp4 => AudioFix::Copy,
+        Some(_) => AudioFix::StereoAac,
+    };
+    if is_mp4 {
+        if !index_at_end && audio != AudioFix::StereoAac {
+            return None;
+        }
+        return Some(PlayableFix { reencode_video: false, tag_hvc1: hevc, audio });
+    }
+    let plays = matches!(info.video_codec.as_deref(), None | Some("h264") | Some("hevc"));
+    Some(PlayableFix { reencode_video: !plays, tag_hvc1: hevc, audio })
+}
+
+/// ffmpeg arguments between `-i <source>` and the output path.
+fn playable_args(fix: &PlayableFix) -> Vec<&'static str> {
+    // The first video and the first audio track: the ones `ContainerInfo`
+    // describes and the render plays (`[0:a]`). ffmpeg's own pick would be
+    // the audio track with the most channels.
+    // Optional maps: the ffprobe-failed fallback copies without knowing
+    // whether there is any audio.
+    let mut args = vec!["-map", "0:v:0?"];
+    if fix.audio != AudioFix::None {
+        args.extend(["-map", "0:a:0?"]);
+    }
+    if fix.reencode_video {
+        // yuv420p needs even dimensions (a browser screen recording can be 1365x767).
+        args.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]);
+        args.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]);
+    } else {
+        args.extend(["-c:v", "copy"]);
+        if fix.tag_hvc1 {
+            args.extend(["-tag:v", "hvc1"]);
+        }
+    }
+    match fix.audio {
+        AudioFix::None => args.push("-an"),
+        AudioFix::Copy => args.extend(["-c:a", "copy"]),
+        AudioFix::StereoAac => args.extend(["-c:a", "aac", "-ac", "2", "-b:a", "192k"]),
+    }
+    // Subtitle and data tracks (OBS chapters, mkv attachments) aren't mapped,
+    // and an MP4 couldn't hold most of them anyway.
+    args.extend(["-sn", "-dn", "-movflags", "+faststart", "-f", "mp4"]);
+    args
+}
+
+/// Join files end to end without re-encoding (`-f concat -c copy`) into a new
+/// file in `<data dir>/media/`; the inputs are untouched. Stream copy of files
+/// whose codecs, frame size or audio format differ plays broken, so they are
+/// refused instead. Only the first video and first audio track are joined.
+/// The result is an MP4 when every input is MP4/MOV; otherwise it is an
+/// `.mkv`, so the preview copy (`ensure_playable_copy`) still fixes what an
+/// MP4 couldn't play (HEVC's tag, Opus or PCM audio). Used by "add footage to
+/// the end" (`Editor::append_media`).
+pub async fn concat_media(paths: &[String]) -> Result<String> {
+    if paths.len() < 2 {
+        return Err(CoreError::InvalidArg("pick at least two files to join".into()));
+    }
+    let ffprobe = ffprobe_path()
+        .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
+    let mut cmd = ffmpeg_cmd()?;
+    let mut signature: Option<String> = None;
+    let mut all_mp4 = true;
+    for p in paths {
+        if !Path::new(p).is_file() {
+            return Err(CoreError::NotFound(format!("file {p}")));
+        }
+        let mut probe = Command::new(&ffprobe);
+        probe.args([
+            "-v", "quiet",
+            "-show_entries",
+            "format=format_name:stream=codec_type,codec_name,width,height,channels,sample_rate",
+            "-of", "json",
+            p,
+        ]);
+        let out = FfmpegCli::run(&mut probe, "ffprobe streams").await?;
+        let (is_mp4, sig) = join_signature(&out)
+            .ok_or_else(|| CoreError::Other(format!("ffprobe streams: unreadable output for {p}")))?;
+        all_mp4 &= is_mp4;
+        match &signature {
+            None => signature = Some(sig),
+            Some(first) if *first != sig => {
+                return Err(CoreError::InvalidArg(format!(
+                    "the files don't match ({first} vs {sig}): adding footage needs the same \
+                     codec, resolution and audio format"
+                )));
+            }
+            _ => {}
+        }
+    }
+    let dir = crate::store::data_dir().join("media");
+    std::fs::create_dir_all(&dir)?;
+    // The random suffix keeps two joins in the same second from writing the
+    // same file (ffmpeg runs with -y; the first may be another project's media).
+    let out = dir.join(format!(
+        "joined-{}-{}.{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        &Uuid::new_v4().simple().to_string()[..8],
+        if all_mp4 { "mp4" } else { "mkv" },
+    ));
+    let list_path = std::env::temp_dir().join(format!(
+        "roughcut-concat-{}.txt",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let list: String = paths
+        .iter()
+        .map(|p| format!("file '{}'\n", p.replace('\'', "'\\''")))
+        .collect();
+    std::fs::write(&list_path, list)?;
+    cmd.args(["-hide_banner", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list_path)
+        .args(["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]);
+    if all_mp4 {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    cmd.arg(&out).stdin(Stdio::null());
+    let result = FfmpegCli::run(&mut cmd, "ffmpeg join").await;
+    let _ = std::fs::remove_file(&list_path);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&out);
+        return Err(e);
+    }
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// (is MP4/MOV, what must match to join by stream copy): the first video's
+/// codec and size, the first audio's codec, channels and sample rate.
+fn join_signature(json: &str) -> Option<(bool, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let format = v["format"]["format_name"].as_str()?;
+    let is_mp4 = format.split(',').any(|f| f == "mp4" || f == "mov");
+    let streams = v["streams"].as_array().cloned().unwrap_or_default();
+    let first = |kind: &str| streams.iter().find(|s| s["codec_type"] == kind).cloned();
+    let s = |x: &serde_json::Value, k: &str| match &x[k] {
+        serde_json::Value::String(t) => t.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => "?".into(),
+    };
+    let video = first("video").map_or("no video".to_string(), |x| {
+        format!("{} {}x{}", s(&x, "codec_name"), s(&x, "width"), s(&x, "height"))
+    });
+    let audio = first("audio").map_or("no audio".to_string(), |x| {
+        format!("{} {}ch {}Hz", s(&x, "codec_name"), s(&x, "channels"), s(&x, "sample_rate"))
+    });
+    Some((is_mp4, format!("{video} + {audio}")))
 }
 
 /// True when an mp4/mov's `moov` index sits AFTER the `mdat` payload —
@@ -509,7 +765,9 @@ pub async fn decode_raw_peaks(file_path: &str) -> Result<Vec<u8>> {
     const RATE: u32 = 8000;
     let mut cmd = ffmpeg_cmd()?;
     cmd.args([
-        "-i", file_path, "-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f", "s16le", "pipe:1",
+        // The first audio track, as transcription and the render use.
+        "-i", file_path, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f",
+        "s16le", "pipe:1",
     ]);
     let pcm = FfmpegCli::run_binary(&mut cmd, "ffmpeg peaks decode").await?;
     Ok(raw_peaks(&pcm, RATE, PEAKS_PER_SECOND))
@@ -581,6 +839,7 @@ impl VideoEngine for MockVideoEngine {
             peaks_per_second: PEAKS_PER_SECOND,
             thumbnails: vec![],
             playback_path: None,
+            playback_error: None,
         })
     }
 }
@@ -1047,5 +1306,128 @@ mod tests {
         assert_eq!(peaks[2], 127); // 16384/32768*255
         assert_eq!(peaks[9], 255); // clamped full-scale negative
         assert!(peaks[0] <= 1);
+    }
+}
+
+#[cfg(test)]
+mod playable_tests {
+    use super::{
+        join_signature, parse_container_info, playable_args, playable_fix, AudioFix, ContainerInfo,
+        PlayableFix,
+    };
+
+    fn info(format: &str, video: Option<&str>, audio: Option<&str>, channels: u32) -> ContainerInfo {
+        ContainerInfo {
+            format_name: format.into(),
+            video_codec: video.map(str::to_string),
+            audio_codec: audio.map(str::to_string),
+            audio_channels: channels,
+        }
+    }
+
+    const MP4: &str = "mov,mp4,m4a,3gp,3g2,mj2";
+    const MKV: &str = "matroska,webm";
+
+    #[test]
+    fn a_normal_mp4_plays_as_is() {
+        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("aac"), 2), false), None);
+        // An MP4's own audio was never converted unless it had >2 channels.
+        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("pcm_s16le"), 2), false), None);
+    }
+
+    #[test]
+    fn mp4_fixes_are_unchanged() {
+        let late_index = playable_fix(&info(MP4, Some("h264"), Some("aac"), 2), true).unwrap();
+        assert_eq!(late_index, PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy });
+        let three_ch = playable_fix(&info(MP4, Some("h264"), Some("aac"), 3), false).unwrap();
+        assert_eq!(three_ch.audio, AudioFix::StereoAac);
+        assert!(!three_ch.reencode_video);
+    }
+
+    #[test]
+    fn obs_mkv_is_copied_into_an_mp4() {
+        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2), false).unwrap();
+        assert_eq!(fix, PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy });
+        let args = playable_args(&fix);
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c:a", "copy"]), "{args:?}");
+        assert!(args.contains(&"-sn") && args.contains(&"+faststart"));
+        assert_eq!(args.last(), Some(&"mp4"));
+    }
+
+    #[test]
+    fn hevc_gets_the_apple_tag() {
+        let fix = playable_fix(&info(MKV, Some("hevc"), Some("aac"), 2), false).unwrap();
+        assert!(fix.tag_hvc1 && !fix.reencode_video);
+        assert!(playable_args(&fix).windows(2).any(|w| w == ["-tag:v", "hvc1"]));
+    }
+
+    #[test]
+    fn other_audio_in_other_containers_becomes_aac() {
+        for codec in ["opus", "pcm_s16le", "flac", "mp3"] {
+            let fix = playable_fix(&info(MKV, Some("h264"), Some(codec), 2), false).unwrap();
+            assert_eq!(fix.audio, AudioFix::StereoAac, "{codec}");
+        }
+        let fix = playable_fix(&info("avi", Some("h264"), None, 0), false).unwrap();
+        assert_eq!(fix.audio, AudioFix::None);
+        assert!(playable_args(&fix).contains(&"-an"));
+    }
+
+    #[test]
+    fn video_webkit_cant_play_is_converted() {
+        for codec in ["vp9", "vp8", "mpeg4", "av1"] {
+            let fix = playable_fix(&info(MKV, Some(codec), Some("opus"), 2), false).unwrap();
+            assert!(fix.reencode_video, "{codec}");
+            assert!(playable_args(&fix).contains(&"libx264"));
+        }
+    }
+
+    #[test]
+    fn parses_ffprobe_json() {
+        let json = r#"{"streams":[
+            {"codec_name":"h264","codec_type":"video"},
+            {"codec_name":"aac","codec_type":"audio","channels":2},
+            {"codec_name":"aac","codec_type":"audio","channels":1}],
+            "format":{"format_name":"matroska,webm"}}"#;
+        assert_eq!(parse_container_info(json), Some(info(MKV, Some("h264"), Some("aac"), 2)));
+        // Unreadable output is an error, never "not an MP4, no audio" (that
+        // would build a silent copy of a file that was fine).
+        assert_eq!(parse_container_info("not json"), None);
+        assert_eq!(parse_container_info(r#"{"streams":[]}"#), None);
+    }
+
+    #[test]
+    fn copies_map_the_first_tracks_and_reencodes_to_even_sizes() {
+        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2), false).unwrap();
+        let args = playable_args(&fix);
+        assert!(args.windows(2).any(|w| w == ["-map", "0:v:0?"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-map", "0:a:0?"]), "{args:?}");
+        let silent = playable_fix(&info(MKV, Some("h264"), None, 0), false).unwrap();
+        assert!(!playable_args(&silent).contains(&"0:a:0?"));
+        let vp9 = playable_fix(&info(MKV, Some("vp9"), Some("opus"), 2), false).unwrap();
+        assert!(playable_args(&vp9).contains(&"scale=trunc(iw/2)*2:trunc(ih/2)*2"));
+    }
+
+    #[test]
+    fn join_signature_compares_first_tracks_only() {
+        let one = r#"{"streams":[
+            {"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+            {"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"}],
+            "format":{"format_name":"matroska,webm"}}"#;
+        // OBS with a second audio track: same first tracks, so it still joins
+        // a file made by an earlier join (which keeps only the first track).
+        let two = r#"{"streams":[
+            {"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+            {"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},
+            {"codec_type":"audio","codec_name":"aac","channels":6,"sample_rate":"48000"}],
+            "format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}"#;
+        let (a_mp4, a) = join_signature(one).unwrap();
+        let (b_mp4, b) = join_signature(two).unwrap();
+        assert!(!a_mp4 && b_mp4);
+        assert_eq!(a, b);
+        assert_eq!(a, "h264 1920x1080 + aac 2ch 48000Hz");
+        let resampled = one.replace("48000", "44100");
+        assert_ne!(join_signature(&resampled).unwrap().1, a, "sample rate must match");
+        assert_eq!(join_signature("{}"), None);
     }
 }
