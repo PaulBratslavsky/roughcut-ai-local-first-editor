@@ -175,7 +175,7 @@ which this design removes).
 
 | Step | Code | Request | Run kind |
 | --- | --- | --- | --- |
-| Shorts scoring | `clip_finder::llm_rescore` | schema `short_scores` (array root), batches of 6 | batch |
+| Shorts picking | `clip_finder::pick_shorts` | schema `short_picks` (array root), one request per topic | batch |
 | Story outline | `story::outline_with` → `llm_outline` | schema (array root), chunks of 120 segments | batch |
 | Transcript cleanup | `agent::clean_transcript` | JSON, chunks of 40 segments; runs after every transcription | batch |
 | Flow review | `story::review_flow_mode` (when `llm`) | schema (array root), one call | single |
@@ -287,10 +287,9 @@ status changes. Routers update it after each request.
 Each catch-all that turns a model error into a rule-based result first
 re-raises `is_fatal_model_error()` errors:
 
-*   `clip_finder::find_clips` (the `llm_rescore` result, `:185-188`) and
-    `llm_rescore`'s per-batch `continue` (`:637-642`): fatal → the scan
-    fails and the stored candidates are left as they were. `Refused` /
-    `Truncated` on a batch keep that batch's rule scores, as a malformed
+*   `clip_finder::pick_all`'s per-topic match on `pick_shorts`: fatal →
+    the scan fails and the stored candidates are left as they were.
+    `Refused` / `Truncated` on a topic keep that topic's rule scores, as a malformed
     reply does today.
 *   `story::outline_with` (`:90-93`), `review_flow_mode` (`:494`),
     `story_edit` (plan call, `:686`).
@@ -487,7 +486,7 @@ Where the code (branch `feat/hosted-models`) differs from the plan above:
     without the network check). `test_instance()` always uses the in-memory
     key store. The hosted side of the router is a `HostedBackend` trait so
     tests script "unreachable" and "rejected" without a network.
-*   **Schemas** live in named functions (`clip_finder::short_scores_schema`,
+*   **Schemas** live in named functions (`clip_finder::short_picks_schema`,
     `story::beats_schema`, `verdicts_schema`, `story_plan_schema`) so the
     client's tests check normalisation against the real four.
 *   **`ask_json_schema_served`** returns which model answered; the scan uses
