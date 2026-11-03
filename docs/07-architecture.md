@@ -639,8 +639,8 @@ in the terminal.
   and the `confirm_action` answer in `App.tsx`.
 - `mockApi.ts` implements every registry tool in memory (one project plus one
   in the trash), so `npm run dev` works with no Rust build; `core/tests/
-  mock_parity.rs` fails if a tool is missing. URL flags like `?nomodel` or
-  `?failexport` simulate failures.
+  mock_parity.rs` fails if a tool is missing. URL flags like `?nomodel`,
+  `?failexport` or `?failtranscribe` simulate failures.
 - **Types are generated from Rust** by ts-rs into `ipc/generated/` (ADR-0003).
   `types.ts` re-exports them; only event payloads and result envelopes are
   written by hand.
@@ -680,6 +680,7 @@ project list, then switches, and stays on the current screen.
 | `viewStore` | screen, open project, playhead, zoom, scroll, selection, active right-hand tab, audition, clip draft, crop being framed | show/skip cuts, collapsed preview and the Shorts terminal drawer, in localStorage `rc-view-prefs` |
 | `shortsStore` | per project: picks, ticks, scan / make / export progress and results | no |
 | `modelStore` | the chip's copy of `model_status` (numbered reads, so a stale reply can't win) | no |
+| `transcribeStore` | per project: the last transcription error, shown in the transcript panel and on the Shorts screen. An import transcribes after the app has switched to the new project, so `ingestFile` keeps its error here | no |
 | `terminalStore` | whether the shell is running, or its exit code | no |
 
 The theme (`theme.ts`) is saved as `roughcut-theme`; dark is the default.
@@ -861,9 +862,6 @@ scripts/build-macos-app.sh             # signed release RoughCut.app
 
 ## 16. Known issues (found while writing this)
 
-- **A failed transcription after a new import is silent.**
-  `newProjectFromDialog` resolves as soon as the project exists, so a later
-  transcription error is dropped. (`frontend/src/newProject.ts`)
 - **`mcp-ready` bypasses `CoreEvent`.** The shell emits it directly,
   `CoreEvent::McpReady` is unused, and nothing listens for it.
 - **Not yet built:** no WebCodecs frame-accurate preview. By design, ffmpeg,

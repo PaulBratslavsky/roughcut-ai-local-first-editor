@@ -66,6 +66,8 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               (bulk-shorts CUJ 6); setup reports inference unreachable.
 //   failexport  export_clips fails every second clip, so the batch's
 //               "one failure doesn't stop the rest" path shows.
+//   failtranscribe  transcribe fails part-way, with no final progress event
+//               (like the core), so an import's transcription error shows.
 //   nohosted    Anthropic is unreachable: a key check can't verify (Save
 //               keeps the key, "saved; couldn't verify while offline"), and
 //               Hosted requests fail — except a multi-request run's first
@@ -80,7 +82,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               revokes the key of an already-Hosted session without reload.
 // ---------------------------------------------------------------------------
 
-export function mockSwitch(name: "nomodel" | "failexport" | "nohosted" | "badkey"): boolean {
+export function mockSwitch(
+  name: "nomodel" | "failexport" | "failtranscribe" | "nohosted" | "badkey",
+): boolean {
   try {
     if (new URLSearchParams(window.location.search).has(name)) return true;
     return localStorage.getItem(`rc-mock-${name}`) === "1";
@@ -1308,6 +1312,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   async transcribe(args): Promise<Transcript> {
     const p = requireProject(args.project_id);
+    if (mockSwitch("failtranscribe")) {
+      progress("transcribe", p.id, 0.1, "Decoding audio…");
+      await sleep(800);
+      throw { code: "internal", message: "whisper exited with status 1 (mock failure)" };
+    }
     await emitProgress("transcribe", p.id, [
       "Loading whisper model…",
       "Decoding audio…",

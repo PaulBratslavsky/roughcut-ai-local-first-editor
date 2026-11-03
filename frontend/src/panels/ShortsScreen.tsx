@@ -52,6 +52,7 @@ import { SavedClipRow } from "./SavedClipRow";
 import { TerminalPanel } from "./TerminalPanel";
 import { TopBar } from "./TopBar";
 import { toggleShortsTerminal, viewStore } from "../state/viewStore";
+import { transcribeErrors } from "../state/transcribeStore";
 
 /** "Scan for shorts" (count and threshold are starting values to tune). */
 const SCAN = { scan: true, count: 40, min_score: 40, multi_moment: true } as const;
@@ -133,6 +134,7 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
 
   const s = useStore(shortsStore, (all) => all[projectId] ?? EMPTY_SHORTS);
   const terminalOpen = useStore(viewStore, (v) => v.shortsTerminalOpen);
+  const transcribeError = useStore(transcribeErrors, (all) => all[projectId] ?? null);
   const elapsed = useSecondsSince(scanning ? s.scanStartedAt : null);
   const picked = useMemo(() => new Set(s.picked), [s.picked]);
   const ticked = useMemo(() => new Set(s.ticked), [s.ticked]);
@@ -271,9 +273,12 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
             </div>
           )}
 
-          {!hasSpeech && (
-            <p className="clips-note">Transcribe the video first — shorts are found from what you say.</p>
-          )}
+          {!hasSpeech &&
+            (transcribeError ? (
+              <p className="empty-error">{transcribeError} — retry from the editor's transcript.</p>
+            ) : (
+              <p className="clips-note">Transcribe the video first — shorts are found from what you say.</p>
+            ))}
           {scanning && (
             <p className="clips-note">
               A scan judges moments from every part of the video with {modelLabel(model)} — minutes on a long

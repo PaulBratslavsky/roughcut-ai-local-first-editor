@@ -23,8 +23,18 @@ export async function newProjectFromDialog(): Promise<string | null> {
     path = "/demo/talking-head.mp4";
   }
   // Resolve as soon as the project exists; transcription continues in the
-  // background and the UI fills in via transcript-changed events.
+  // background and the UI fills in via transcript-changed events. A later
+  // transcription error can't reach this promise any more: ingestFile keeps
+  // it on the project, and the transcript panel shows it with a retry.
   return await new Promise<string>((resolve, reject) => {
-    ingestFile(name, path, { onCreated: resolve }).catch(reject);
+    let created = false;
+    ingestFile(name, path, {
+      onCreated: (id) => {
+        created = true;
+        resolve(id);
+      },
+    }).catch((err: unknown) => {
+      if (!created) reject(err);
+    });
   });
 }

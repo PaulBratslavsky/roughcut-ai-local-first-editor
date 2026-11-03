@@ -32,6 +32,7 @@ import { ClipDraftBar } from "./ClipDraftBar";
 import { callTool, onAppEvent } from "../ipc/api";
 import type { CutSuggestion, ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
 import { errText } from "./clipUtil";
+import { setTranscribeError, transcribeErrors } from "../state/transcribeStore";
 
 const normalize = (w: string) => w.toLowerCase().replace(/[^a-z']/g, "");
 
@@ -235,7 +236,9 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
   // works, plus a manual start/retry path that surfaces errors.
   const [transcribeProgress, setTranscribeProgress] = useState<ProgressEvent | null>(null);
   const [transcribeStarting, setTranscribeStarting] = useState(false);
-  const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  // Shared per project: an import's background transcription lands its
+  // error here too (ingest.ts).
+  const transcribeError = useStore(transcribeErrors, (s) => s[projectId] ?? null);
 
   useEffect(() => {
     setTranscribeProgress(null);
@@ -248,11 +251,11 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
 
   const startTranscribe = async () => {
     setTranscribeStarting(true);
-    setTranscribeError(null);
+    setTranscribeError(projectId, null);
     try {
       await callTool("transcribe", { project_id: projectId });
     } catch (err) {
-      setTranscribeError(errText(err));
+      setTranscribeError(projectId, `Transcription failed: ${errText(err)}`);
     } finally {
       setTranscribeStarting(false);
     }
@@ -555,7 +558,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
         onTouchMove={() => { userScrollAtRef.current = Date.now(); }}
       >
         {visible.length === 0 ? (
-          segments.length === 0 && (transcribeProgress || transcribeStarting) ? (
+          segments.length === 0 && !transcribeError && (transcribeProgress || transcribeStarting) ? (
             <div className="transcribe-progress">
               <div className="spinner" />
               <p className="transcribe-message">

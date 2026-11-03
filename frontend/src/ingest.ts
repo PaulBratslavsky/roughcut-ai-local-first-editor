@@ -3,9 +3,13 @@
 // newProject each had a copy; EmptyState's double-probed the file
 // (create_project(file_path) probes, then import_media probed AGAIN and
 // replaced the media) and newProject's swallowed transcription errors.
+// A transcription error is kept on the project (transcribeStore), because
+// creating the project switches the app to it and the caller is often gone.
 
 import { callTool } from "./ipc/api";
 import type { Project } from "./ipc/types";
+import { errText } from "./panels/clipUtil";
+import { setTranscribeError } from "./state/transcribeStore";
 
 export function baseName(path: string): string {
   const last = path.split(/[\\/]/).pop() ?? path;
@@ -19,7 +23,9 @@ export interface IngestCallbacks {
 
 /** Create a project around `filePath` and start transcription. Resolves to
  *  the project id once transcription COMPLETES (callers that don't want to
- *  wait can ignore the promise after the id is known via onCreated). */
+ *  wait can ignore the promise after the id is known via onCreated). A
+ *  transcription failure still rejects, and is also kept on the project for
+ *  its transcript panel to show. */
 export async function ingestFile(
   name: string,
   filePath: string,
@@ -34,6 +40,11 @@ export async function ingestFile(
   });
   cb.onCreated?.(project.id);
   cb.onPhase?.("Starting transcription…");
-  await callTool("transcribe", { project_id: project.id });
+  try {
+    await callTool("transcribe", { project_id: project.id });
+  } catch (err) {
+    setTranscribeError(project.id, `Transcription failed: ${errText(err)}`);
+    throw err;
+  }
   return project.id;
 }
