@@ -1,7 +1,6 @@
 //! Child-process progress streaming: one reader task over a pipe, a per-line
-//! parser closure at the call site, changed-percent dedup here. The third
-//! consumer (recording's long-lived `ffmpeg -progress pipe:1`) is why this
-//! is a seam and not two private copies that drift.
+//! parser closure at the call site, changed-percent dedup here — one seam
+//! instead of private copies that drift.
 
 use crate::events::{send, CoreEvent, ProgressTask, SharedSink};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};

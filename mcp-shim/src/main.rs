@@ -70,7 +70,12 @@ fn error_response(id: &serde_json::Value, message: &str) -> String {
 }
 
 fn main() {
-    let client = reqwest::blocking::Client::new();
+    // No timeout: a tool call can legitimately run for minutes (a clip scan,
+    // a batch export), and the client decides how long it waits.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(None)
+        .build()
+        .expect("http client");
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut endpoint: Option<Endpoint> = None;
@@ -123,8 +128,10 @@ fn main() {
                         "RoughCut app unreachable ({e}). Start the app, then retry."
                     ));
                     // Stale port or app mid-restart? Re-discover and retry
-                    // (unless pinned).
-                    if ep.pinned || attempt == 4 {
+                    // (unless pinned). Only when the request never reached
+                    // the app: re-sending one it already received would run
+                    // the tool twice (two exports, two approval prompts).
+                    if ep.pinned || attempt == 4 || !e.is_connect() {
                         break;
                     }
                     endpoint = None;

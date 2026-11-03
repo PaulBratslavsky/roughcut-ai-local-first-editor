@@ -7,9 +7,11 @@ import { useStore } from "@tanstack/react-store";
 import { getDemoMode, isTauri } from "./ipc/api";
 import { useCoreEventInvalidation, useProject, useProjects, useTranscript } from "./ipc/queries";
 import { useEditorKeyboard } from "./hooks/useEditorKeyboard";
-import { setActiveTab, setProjectId, setScreen, viewStore } from "./state/viewStore";
+import { setActiveTab, setProjectId, viewStore } from "./state/viewStore";
+import { useShortsProgressListener } from "./state/shortsStore";
+import { useModelStatusSync } from "./state/modelStore";
 import { EmptyState } from "./EmptyState";
-import { RecorderPanel } from "./panels/RecorderPanel";
+import { ShortsScreen } from "./panels/ShortsScreen";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
 import { ChatPanel } from "./panels/ChatPanel";
@@ -35,7 +37,6 @@ const SHORTCUTS: [string, string][] = [
   ["⌘-click paragraphs", "multi-select for one cut"],
   ["right-click a timeline clip", "restore / cut / split"],
   ["scroll on timeline", "zoom around the playhead"],
-  ["R", "open the recorder"],
   ["?", "this overlay"],
 ];
 
@@ -74,8 +75,6 @@ function Editor({ projectId }: { projectId: string }) {
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
       if (e.key === "?") setShowKeys((v) => !v);
       else if (e.key === "Escape") setShowKeys(false);
-      else if ((e.key === "r" || e.key === "R") && isTauri && !e.metaKey && !e.ctrlKey)
-        setScreen("recorder");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -204,6 +203,10 @@ function useExternalConfirmations() {
 
 export default function App() {
   useCoreEventInvalidation();
+  // Scan / make / export progress, kept per project while any screen shows.
+  useShortsProgressListener();
+  // The LOCAL / HOSTED status, for the chip and every mode-aware string.
+  useModelStatusSync();
   useExternalConfirmations();
   useSuppressDefaultContextMenu();
   const projects = useProjects();
@@ -226,11 +229,11 @@ export default function App() {
     );
   }
 
-  if (screen === "recorder") {
+  if (screen === "shorts") {
     return (
       <>
         <DemoBanner />
-        <RecorderPanel />
+        {projectId ? <ShortsScreen key={projectId} projectId={projectId} /> : <EmptyState />}
       </>
     );
   }

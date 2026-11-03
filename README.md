@@ -52,9 +52,10 @@ scripts/build-macos-app.sh --bundles app,dmg
 Building needs [Rust](https://rustup.rs) 1.85+, Node 20+, and `cmake`
 (whisper.cpp is compiled in-process). The script uses the same link flags as
 the release build. It also signs the app with a `RoughCut Local Signing`
-code-signing identity when your keychain has one, so macOS Screen Recording,
-camera and mic permissions survive rebuilds. Unsigned builds have to be
-granted again after every rebuild.
+code-signing identity when your keychain has one, so the app's signature stays
+the same from build to build. macOS ties per-app grants to that signature,
+such as access to the Keychain item that holds the Hosted-mode API key. With
+an ad-hoc signature (no identity), macOS asks again after every rebuild.
 
 ### First-run setup
 
@@ -114,18 +115,16 @@ batch of cuts in one `apply_edits` call, plan duration targets, and export.
 Destructive operations (export, delete) ask **you** for confirmation in the
 app. The full surface is documented in [`docs/tool-api.md`](docs/tool-api.md).
 
-### Record in the app
+### Recording in OBS
 
-RoughCut records as well as edits: camera, screen, or both at once
-(presentation mode — two synced files, one ffmpeg process). Takes are
-crash-safe fragmented MP4; pause for a break and the takes stitch
-losslessly on finish. Dual recordings composite live — screen full-frame
-with your face as a round or rounded bubble in any corner, resizable,
-switchable AFTER recording (Tools ▸ Layout) because layout is metadata,
-never baked into the source. MP4 export bakes your layout; NLE exports
-carry camera and screen as separate tracks. Recordings live in
-`~/Movies/RoughCut` and double as a library: preview, import, stitch,
-or append onto an existing project from the Clips tab.
+RoughCut edits; it doesn't record. Record in [OBS](https://obsproject.com):
+compose the scenes there (screen, camera bubble), save one file, and import
+it like any video. OBS's `.mkv` files work: RoughCut makes a playable copy
+for the preview in the background, and the original file is never changed.
+To add a second recording to the end of a project, use the Footage tab's
+**add a video file…** (same codec, resolution and audio format). Projects
+made with the old in-app recorder, including the camera bubble (Tools ▸
+Layout), keep working.
 
 ## DaVinci Resolve (free version included)
 
@@ -222,9 +221,11 @@ No secrets in the repo. Everything below is optional:
 | `FFMPEG_PATH` / `FFPROBE_PATH` | auto (PATH, Homebrew, `<data dir>/bin`) | override the binaries |
 | `ROUGHCUT_NO_CONFIRM` | unset | `1` skips confirmation prompts (scripted/CI runs) |
 
-Optional frontier escalation (`connect_external` / `escalate_to_frontier`) is
-**opt-in only**, uses your own API key stored in the OS keychain, and is never
-auto-invoked.
+**Local or Hosted.** Every AI step runs on-device by default. The top bar's
+LOCAL / HOSTED switch lets you use Claude instead, with your own Anthropic API
+key (kept in the OS key store), when you're online: text only (transcripts,
+chat, prompts), never video or audio. Only you can turn it on, in the app
+(ADR-0007).
 
 ---
 

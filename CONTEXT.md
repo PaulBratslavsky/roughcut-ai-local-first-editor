@@ -67,7 +67,14 @@ Keep entries short. When a refactor names a new module, add the term here.
   main-cut edits and undo never move it. Project metadata, not journaled.
   `SavedClipSummary` is the lean listing view. Exports run the normal writers over
   it. **Not** the timeline's `Clip` (a partition piece of the main edit, which
-  `trim_clip` / `split_clip` operate on).
+  `trim_clip` / `split_clip` operate on). `create_clips` makes several from
+  candidates at once and frames each vertical one before it returns;
+  `export_clips` writes several into one folder as `NN-<title>.<ext>`.
+- **PlaySpan** (`model.rs`) — one stretch of source that plays, in output order
+  `{ source_in, source_out }`. `Timeline::play_spans()` lists the main cut's;
+  `SavedClip::piece_spans()` lists a clip's grouped by piece. The MP4 render
+  reads one seeked input per piece (nearby in-order pieces share one), so it
+  decodes about what plays rather than the source from 0:00.
 
 ## AI-derived views (read models over the transcript)
 
@@ -76,10 +83,16 @@ Keep entries short. When a refactor names a new module, add the term here.
   duplicate_of, preview }`. Output of `suggest_cuts`.
 - **ClipCandidate** (`model.rs`, from `clip_finder.rs`) — a suggested clip (a short): a
   sentence-aligned stretch of the current cut inside one Beat, scored 0–100 for
-  short-form potential (hook, stands alone, payoff) `{ id, start, end, duration,
-  title, hook, reason, score, segment_ids, method: "llm"|"heuristic", theme }`. A
-  `theme` restricts candidates to moments the hybrid search finds about it. The
-  latest `find_clips` run is persisted on the Project until the next run.
+  short-form potential (hook, stands alone, payoff) `{ id, start, end, pieces,
+  duration, title, hook, reason, score, segment_ids, method: "llm"|"heuristic",
+  theme }`. `pieces` are the stretches it plays, in play order (one today);
+  `start`/`end` cover them. A `theme` restricts candidates to moments the hybrid
+  search finds about it. A **scan** (`find_clips { scan: true }`) judges moments
+  from every Beat and skips moments already saved as clips; one run per project
+  at a time. The latest run is persisted on the Project until the next run.
+- **Shorts screen** (`frontend/src/panels/ShortsScreen.tsx`) — the app screen
+  for reviewing a scan: the player beside a grid of candidate cards and the
+  saved clips, with "Scan for shorts", "Make N shorts" and "Export N".
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.
 - **Beat** (`story.rs`) — one story unit: `{ title, summary, role, cut_priority
   (1=spine…5=cut first), segment_ids, start, end }`.
@@ -95,14 +108,13 @@ Keep entries short. When a refactor names a new module, add the term here.
 
 - **ToolSpec** (`tools.rs`) — one registry row: name, description, JSON schema,
   handler, and flags `agent` (shown to agent loops), `meta` (starts an agent
-  loop / opts in to a frontier provider — UI only), `mutating` (lands
-  `EditAction`s).
+  loop — UI only), `mutating` (lands `EditAction`s).
 - **Caller** (`tools.rs`) — who invokes the registry: `Ui | Mcp | Agent {
   attribute_to }`. The single home of per-caller policy: which rows are visible
   AND callable (`defs(caller)` ≡ what `dispatch(…, caller)` accepts), whether
   args are schema-checked (not for `Ui`), and the `ActionSource` stamped on
-  edits. Visibility ≠ attribution: frontier escalation runs as `Agent` but
-  credits edits to `McpClient`.
+  edits. Visibility ≠ attribution: the in-app chat runs as `Agent` but credits
+  edits to `LocalAi`.
 - **ActionSource** (`model.rs`) — the attribution tag on an `EditAction`
   (`ui` / `local_ai` / `mcp_client`); derived from the `Caller`. Visibility is
   decided by `Caller` alone; handlers still key their confirmation prompts
@@ -119,6 +131,16 @@ Keep entries short. When a refactor names a new module, add the term here.
   runtime via `capabilities::probe`.
 - **EventSink** (`events.rs`) — core → UI push; `CoreEvent` is the one typed event
   vocabulary, serialized at a single choke point.
+- **ModelMode** (`model.rs`; the LOCAL / HOSTED chip) — where the AI steps run:
+  `local` (Ollama / llama-server, the default) or `hosted` (Claude through the
+  user's own API key, text only). Changed only by the user in the app (Tauri
+  commands), never by a tool (ADR-0007).
+- **HostedRouter** (`engine/route.rs`) — the per-run client `Editor::inference()`
+  hands out in Hosted mode: one model per run; only "unreachable" falls back to
+  the local model; no key / a rejected key or request is a visible
+  `CoreError::Hosted`. **AnthropicClient** (`adapters/anthropic.rs`) is the
+  Claude Messages API behind it; **SecretStore** (`secrets.rs`) keeps the key in
+  the OS key store.
 
 ## Implicit state machines (today inferred — make explicit in item 6)
 

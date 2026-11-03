@@ -1,28 +1,16 @@
-// Footage tab: extend the CURRENT project with more footage — recordings from
-// the library or any video file — appended to the end of the source.
-// Existing cuts keep their timestamps; the appended span gets transcribed in.
+// Footage tab: extend the CURRENT project with another video file, appended
+// to the end of the source. Existing cuts keep their timestamps; the
+// appended span gets transcribed in.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { callTool, isTauri, listRecordings, type RecordingFile } from "../ipc/api";
-import { setScreen } from "../state/viewStore";
-
-function fmtDur(s: number): string {
-  if (s <= 0) return "";
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-}
+import { callTool, isTauri } from "../ipc/api";
 
 export function FootagePanel({ projectId }: { projectId: string }) {
-  const [files, setFiles] = useState<RecordingFile[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
-
-  useEffect(() => {
-    void listRecordings().then(setFiles).catch(() => setFiles([]));
-  }, []);
 
   const append = async (label: string, path: string) => {
     setBusy(path);
@@ -46,7 +34,7 @@ export function FootagePanel({ projectId }: { projectId: string }) {
     const path = await openFileDialog({
       multiple: false,
       directory: false,
-      filters: [{ name: "Video", extensions: ["mp4", "mov", "m4v"] }],
+      filters: [{ name: "Video", extensions: ["mp4", "mov", "m4v", "mkv"] }],
     });
     if (typeof path === "string") {
       const name = path.split("/").pop() ?? path;
@@ -62,39 +50,14 @@ export function FootagePanel({ projectId }: { projectId: string }) {
     <div className="footage-panel">
       <p className="footage-note">
         Add footage to the END of this video. Your cuts stay put; the new part
-        gets transcribed. Same codec &amp; resolution required (recordings made
-        here always match each other).
+        gets transcribed. Same codec &amp; resolution required (two recordings
+        made with the same OBS settings match).
       </p>
       <div className="footage-actions">
         <button className="ghost-btn" onClick={() => void browse()} disabled={!!busy}>
-          ▸ add a video file…
-        </button>
-        <button className="ghost-btn" onClick={() => setScreen("recorder")} disabled={!!busy}>
-          ● record a new clip
+          {busy ? "adding…" : "▸ add a video file…"}
         </button>
       </div>
-      {files.length > 0 && (
-        <>
-          <div className="footage-lib-label">recordings</div>
-          <div className="rec-library-list">
-            {files.map((f) => (
-              <div key={f.path} className="rec-library-row">
-                <span className="rec-library-name">{f.name}</span>
-                <span className="rec-library-meta">
-                  {fmtDur(f.duration_s)} · {f.size_mb.toFixed(0)} MB
-                </span>
-                <button
-                  className="ghost-btn"
-                  disabled={!!busy}
-                  onClick={() => void append(f.name, f.path)}
-                >
-                  {busy === f.path ? "adding…" : "+ add"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
       {error && <p className="empty-error">{error}</p>}
     </div>
   );

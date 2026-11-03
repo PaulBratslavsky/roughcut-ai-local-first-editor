@@ -23,13 +23,14 @@ share the `Inner` state defined in `mod.rs`.
 | `clips.rs`    | Saved clips, clip candidates, and the 9:16 face-centred crop                                            |
 | `semantic.rs` | Embedding index, semantic and hybrid search, and the duration-cut planner                               |
 | `confirm.rs`  | User approval of destructive ops that an external MCP client requests                                   |
+| `route.rs`    | The LOCAL / HOSTED switch: `RouteState` (key, chip status), the per-run `HostedRouter`, the app commands' Editor methods |
 
 This package depends on the following crate modules but does not own them:
 `core/src/error.rs` (`CoreError`, `Result`),
 `core/src/model.rs` (`Project`, `Timeline`, `EditOp`, `EditAction`,
 `Transcript`, `Preferences`, ...), `core/src/store.rs` (`Store`, `SqliteStore`,
 `data_dir`), `core/src/adapters/` (`VideoEngine`, `Transcriber`, `Embedder`,
-`InferenceClient`, `face`, `record`, `video`), `core/src/events.rs`
+`InferenceClient`, `face`, `video`), `core/src/events.rs`
 (`CoreEvent`, `send`), `core/src/detect.rs`, `core/src/time.rs`
 (`snap_to_frame`), `core/src/agent.rs` (`clean_transcript`),
 `core/src/inflight.rs` (`try_claim`), and `core/src/capabilities.rs`
@@ -70,11 +71,11 @@ This package depends on the following crate modules but does not own them:
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `new(store, video, transcriber, sink, demo)`          | Empty state. Confirmations off. No embedder override.                                                                                                                  |
 | `bootstrap(sink) -> Result<Self>`                     | Opens `SqliteStore` at `SqliteStore::default_path()`, then calls `bootstrap_with_store`.                                                                               |
-| `bootstrap_with_store(store, sink) -> Result<Self>`   | Production wiring with `AutoVideoEngine` and `AutoTranscriber`. Confirmations follow `ROUGHCUT_NO_CONFIRM`. Runs `purge_trash(30)` at startup.                         |
-| `test_instance() -> Self`                             | In-memory SQLite with `inference_endpoint = http://127.0.0.1:9/v1`, `MockVideoEngine`, `MockTranscriber`, `NullSink`, and `demo = true`.                                 |
+| `bootstrap_with_store(store, sink) -> Result<Self>`   | Production wiring with `AutoVideoEngine` and `AutoTranscriber`. Confirmations follow `ROUGHCUT_NO_CONFIRM`. Runs `purge_trash(30)` and `secrets::remove_legacy_plaintext()` at startup.                         |
+| `test_instance() -> Self`                             | In-memory SQLite with `inference_endpoint = http://127.0.0.1:9/v1`, `MockVideoEngine`, `MockTranscriber`, `NullSink`, `demo = true`, and an in-memory key store (`MemoryStore`).                                 |
 | `demo_mode() -> bool`                                 | `inner.demo \|\| capabilities::probe().demo()`, re-evaluated on every call.                                                                                             |
 | `sink()`, `store()`, `video()`                        | Return the shared sink (cloned), the store, and the video engine.                                                                                                      |
-| `inference() -> Result<Box<dyn InferenceClient>>`     | Builds a new `OpenAiCompatClient` from `prefs.inference_endpoint` on each call.                                                                                         |
+| `inference() -> Result<Box<dyn InferenceClient>>`     | One run's client: Local mode, a new `OpenAiCompatClient` from `prefs.inference_endpoint`; Hosted mode, a `HostedRouter` (batch policy). `inference_conversation()` is the same with the conversation policy (chat, story edit). See `route.rs`. |
 | `embedder() -> Result<Arc<dyn Embedder>>`             | Returns the test override if one is set. Otherwise builds a new `OllamaEmbedder` from `prefs.inference_endpoint` and `prefs.embedding_model`.                          |
 | `set_embedder_for_tests(embedder)`                    | Installs the embedder override.                                                                                                                                        |
 | `with_project(id, f(&Project, Option<&Transcript>))`  | Read access. Loads the project on demand, then runs `f` with the state lock held.                                                                                      |
@@ -91,9 +92,9 @@ This package depends on the following crate modules but does not own them:
 | `delete_project(id)` / `restore_project(id)`                             | Soft delete (sets `deleted_at`) and undelete.                                                                      |
 | `purge_trash(days) -> Result<u32>`                                       | Hard-deletes projects trashed more than `days` days ago.                                                           |
 | `get_timeline(id)`, `get_transcript(id)`                                 | Read accessors.                                                                                                    |
-| `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths. Builds a playable copy in the background when one is missing.                  |
+| `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths, plus the playable copy (`playback_path`) or why it failed (`playback_error`). Starts building a missing copy in the background. |
 | `get_preferences()`, `set_preferences(prefs)`                            | Full load and full replace. `set_preferences` does no validation.                                                  |
-| `update_preferences(patch: &serde_json::Value, source: ActionSource)`    | Partial JSON merge with an unknown-key check and a loopback guard.                                                 |
+| `update_preferences(patch: &serde_json::Value, source: ActionSource)`    | Partial JSON merge with an unknown-key check, a loopback guard, and a guard on the model-switch fields.            |
 | `set_layout(id, Layout)`, `set_audio_offset(id, offset_s)`               | Project metadata: persisted, not journaled.                                                                        |
 
 ### Media and transcription (`media.rs`)
@@ -103,8 +104,8 @@ This package depends on the following crate modules but does not own them:
 | `async import_media(project_id: Option<Uuid>, file_path) -> Result<Media>` | Probes the file. Given a project: no media yet → sets it with `Timeline::new(media.duration)`; same video moved → relinks; a different video → `InvalidArg`. |
 | `async transcribe(id, language: Option<&str>) -> Result<Transcript>`      | On-device transcription, then a background LLM cleanup and semantic-index pass.                                    |
 | `update_segment_texts(id, &[(Uuid, String)]) -> Result<u32>`              | Replaces segment text and keeps every timestamp. Used by the LLM cleanup pass.                                     |
-| `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source, swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
-| `async attach_screen_media(id, file_path) -> Result<()>`                  | Sets `project.screen_media` to the dual-capture screen file.                                                       |
+| `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source (a new file in `<data dir>/media/`), swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
+| `async attach_screen_media(id, file_path) -> Result<()>`                  | Sets `project.screen_media` to a screen file that started with the camera file (probed; offset 0).                 |
 
 ### Edits, history, checkpoints, and suggestions (`edits.rs`)
 
@@ -126,7 +127,10 @@ This package depends on the following crate modules but does not own them:
 | Method                                                                              | Notes                                                                                  |
 | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `set_clip_candidates(id, Vec<ClipCandidate>)`, `get_clip_candidates(id)`            | Replace or read the candidates from one `find_clips` run.                              |
+| `replace_clip_candidates(id, Vec<ClipCandidate>, drop_saved: Option<f64>)`          | A run's final write: with `drop_saved`, drops candidates overlapping a saved clip now. |
+| `begin_clip_scan(id) -> Result<ClipScan>`                                           | Claims the project's one `find_clips` slot; dropping the guard frees it.               |
 | `create_clip(id, ClipSource, title: Option<&str>, format: Option<ClipFormat>)`      | Snapshots the main cut, restricted to the clip's ranges. Returns `SavedClipSummary`.   |
+| `async create_clips(id, &[Uuid], format: Option<ClipFormat>)`                       | Makes each candidate that validates, then frames each vertical one in turn (`MakeClips` progress). Returns `(clips, errors)`. |
 | `list_clips(id)`, `get_clip(id, clip_id)`                                           | Summaries in creation order, or the full `SavedClip` including its timeline.           |
 | `update_clip(id, clip_id, ClipChanges)`, `delete_clip(id, clip_id)`                 | New ranges re-snapshot the current main cut.                                           |
 | `async center_clip_on_face(id, clip_id) -> Result<FaceCrop>`                        | Face pass that always applies the crop it finds.                                       |
@@ -149,6 +153,19 @@ This package depends on the following crate modules but does not own them:
 | `async request_confirmation(summary) -> bool`        | Asks the UI to approve a destructive op (export, delete) that an external MCP client requested.     |
 | `resolve_confirmation(id, approved)`                 | The answer path, called from a Tauri command.                                                       |
 | `require_confirmations_for_tests(on)`                | Turns the confirmation requirement on or off.                                                       |
+
+### The model switch (`route.rs`)
+
+| Method | Notes |
+| --- | --- |
+| `inference()`, `inference_conversation()` | One run's client (batch / conversation policy). Local mode: the local client. Hosted mode: a `HostedRouter`. |
+| `model_label() -> String` | "Claude Opus 5.5", or "the on-device model" in Local mode or after a Hosted fallback. |
+| `model_status() -> Result<ModelStatus>` | The chip's state; no network, the key store read only once. |
+| `set_model_mode(mode, consent)` | Hosted needs a stored key and, the first time, `consent: true` (stores `hosted_consent_at`). Sends `model-route`. |
+| `set_hosted_model(model)` | One of `HOSTED_MODELS`. |
+| `async set_hosted_key(Option<&str>) -> HostedKeyResult` | `Some`: printable ASCII, checked with `GET /v1/models/{model}`; saved if it works or Anthropic is unreachable. `None`: deletes it and switches to Local. |
+| `async check_hosted_key() -> KeyCheck` | Setup's Test. |
+| `set_inference_for_tests(local, hosted)`, `set_secret_store_for_tests(store)`, `set_hosted_key_for_tests(key)` | Test seams: fake clients, an in-memory key store, a key stored without a network check. |
 
 ### Subdirectories
 
@@ -248,8 +265,14 @@ This package depends on the following crate modules but does not own them:
 - `create_clip` defaults: `crop_x = 0.5`, `Landscape`, and title
   `"Clip {n}"`.
 - `create_clip` from a `Candidate` defaults to `Vertical`, copies the
-  candidate's title, score, reason, and hook, and removes the candidate. An
+  candidate's title, score, reason, and hook, builds the clip from its
+  `pieces`, and removes the candidate only after the clip validates. An
   explicit `format` or non-blank `title` argument overrides these defaults.
+- `create_clips` does the same per id inside one `update_project_meta`. An id
+  that isn't listed becomes a `ClipBatchError`; one that fails validation
+  stays listed and becomes one too. It then awaits the face pass for each
+  vertical clip, with compare-and-set on `crop_x`; a failed pass leaves the
+  crop at 0.5. A clip deleted during framing is left out of the result.
 - `update_clip` clamps `crop_x` to `[0, 1]` and ignores a blank title.
 - `set_crop_if` is compare-and-set: the background face pass writes `crop_x`
   only if the clip's crop still equals the value captured when the pass
@@ -279,8 +302,8 @@ This package depends on the following crate modules but does not own them:
   Any other video is refused with `InvalidArg` (create a new project, or use
   `append_media`).
 - `append_media` requires existing media and that the file exists
-  (`NotFound("file {path}")`). The codec and resolution guard lives in
-  `adapters::record::combine_recordings`.
+  (`NotFound("file {path}")`). The guard (same video codec and resolution,
+  same audio format) lives in `adapters::video::concat_media`.
 - `append_media` keeps the history valid (`extend_history`): every undo/redo
   `SetClips` snapshot and every checkpoint gets the same included clip over the
   appended span, and the journal is persisted. An undo or restore afterwards
@@ -302,8 +325,35 @@ This package depends on the following crate modules but does not own them:
   `is_loopback_url`. That check accepts `localhost`, `*.localhost`,
   `127.0.0.0/8`, and `::1`; unparseable URLs and `0.0.0.0` fail it.
   `set_preferences` bypasses both preference checks.
-- `media_assets` builds a playable copy only when `playback_path` is `None`,
-  demo mode is off, and a tokio runtime is present.
+- Model-switch guard: `update_preferences` rejects a change to `model_mode`,
+  `hosted_model` or `hosted_consent_at` from every source (only the
+  `route.rs` methods behind the app's shell commands change them). Every
+  preferences load-modify-save holds `Inner::prefs_write`.
+
+### The model switch (`route.rs`)
+
+- In Hosted mode each run gets its own `HostedRouter`. It re-reads the mode
+  before every request (a switch to Local takes effect at once), sends the
+  hosted model to Anthropic and the local model's name to the local server,
+  and never goes from the local model back to Claude within a run. Only
+  "unreachable" falls back; a conversation run that already used Claude
+  stops instead, and stays stopped. No key, no consent, a rejected key or
+  request is returned as `CoreError::Hosted`.
+- `healthy()` is always true in Hosted mode, so key and consent problems come
+  back from `chat` as errors instead of quietly selecting rule-based paths.
+- The key is read from the `SecretStore` once and cached in `RouteState`
+  (a failed read is cached too, until the key is set or forgotten); one
+  `AnthropicClient` is kept per key.
+- `RouteState` sends `model-route` only when the chip's text would change.
+- `media_assets` starts the playable copy (a background
+  `ensure_playable_copy`) **before** it awaits peaks and thumbnails, and only
+  when demo mode is off, a tokio runtime is present, and there is neither a
+  copy (`playable_copy_path`) nor a failure recorded in this run
+  (`playable_copy_failure`); otherwise the event below would bring the
+  refetch straight back here. When the copy lands **or** fails it sends
+  `MediaAssetsChanged`, and the refetch returns `playback_path` or
+  `playback_error`. "Plays as-is" and "another call is building it" send
+  nothing.
 
 ### Semantic (`semantic.rs`)
 
@@ -347,10 +397,6 @@ This package depends on the following crate modules but does not own them:
 
 ### Known caveats (current code behavior)
 
-- `create_clip` from a `Candidate` removes the candidate from the in-memory
-  project before `set_ranges` runs. If `set_ranges` then fails, nothing is
-  saved, but the cached candidate list has already lost the entry. The cache
-  and the store disagree until the next reload.
 - `set_crop_if` saves, bumps `updated_at`, and emits `ClipsChanged` even when
   the compare fails and the crop is unchanged.
 - `auto_center_clip` calls `tokio::spawn` without checking for a runtime, so
@@ -372,6 +418,14 @@ This package depends on the following crate modules but does not own them:
   - `load_embeddings` / `save_embeddings`.
   - `list_projects` / `delete_project`: the trash purge.
   - `bootstrap` opens or creates the SQLite DB at `SqliteStore::default_path()`.
+- **OS key store** (`route.rs` through `SecretStore`): reads, writes and
+  deletes the Hosted API key; `bootstrap_with_store` deletes plaintext keys
+  left under `<data dir>/secrets/` by the removed frontier path.
+- **Network** (`route.rs`): in Hosted mode, AI requests to
+  `api.anthropic.com`; in either mode, one `GET /v1/models/{model}` when the
+  user saves or tests a key.
+- **Events**: `model-route` from `set_model_mode`, `set_hosted_key(None)` and
+  the routers.
 - **Events (`events::send`):**
   - `TimelineChanged`: edits, undo/redo, suggestion removal
     (`accept_suggestion`, `accept_all_suggestions`, `dismiss_suggestion`),
@@ -384,7 +438,8 @@ This package depends on the following crate modules but does not own them:
   - `TranscriptChanged`: transcribe, annotate, and segment text updates.
   - `ProjectsChanged`: create, duplicate, delete, and restore.
   - `ClipsChanged`: clip and candidate mutations.
-  - `MediaAssetsChanged`: `append_media` and the background playable copy.
+  - `MediaAssetsChanged`: `append_media` and the background playable copy
+    (when it lands or fails).
   - `ConfirmRequest`: `request_confirmation`.
   - `progress(ProgressTask::Transcribe, ..)`: transcription stages.
   - `RoughCut` mutates the transcript but sends only `TimelineChanged`.
@@ -396,7 +451,8 @@ This package depends on the following crate modules but does not own them:
     by `index_transcript`.
   - `backfill_index_if_missing` spawns `index_transcript`.
   - `auto_center_clip` spawns the face pass.
-  - `media_assets` spawns `ensure_playable_copy`.
+  - `media_assets` spawns `ensure_playable_copy` when there is neither a copy
+    nor a recorded failure.
   - `find_faces` runs face detection in `spawn_blocking`.
 - **Filesystem:**
   - `transcribe` writes `temp_dir()/roughcut-<media.id>.wav` and removes it
@@ -406,17 +462,18 @@ This package depends on the following crate modules but does not own them:
     removes the directory afterwards.
   - `load_raw_peaks` reads or writes `data_dir()/cache/<key>/peaks_raw.bin`
     for the rough cut and confirmed-silence cuts.
-  - `append_media` writes `~/Movies/RoughCut/combined-<timestamp>.mp4`
-    through `adapters::record::combine_recordings`. The original files are
-    left untouched.
+  - `append_media` writes `data_dir()/media/joined-<timestamp>-<8 hex>.mp4`
+    (`.mkv` unless every input is MP4 / MOV; the folder is created on demand)
+    through `adapters::video::concat_media`. The original files are left
+    untouched.
 - **Network:**
   - `embedder().embed(..)` (indexing and `semantic_find` queries) sends
     transcript text to `prefs.inference_endpoint`.
   - The background LLM cleanup also sends transcript text to that endpoint.
   - `update_preferences` limits non-UI callers to loopback endpoints.
 - **Subprocesses:** media probing, audio extraction, peak decoding, and frame
-  grabs go through the video adapter. `combine_recordings` runs `ffprobe` and
-  then concatenates the inputs. In demo mode the auto adapters use fixtures
+  grabs go through the video adapter. `concat_media` runs `ffprobe` and then
+  concatenates the inputs. In demo mode the auto adapters use fixtures
   instead.
 - **Environment:**
   - `bootstrap_with_store` reads `ROUGHCUT_NO_CONFIRM`.

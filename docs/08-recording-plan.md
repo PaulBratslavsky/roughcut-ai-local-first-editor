@@ -1,5 +1,11 @@
 # 08 — Recording: camera + screen capture (v1 plan)
 
+> **Superseded (2026-11-03).** In-app recording was removed: the owner
+> records in OBS and imports the file. See
+> [ADR-0008](adr/0008-remove-in-app-recording.md) and
+> [`designs/remove-recording.md`](designs/remove-recording.md). The plan
+> below is kept as history.
+
 Goal: record presentations INSIDE RoughCut — face, screen, or screen with a
 face overlay — and drop straight into the existing pipeline (on-device
 transcription → rough cut → text editing → export). No OBS, no re-recording

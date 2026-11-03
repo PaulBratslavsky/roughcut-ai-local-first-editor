@@ -60,6 +60,31 @@ fn reveal_path(path: String) -> Result<(), Value> {
     Ok(())
 }
 
+/// Web pages the app links to, opened in the system browser (a link in the
+/// webview can't open one by itself). Only these sites: nothing a page could
+/// be talked into opening.
+const EXTERNAL_SITES: &[&str] = &[
+    "https://console.anthropic.com",
+    "https://ollama.com",
+    "https://www.blackmagicdesign.com/products/davinciresolve",
+];
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), Value> {
+    let allowed = EXTERNAL_SITES.iter().any(|site| url == *site || url.starts_with(&format!("{site}/")));
+    if !allowed {
+        return Err(serde_json::json!({ "error": { "code": "invalid_argument", "message": format!("not an allowed link: {url}") } }));
+    }
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("explorer").arg(&url).spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let spawned = std::process::Command::new("xdg-open").arg(&url).spawn();
+    spawned.map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn confirm_action(state: State<'_, AppState>, id: String, approved: bool) -> Result<(), Value> {
     let id = uuid::Uuid::parse_str(&id)
@@ -73,6 +98,46 @@ async fn setup_status(
     state: State<'_, AppState>,
 ) -> Result<roughcut_core::setup::SetupStatus, Value> {
     Ok(roughcut_core::setup::status(&state.editor).await)
+}
+
+// ---- The LOCAL / HOSTED switch -----------------------------------------
+// Turning Hosted on and handling its API key are the user's actions in the
+// app, kept out of the tool registry (ADR-0004): no MCP client or agent can
+// reach them. Each is a thin wrapper over the Editor, which owns the state.
+
+#[tauri::command]
+async fn model_status(state: State<'_, AppState>) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.model_status().map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_model_mode(
+    state: State<'_, AppState>,
+    mode: roughcut_core::model::ModelMode,
+    consent: bool,
+) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.set_model_mode(mode, consent).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_hosted_model(
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<roughcut_core::model::ModelStatus, Value> {
+    state.editor.set_hosted_model(&model).map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn set_hosted_key(
+    state: State<'_, AppState>,
+    key: Option<String>,
+) -> Result<roughcut_core::model::HostedKeyResult, Value> {
+    state.editor.set_hosted_key(key.as_deref()).await.map_err(|e| e.to_json())
+}
+
+#[tauri::command]
+async fn check_hosted_key(state: State<'_, AppState>) -> Result<roughcut_core::model::KeyCheck, Value> {
+    state.editor.check_hosted_key().await.map_err(|e| e.to_json())
 }
 
 #[tauri::command]
@@ -146,107 +211,6 @@ async fn send_to_resolve(state: State<'_, AppState>, project_id: String) -> Resu
     Ok(serde_json::to_value(outcome).unwrap_or_default())
 }
 
-#[tauri::command]
-async fn record_devices() -> Result<roughcut_core::adapters::record::CaptureDevices, Value> {
-    roughcut_core::adapters::record::list_devices().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_start(
-    state: State<'_, AppState>,
-    video: u32,
-    microphone: u32,
-    screen: bool,
-    dual_screen: Option<u32>,
-) -> Result<String, Value> {
-    roughcut_core::adapters::record::start_capture_full(
-        &state.editor.sink(),
-        video,
-        microphone,
-        screen,
-        dual_screen,
-    )
-    .await
-    .map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn attach_screen_media(
-    state: State<'_, AppState>,
-    project_id: String,
-    file_path: String,
-) -> Result<(), Value> {
-    let pid = uuid::Uuid::parse_str(&project_id)
-        .map_err(|e| serde_json::json!({ "error": { "code": "invalid_argument", "message": e.to_string() } }))?;
-    state.editor.attach_screen_media(pid, &file_path).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-fn record_status() -> roughcut_core::adapters::record::RecordingStatus {
-    roughcut_core::adapters::record::status()
-}
-
-#[tauri::command]
-async fn record_stop() -> Result<roughcut_core::adapters::record::RecordingOutcome, Value> {
-    roughcut_core::adapters::record::stop().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_pause() -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
-    roughcut_core::adapters::record::pause().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn record_resume(
-    state: State<'_, AppState>,
-) -> Result<roughcut_core::adapters::record::RecordingStatus, Value> {
-    roughcut_core::adapters::record::resume(&state.editor.sink()).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn list_recordings() -> Result<Vec<roughcut_core::adapters::record::RecordingFile>, Value> {
-    roughcut_core::adapters::record::list_recordings().await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-async fn combine_recordings(paths: Vec<String>) -> Result<String, Value> {
-    roughcut_core::adapters::record::combine_recordings(&paths).await.map_err(|e| e.to_json())
-}
-
-#[tauri::command]
-fn screen_permission_status() -> bool {
-    roughcut_core::adapters::record::screen_permission()
-}
-
-#[tauri::command]
-fn request_screen_permission() -> bool {
-    roughcut_core::adapters::record::request_screen_permission()
-}
-
-/// Open System Settings at a privacy pane (whitelisted).
-#[tauri::command]
-fn open_privacy_settings(pane: String) -> Result<(), Value> {
-    let anchor = match pane.as_str() {
-        "screen" => "Privacy_ScreenCapture",
-        "camera" => "Privacy_Camera",
-        "microphone" => "Privacy_Microphone",
-        _ => return Err(serde_json::json!({ "error": { "code": "invalid_argument", "message": "unknown pane" } })),
-    };
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
-        .spawn()
-        .map_err(|e| serde_json::json!({ "error": { "code": "io", "message": e.to_string() } }))?;
-    #[cfg(not(target_os = "macos"))]
-    let _ = anchor;
-    Ok(())
-}
-
-#[tauri::command]
-fn delete_recording(path: String) -> Result<(), Value> {
-    roughcut_core::adapters::record::delete_recording(&path).map_err(|e| e.to_json())
-}
-
 /// Open an in-app terminal session. The MCP endpoint (when up) is injected
 /// into the shell env so a one-click connect can wire Claude Code to it.
 #[tauri::command]
@@ -315,7 +279,13 @@ pub fn run() {
             demo_mode,
             confirm_action,
             reveal_path,
+            open_external,
             setup_status,
+            model_status,
+            set_model_mode,
+            set_hosted_model,
+            set_hosted_key,
+            check_hosted_key,
             ollama_pull_model,
             install_llama_server,
             download_gguf,
@@ -327,27 +297,13 @@ pub fn run() {
             pty_kill,
             install_resolve_plugin,
             resolve_status,
-            send_to_resolve,
-            record_devices,
-            record_start,
-            record_status,
-            record_stop,
-            record_pause,
-            record_resume,
-            list_recordings,
-            combine_recordings,
-            delete_recording,
-            attach_screen_media,
-            screen_permission_status,
-            request_screen_permission,
-            open_privacy_settings
+            send_to_resolve
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 roughcut_core::llm_runtime::stop_managed();
-                roughcut_core::adapters::record::abort_on_exit();
                 roughcut_core::pty::kill_all();
             }
         });

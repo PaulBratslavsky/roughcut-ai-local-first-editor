@@ -181,7 +181,7 @@ async fn mcp_server_drives_an_edit_over_http() {
     let tools = resp["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|t| t["name"] == "cut_by_transcript"));
     assert!(tools.iter().any(|t| t["name"] == "export"));
-    for meta in ["apply_instruction", "connect_external", "escalate_to_frontier"] {
+    for meta in ["apply_instruction"] {
         assert!(!tools.iter().any(|t| t["name"] == meta), "{meta} must not be listed over MCP");
     }
 
@@ -224,7 +224,7 @@ async fn mcp_server_drives_an_edit_over_http() {
     assert!(rough["cut_count"].as_u64().unwrap() > 0);
 
     // Hidden is not just unlisted: meta tools are refused over the wire too.
-    for (id, meta) in [(5, "apply_instruction"), (6, "connect_external"), (7, "escalate_to_frontier")] {
+    for (id, meta) in [(5, "apply_instruction")] {
         let resp: Value = client
             .post(&info.url)
             .bearer_auth(&info.token)
@@ -836,6 +836,177 @@ async fn every_caller_can_call_exactly_what_it_is_shown() {
 }
 
 #[tokio::test]
+async fn the_model_switch_is_not_a_preference_any_caller_can_set() {
+    let editor = Editor::test_instance();
+    let prefs = call(&editor, "get_preferences", json!({})).await;
+    assert_eq!(prefs["model_mode"], "local", "Local is the default");
+    assert_eq!(prefs["hosted_model"], "claude-opus-5-5");
+    for caller in [Caller::Ui, Caller::Mcp] {
+        for patch in [
+            json!({ "model_mode": "hosted" }),
+            json!({ "hosted_model": "claude-haiku-5-5" }),
+            json!({ "hosted_consent_at": "2026-10-31T12:00:00Z" }),
+        ] {
+            let err = tools::dispatch(&editor, "set_preferences", &json!({ "preferences": patch }), caller)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("can only be changed in the app"), "{caller:?} {patch}: {err}");
+        }
+    }
+    // Sending the current values back (a whole-object save) is fine.
+    let same = json!({ "preferences": { "model_mode": "local", "cut_aggressiveness": "natural" } });
+    call(&editor, "set_preferences", same).await;
+}
+
+// ------------------------------------------------ Hosted mode, faked
+
+mod hosted_fakes {
+    use async_trait::async_trait;
+    use roughcut_core::adapters::anthropic::{HostedBackend, HostedFailure};
+    use roughcut_core::adapters::inference::{ChatMessage, ChatRequest, ChatResponse, InferenceClient, ServedBy};
+    use roughcut_core::error::{CoreError, HostedErrorKind, Result};
+    use roughcut_core::model::RouteReason;
+    use std::sync::Mutex;
+
+    fn schema_name(req: &ChatRequest) -> Option<String> {
+        req.response_format.as_ref().and_then(|f| f["json_schema"]["name"].as_str()).map(str::to_string)
+    }
+
+    /// A score for every numbered candidate in a short_scores request.
+    fn scores(req: &ChatRequest, score: u32) -> String {
+        let user = req.messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.clone()).unwrap_or_default();
+        let items: Vec<serde_json::Value> = user
+            .split("\n\n")
+            .filter_map(|block| block.split('|').next()?.trim().parse::<usize>().ok())
+            .map(|i| serde_json::json!({"index": i, "score": score, "title": format!("T{i}"), "reason": "r"}))
+            .collect();
+        serde_json::to_string(&items).unwrap()
+    }
+
+    /// Claude: scores shorts until `fail_from` (1-based scoring call), then
+    /// is unreachable; or rejects the key on every request.
+    pub struct Claude {
+        pub reject: bool,
+        pub fail_from: usize,
+        pub calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl HostedBackend for Claude {
+        async fn send(&self, req: &ChatRequest) -> std::result::Result<ChatResponse, HostedFailure> {
+            if self.reject {
+                return Err(HostedFailure::Fatal(CoreError::hosted(
+                    HostedErrorKind::KeyRejected,
+                    "Anthropic rejected the API key (401). Update it in Setup.",
+                )));
+            }
+            let text = if schema_name(req).as_deref() == Some("short_scores") {
+                let mut n = self.calls.lock().unwrap();
+                *n += 1;
+                if *n >= self.fail_from {
+                    return Err(HostedFailure::Unreachable { reason: RouteReason::Offline, detail: "no network".into() });
+                }
+                scores(req, 85)
+            } else {
+                "not json".into() // the outline falls back to pause-based beats
+            };
+            Ok(ChatResponse {
+                message: ChatMessage::assistant(&text),
+                served_by: Some(ServedBy { model: req.model.clone(), hosted: true }),
+                usage: None,
+            })
+        }
+    }
+
+    /// The local model: scores shorts too.
+    pub struct Local;
+
+    #[async_trait]
+    impl InferenceClient for Local {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let text = if schema_name(&req).as_deref() == Some("short_scores") { scores(&req, 90) } else { "not json".into() };
+            Ok(ChatResponse::new(ChatMessage::assistant(&text)))
+        }
+        async fn healthy(&self) -> bool {
+            true
+        }
+    }
+}
+
+async fn hosted_project(claude: hosted_fakes::Claude) -> (Editor, String) {
+    let editor = Editor::test_instance();
+    editor.set_inference_for_tests(std::sync::Arc::new(hosted_fakes::Local), std::sync::Arc::new(claude));
+    editor.set_hosted_key_for_tests(Some("sk-test")).unwrap();
+    editor.set_model_mode(roughcut_core::model::ModelMode::Hosted, true).unwrap();
+    let p = call(&editor, "create_project", json!({ "name": "hosted", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    (editor, pid)
+}
+
+#[tokio::test]
+async fn a_rejected_key_stops_a_scan_and_a_chat_and_changes_nothing() {
+    let claude = hosted_fakes::Claude { reject: true, fail_from: usize::MAX, calls: Default::default() };
+    let (editor, pid) = hosted_project(claude).await;
+    let before = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
+
+    let err = tools::dispatch(&editor, "find_clips", &json!({ "project_id": pid, "scan": true }), Caller::Ui)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "hosted_key_rejected");
+    assert!(err.to_string().contains("Update it in Setup"), "{err}");
+    let after = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
+    assert_eq!(before, after, "the stored candidates are untouched");
+
+    // The chat agent doesn't fall back to offline keyword cuts.
+    let timeline = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    let err = tools::dispatch(
+        &editor,
+        "apply_instruction",
+        &json!({ "project_id": pid, "instruction": "cut the tangent about hiking" }),
+        Caller::Ui,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "hosted_key_rejected");
+    let unchanged = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(timeline["cut_count"], unchanged["cut_count"]);
+    assert_eq!(timeline["clips"].as_array().unwrap().len(), unchanged["clips"].as_array().unwrap().len());
+
+    // A story edit plans before it changes anything: no dead-air cuts land
+    // ahead of the rejected request.
+    let err = tools::dispatch(&editor, "story_edit", &json!({ "project_id": pid, "instruction": "tighten it" }), Caller::Ui)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "hosted_key_rejected");
+    let still = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(timeline["cut_count"], still["cut_count"]);
+    let status = editor.model_status().unwrap();
+    assert_eq!(status.reason, Some(roughcut_core::model::RouteReason::KeyRejected));
+}
+
+#[tokio::test]
+async fn a_scan_that_loses_the_network_says_which_model_scored_what() {
+    let claude = hosted_fakes::Claude { reject: false, fail_from: 2, calls: Default::default() };
+    let (editor, pid) = hosted_project(claude).await;
+    let found = call(&editor, "find_clips", json!({ "project_id": pid, "count": 20 })).await;
+    assert_eq!(found["method"], "llm");
+    let scorers: std::collections::BTreeSet<String> = found["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["scorer"].as_str().map(str::to_string))
+        .collect();
+    let local_model = editor.get_preferences().unwrap().inference_model;
+    assert!(scorers.contains("Claude Opus 5.5"), "{scorers:?}");
+    assert!(scorers.contains(&local_model), "{scorers:?}");
+    let status = editor.model_status().unwrap();
+    assert_eq!(status.effective, roughcut_core::model::ModelMode::Local);
+    assert_eq!(status.reason, Some(roughcut_core::model::RouteReason::Offline));
+}
+
+#[tokio::test]
 async fn set_preferences_patches_and_guards_egress() {
     let editor = Editor::test_instance();
     let before = call(&editor, "get_preferences", json!({})).await;
@@ -1037,6 +1208,127 @@ async fn clips_find_save_export() {
     let names: Vec<String> = tools::defs(agent).into_iter().map(|d| d.name).collect();
     assert!(names.contains(&"find_clips".to_string()));
     assert!(!names.contains(&"export_clip".to_string()));
+}
+
+#[tokio::test]
+async fn bulk_shorts_scan_make_export() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "long-form", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // Without the new arguments: today's shape, plus one piece per candidate.
+    let plain = call(&editor, "find_clips", json!({ "project_id": pid })).await;
+    let plain = plain["candidates"].as_array().unwrap().clone();
+    assert!(!plain.is_empty() && plain.len() <= 8, "got {}", plain.len());
+    for c in &plain {
+        let pieces = c["pieces"].as_array().unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0]["start"], c["start"]);
+        assert_eq!(pieces[0]["end"], c["end"]);
+    }
+
+    // A scan: more of the video, still distinct moments.
+    let scan = call(&editor, "find_clips", json!({ "project_id": pid, "scan": true, "count": 30, "min_score": 40 })).await;
+    assert_eq!(scan["method"], "heuristic", "tests have no model server");
+    let candidates = scan["candidates"].as_array().unwrap().clone();
+    assert!(candidates.len() >= 3 && candidates.len() <= 30, "got {}", candidates.len());
+    assert!(candidates.len() >= plain.len(), "a scan offers at least as many");
+
+    // One scan per project at a time.
+    let held = editor.begin_clip_scan(pid.parse().unwrap()).unwrap();
+    let err = tools::dispatch(&editor, "find_clips", &json!({ "project_id": pid, "scan": true }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already running"), "got: {err}");
+    drop(held);
+
+    // Make three, one of them made stale by cutting its whole stretch from
+    // the main edit after the scan.
+    let ids: Vec<Value> = candidates[..3].iter().map(|c| c["id"].clone()).collect();
+    let stale = &candidates[2];
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": stale["start"], "end": stale["end"] })).await;
+    let made = call(&editor, "create_clips", json!({ "project_id": pid, "candidate_ids": ids })).await;
+    let clips = made["clips"].as_array().unwrap();
+    let errors = made["errors"].as_array().unwrap();
+    assert_eq!(clips.len(), 2, "{made}");
+    assert_eq!(errors.len(), 1, "{made}");
+    assert_eq!(errors[0]["candidate_id"], stale["id"]);
+    for c in clips {
+        assert_eq!(c["format"], "vertical");
+        assert_eq!(c["crop_x"], 0.5, "no frames to look at in tests: the crop stays centred");
+    }
+    let listed = call(&editor, "get_clip_candidates", json!({ "project_id": pid })).await;
+    let listed: Vec<&Value> = listed["candidates"].as_array().unwrap().iter().collect();
+    assert!(listed.iter().any(|c| c["id"] == stale["id"]), "the stale one stays listed");
+    assert!(!listed.iter().any(|c| c["id"] == ids[0] || c["id"] == ids[1]), "made ones leave the list");
+
+    // An empty batch names the problem.
+    let err = tools::dispatch(&editor, "create_clips", &json!({ "project_id": pid, "candidate_ids": [] }), Caller::Ui)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("empty"), "got: {err}");
+
+    // Re-scanning doesn't offer the moments just saved.
+    let again = call(&editor, "find_clips", json!({ "project_id": pid, "scan": true, "count": 30 })).await;
+    let overlap = |a: (f64, f64), b: (f64, f64)| {
+        let shared = (a.1.min(b.1) - a.0.max(b.0)).max(0.0);
+        shared / (a.1 - a.0).min(b.1 - b.0)
+    };
+    for c in again["candidates"].as_array().unwrap() {
+        let cand = (c["start"].as_f64().unwrap(), c["end"].as_f64().unwrap());
+        for s in clips {
+            let saved = (s["start"].as_f64().unwrap(), s["end"].as_f64().unwrap());
+            assert!(overlap(cand, saved) <= 0.3, "{cand:?} is the saved moment {saved:?}");
+        }
+    }
+
+    // Export the batch. Captions work offline; the MP4 needs ffmpeg, so in
+    // tests every MP4 fails — and a failure doesn't stop the rest.
+    let dir = std::env::temp_dir().join(format!("roughcut-e2e-batch-{}", uuid::Uuid::new_v4()));
+    let clip_ids: Vec<Value> = clips.iter().map(|c| c["id"].clone()).collect();
+    let mut with_bogus = clip_ids.clone();
+    with_bogus.insert(1, json!(uuid::Uuid::new_v4().to_string()));
+    let out = call(
+        &editor,
+        "export_clips",
+        json!({ "project_id": pid, "clip_ids": with_bogus, "out_dir": dir.to_string_lossy(), "target": "srt" }),
+    )
+    .await;
+    let results = out["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert!(results[1]["error"].is_string() && results[1]["path"].is_null());
+    let first = results[0]["path"].as_str().unwrap();
+    assert!(first.ends_with(".srt") && first.contains("/01-"), "{first}");
+    assert!(results[2]["path"].as_str().unwrap().contains("/03-"));
+    assert!(std::path::Path::new(first).exists());
+
+    // Again into the same folder: nothing is overwritten.
+    let again = call(
+        &editor,
+        "export_clips",
+        json!({ "project_id": pid, "clip_ids": [clip_ids[0]], "out_dir": dir.to_string_lossy(), "target": "srt" }),
+    )
+    .await;
+    let second = again["results"][0]["path"].as_str().unwrap();
+    assert!(second.ends_with("-2.srt"), "{second}");
+
+    let mp4 = call(
+        &editor,
+        "export_clips",
+        json!({ "project_id": pid, "clip_ids": clip_ids, "out_dir": dir.to_string_lossy() }),
+    )
+    .await;
+    assert!(mp4["results"].as_array().unwrap().iter().all(|r| r["error"].is_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The local agent can make shorts in a batch but not export them.
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let names: Vec<String> = tools::defs(agent).into_iter().map(|d| d.name).collect();
+    assert!(names.contains(&"create_clips".to_string()));
+    assert!(!names.contains(&"export_clips".to_string()));
 }
 
 #[tokio::test]

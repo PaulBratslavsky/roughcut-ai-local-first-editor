@@ -5,11 +5,11 @@
 This directory holds standalone Cargo example binaries for the `roughcut-core`
 crate. They are manual smoke tests and diagnostic tools: they drive the real
 library API against real hardware, local services, or media files, then print
-results. Most of them end by printing a sentinel line (for example `SMOKE-OK`)
-after their `assert!`s pass. None of them are run by `cargo test`. Each one
-is a separate binary with its own `#[tokio::main] async fn main()`, and the
-crate's `Cargo.toml` discovers them automatically (there are no `[[example]]`
-entries).
+results. Several of them end by printing a sentinel line (for example
+`PLAYABLE-OK`) after their `assert!`s pass. None of them are run by
+`cargo test`. Each one is a separate binary with its own
+`#[tokio::main] async fn main()`, and the crate's `Cargo.toml` discovers them
+automatically (there are no `[[example]]` entries).
 
 Run any of them from the workspace root (`/Users/paul/fable`):
 
@@ -17,9 +17,9 @@ Run any of them from the workspace root (`/Users/paul/fable`):
 cargo run -p roughcut-core --example <name> [-- args]
 ```
 
-Most examples need macOS plus external tooling (ffmpeg/ffprobe, camera,
-microphone, display, a local model server, or network access). The
-**Requires** column below lists what each one needs.
+Most examples need external tooling (ffmpeg/ffprobe, a local model server,
+or network access), and some need macOS. The **Requires** column below lists
+what each one needs.
 
 ## Interface
 
@@ -29,51 +29,37 @@ one exercises.
 | Example | Purpose | `roughcut_core` API exercised | Args / inputs | Requires | Pass signal |
 | --- | --- | --- | --- | --- | --- |
 | `agent_live` | Runs the agent loop on demo fixture footage and asks it to cut the "hiking" tangent | `Editor::new(.., demo=true)` with `SqliteStore::open_in_memory`, `MockVideoEngine`, `MockTranscriber`; `tools::dispatch` (`Caller::Ui`): `create_project`, `transcribe`, `get_timeline`, `apply_instruction`, `get_transcript`; custom `StdoutSink: EventSink` (prints `agent-step` events) | none (`file_path` `/demo/footage.mp4` is a fixture path) | Ollama or llama-server for the real LLM path. The in-memory store has no saved preferences, so `Preferences::default()` supplies the endpoint from `INFERENCE_ENDPOINT` (default `http://localhost:11434/v1`) and the model from `INFERENCE_MODEL` (default `gemma4:26b`). If the server is unhealthy, or the step-0 model call fails, `agent::run_instruction` falls back to the offline path | Informational only: prints `hiking tangent still included? <bool>`, no assert |
-| `crash_smoke` | Kills the capture process with SIGKILL mid-take and checks that the orphaned take still probes | `record::list_devices`, `record::start_camera`, `record::status`, `FfmpegCli.probe` (`VideoEngine`) | none | macOS avfoundation, ffmpeg/ffprobe, camera, mic, `pkill` | `CRASH-SMOKE-OK` |
-| `dual_smoke` | Camera+mic **and** screen captured in one session, giving two stitched files | `record::start_capture_full(&sink, cam, mic, false, Some(screen))`, `record::stop` → `RecordingOutcome { path, screen_path }`, `FfmpegCli.probe` | none | macOS, ffmpeg/ffprobe, camera, mic, display, Screen Recording permission | `DUAL-SMOKE-OK` |
 | `face_smoke` | Finds faces with Apple Vision on sampled frames and computes the 9:16 crop. Then repeats through the tool registry | `FfmpegCli.probe` / `extract_frame`; `face::sample_times`, `face::png_size`, `face::detect_faces`, `face::crop_x_for_faces`; `Editor::new(.., AutoVideoEngine, MockTranscriber, NullSink, false)`; tools `create_project`, `create_clip` (`format: "vertical"`), `list_clips`, `center_clip_on_face` | `face_smoke <video> [start_s] [end_s]` (end defaults to `min(duration, start+30)`) | macOS for detection, ffmpeg/ffprobe, dev-dep `tempfile`. Only the Vision backend in `face.rs` is `cfg(target_os = "macos")`; elsewhere the example compiles, `detect_faces` returns `Unavailable`, and it panics at `expect("detect")` | Informational only: prints faces and `crop_x`. Panics (`expect`) on any failure, including `expect("frame size")` when `end <= start` (no frames sampled) |
 | `llm_install` | Installs the llama.cpp `llama-server` sidecar | `llm_runtime::install_llama_server(&sink)` | none | Network (GitHub API), `tar`, macOS release asset | Prints `installed: <path>`, also when it was already installed; on error prints `ERR <e>` to stderr and calls `process::exit(1)` |
 | `llm_status` | Prints the setup/provisioning status as pretty JSON (same shape the setup screen fetches) | `SqliteStore::open(&SqliteStore::default_path())`, `Editor::bootstrap_with_store`, `setup::status` → `SetupStatus` | none | Optional local inference server (probed) | Informational only |
-| `record_smoke` | Records N seconds from camera and mic, stops cleanly, and probes the result | `record::list_devices`, `record::start_camera`, `record::status` (`recording`, `elapsed_s`), `record::stop`, `FfmpegCli.probe` | `record_smoke [secs=3] [cam] [mic]`. If cam/mic are not given, it picks the device whose name contains `MacBook`, else panics | macOS avfoundation, ffmpeg/ffprobe, camera, mic | `SMOKE-OK` |
+| `playable_check` | Checks the preview's playable copy and the footage join against real ffmpeg: OBS-style `.mkv` and odd-sized `.webm` test clips get a faststart MP4 copy with one stereo AAC track, a plain MP4 gets none, and `concat_media` joins MP4s into an `.mp4` and `.mkv` files into an `.mkv` in the data dir | `adapters::video::ensure_playable_copy`, `adapters::video::concat_media`, `FfmpegCli.probe` (`VideoEngine`), `store::data_dir` | none: makes 10-second `lavfi` test clips (`obs-aac.mkv` H.264 + AAC, `obs-opus.mkv` H.264 + Opus, `obs-hevc.mkv` HEVC + AAC, `obs-two-tracks.mkv` with a stereo track 1 and a 6-channel track 2, `browser-odd.webm` VP9 + Opus at 641×361, faststart `plain.mp4` and `plain-2.mp4`) under a throwaway `HOME` in the temp dir | ffmpeg/ffprobe with `libx264`, `libx265`, `libopus` and `libvpx-vp9` | `PLAYABLE-OK` |
 | `render_declick` | Runs the full pipeline (transcribe → rough cut → MP4 export) on a fixed source file | `Editor::bootstrap_with_store` (in-memory store), `require_confirmations_for_tests(false)`; tools `create_project`, `transcribe`, `generate_rough_cut`, `export` (`target: "mp4"`) | Hard-coded input `/tmp/nle-test-source.mp4` | ffmpeg/ffprobe and a working transcriber (`AutoTranscriber`) | Informational only: prints `rendered: <path>`. Panics (`unwrap`) on any tool error |
 | `render_progress` | Checks that export progress events stream during an MP4 render | Same pipeline as `render_declick`, plus custom `CountSink: EventSink` that collects `progress` events with `task == "export"` | Hard-coded input `/tmp/nle-test-source.mp4` | Same as `render_declick` | `PASS` |
-| `screen_smoke` | Records the screen and mic for 4 s, then probes the result | `record::start_capture(&sink, screen, mic, true)`, `record::stop`, `FfmpegCli.probe` | none | macOS, ffmpeg/ffprobe, display, mic, Screen Recording permission | `SCREEN-SMOKE-OK` |
-| `takes_smoke` | Multi-take flow: start → pause → resume → stop, ending in one concatenated file | `record::start_camera`, `record::pause` / `record::resume` → `RecordingStatus { paused, recording, take, total_s }`, `record::stop`, `record::list_recordings` → `RecordingFile { name, duration_s }`, `FfmpegCli.probe` | none | macOS avfoundation, ffmpeg/ffprobe, camera, mic | `TAKES-SMOKE-OK` |
-
-Device selection: when no index is supplied, the capture examples pick the
-first camera or mic whose name contains `"MacBook"`. `dual_smoke` matches the
-camera named exactly `"MacBook Pro Camera"`. If no camera or mic name
-matches, they fall back to index `0`. `record_smoke` is the exception: it
-panics instead of falling back.
-
-Display selection: `screen_smoke` and `dual_smoke` take the first entry of
-`record::list_devices().screens` and panic (`expect`) if there is none. There
-is no index fallback for displays.
+| `render_seek_check` | Checks the per-piece seeking MP4 render: a short from minute 40, two pieces in reverse order, A/V offset either way, a 9:16 crop, and screen compositing (pip and screen-only) | `FfmpegCli.probe` / `render_mp4` with `adapters::video::RenderJob { pieces, .. }`, `model::PlaySpan`, `model::Layout` | none: generates a 45-minute test source and a 3-minute screen file under the temp dir (once, reused) | ffmpeg/ffprobe | `ALL PASS` (exit 1 otherwise). Checks output length, PSNR of frames at known output times against the source (and that a wrong frame scores low), that a delayed track starts without silence, and that seeking beats decoding from 0:00 (prints both times) |
 
 ## Invariants
 
 These are the behaviors the examples assert. If one of these assertions
 starts failing after a library change, treat it as a regression.
 
-- `crash_smoke`: after the capture child is killed, `record::status().recording`
-  must be `false` ("status must notice the dead child"). The orphaned take must
-  still probe, with `duration > 0.5`.
-- `dual_smoke`: a dual session must return `RecordingOutcome.screen_path`
-  (`Some`). Both files must be longer than 1.0 s, and their durations must be
-  within 1.0 s of each other ("streams should be near-synced").
-- `record_smoke`: the probed duration must exceed `max(secs - 2.5, 0.5)`. The
-  2.5 s margin allows for avfoundation warm-up, which takes about 2 s.
+- `playable_check`: the data dir resolves under the throwaway `HOME`. Every
+  non-MP4 test clip gets a copy named `play.mp4` with even dimensions,
+  exactly one audio track that is stereo AAC (for `obs-two-tracks.mkv`, the
+  source's first track, not the 6-channel one), `moov` before `mdat`
+  (faststart), and a length within 0.15 s of the source. H.264 stays H.264,
+  HEVC stays HEVC tagged `hvc1`, and the 641×361 VP9 becomes 640×360 H.264. A
+  second call returns the same cached path. A faststart MP4 gets no copy
+  (`None`). Joins:
+  - two 10 s MP4s → a faststart `.mp4` of 20 s (±0.2 s) under
+    `<data dir>/media/`;
+  - two HEVC `.mkv` files → an `.mkv` whose preview copy is tagged `hvc1`;
+  - the two-track `.mkv` joined with itself keeps one (stereo) audio track,
+    and joining that result with the two-track file again gives 30 s
+    (±0.3 s), as two "add footage" steps in a row;
+  - H.264 + HEVC is refused ("don't match") instead of joined.
 - `render_progress`: at least 3 export progress messages are emitted, and the
   last one is exactly `"render complete"` (emitted in
   `core/src/adapters/video.rs`).
-- `screen_smoke`: the screen recording must be longer than 1.0 s and wider
-  than 800 px.
-- `takes_smoke`: after `pause`, `paused && take == 1`. After `resume`,
-  `recording && take == 2`. `stop` returns the concatenated file, not a take
-  (the path does not contain `-take`), and a camera-only session has no
-  `screen_path`. The stitched file is longer than 2.0 s and shows up in
-  `record::list_recordings`. The status `take` is a counter, not the file
-  number: the resumed take is written as `-take3.mp4` (see Side Effects).
 - The tool calls in `agent_live`, `face_smoke`, `render_declick`, and
   `render_progress` go through `tools::dispatch(.., Caller::Ui)`, the same
   registry the UI uses. Tool names and argument keys must stay in sync with the
@@ -84,29 +70,16 @@ starts failing after a library change, treat it as a regression.
   confirmation is only requested for `ActionSource::McpClient`. These examples
   dispatch as `Caller::Ui`, so for them the call is a safeguard rather than a
   requirement.
-- Developer note: the header comment in `dual_smoke.rs` mentions
-  "pause/resume", but the code only does start → 5 s → stop.
 
 ## Side Effects
 
-- **Recordings library**: `record::start_camera`, `start_capture`, and
-  `start_capture_full` create `~/Movies/RoughCut` and refuse to start with
-  less than 2 GB free (checked with `df -Pk`). They spawn an ffmpeg
-  avfoundation capture that writes `<kind>-YYYYmmdd-HHMMSS-take<N>.mp4`, where
-  `<kind>` is `recording`, `screen`, or `presentation` (dual sessions also
-  write `-screen-take<N>.mp4`). `record::resume` numbers the new take
-  `takes.len() + 2`, so the take after one pause is `-take3.mp4`: `takes_smoke`
-  leaves `<base>-take1.mp4` and `<base>-take3.mp4` (no `-take2`).
-  `record::stop` concatenates the takes into `<base>.mp4` (and
-  `<base>-screen.mp4`) and keeps the take files. These files are **not**
-  cleaned up by the examples (`core/src/adapters/record.rs`).
-- **`crash_smoke` kills processes system-wide**: it runs
-  `pkill -9 -f avfoundation`, which kills **every** process whose command line
-  matches `avfoundation`, not only this example's child. It never calls
-  `record::stop`, so an orphaned `recording-*-take1.mp4` stays in
-  `~/Movies/RoughCut`.
-- **macOS privacy prompts**: the capture examples can trigger
-  camera, microphone, and Screen Recording permission prompts.
+- **`playable_check` uses a throwaway data dir**: it sets `HOME` to
+  `<temp dir>/roughcut-playable-<pid>/` before anything reads the data dir, so
+  the test clips, the copies (`<data dir>/cache/<key>/play.mp4`) and the joined
+  files (`<data dir>/media/joined-<timestamp>-<8 hex>.mp4` / `.mkv`) all land
+  there, and the real data dir is untouched. The folder is removed at the end; a failed
+  assert leaves it behind. ffmpeg's concat list is a `roughcut-concat-*.txt`
+  in the temp dir, removed after each join.
 - **`llm_status` touches the real app database**: it opens (or creates)
   `<dirs::data_dir()>/roughcut/library.db` via `SqliteStore::default_path()`.
   `Editor::bootstrap_with_store` then calls `purge_trash(30)`, which

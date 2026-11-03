@@ -4,7 +4,7 @@
 //! extracted; hardening JSON extraction against weak-model output now lands
 //! ONCE. Fallback POLICY stays at call sites — heuristics differ per feature.
 
-use crate::adapters::inference::{ChatMessage, ChatRequest, InferenceClient};
+use crate::adapters::inference::{ChatMessage, ChatRequest, InferenceClient, ServedBy};
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use serde::de::DeserializeOwned;
@@ -53,6 +53,20 @@ pub async fn ask_json_schema<T: DeserializeOwned>(
     temperature: f64,
     schema: Option<&serde_json::Value>,
 ) -> Result<T> {
+    ask_json_schema_served(inference, model, label, system, user, temperature, schema).await.map(|(v, _)| v)
+}
+
+/// [`ask_json_schema`], also saying which model answered (Hosted mode can
+/// finish a run on the local model; callers that label results need it).
+pub async fn ask_json_schema_served<T: DeserializeOwned>(
+    inference: &dyn InferenceClient,
+    model: &str,
+    label: &str,
+    system: &str,
+    user: &str,
+    temperature: f64,
+    schema: Option<&serde_json::Value>,
+) -> Result<(T, Option<ServedBy>)> {
     let response_format = schema.map(|s| {
         serde_json::json!({
             "type": "json_schema",
@@ -83,20 +97,23 @@ pub async fn ask_json_schema<T: DeserializeOwned>(
         };
         let response = match inference.chat(request(messages)).await {
             Ok(r) => r,
-            // A server that rejects response_format gets one unconstrained shot.
-            Err(_) if attempt == 0 && response_format.is_some() => {
+            // A LOCAL server that rejects response_format gets one
+            // unconstrained shot. Never a Hosted error: a rejected key or
+            // request must stay visible (and a refusal not be billed twice).
+            Err(e) if attempt == 0 && response_format.is_some() && !matches!(e, CoreError::Hosted { .. }) => {
                 let mut req = request(base.clone());
                 req.response_format = None;
                 inference.chat(req).await?
             }
             Err(e) => return Err(e),
         };
+        let served = response.served_by.clone();
         let text = response.message.content.unwrap_or_default();
         match extract_json(&text)
             .ok_or_else(|| format!("no JSON found in the reply"))
             .and_then(|j| serde_json::from_str::<T>(j).map_err(|e| e.to_string()))
         {
-            Ok(v) => return Ok(v),
+            Ok(v) => return Ok((v, served)),
             Err(e) => last_err = e,
         }
     }

@@ -26,7 +26,7 @@ Zero egress by default; no accounts.
     search, saved clips.
   - `src/model.rs` — the data model (ts-rs bindings behind `ts-bindings`).
   - `src/adapters/` — swappable seams: video (ffmpeg), transcribe (whisper),
-    inference (OpenAI-compatible), embed, record, face (Apple Vision).
+    inference (OpenAI-compatible), embed, face (Apple Vision).
   - `src/agent.rs` (chat agent loop), `src/story.rs` (outline/flow),
     `src/clip_finder.rs` (short-form candidates), `src/export/` (NLE writers).
   - `tests/` — `e2e.rs` (through the registry), `doc_parity.rs`, `mock_parity.rs`.

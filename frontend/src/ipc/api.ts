@@ -4,7 +4,16 @@
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { mockCallTool, mockOn } from "./mockApi";
+import {
+  mockCallTool,
+  mockCheckHostedKey,
+  mockModelStatus,
+  mockOn,
+  mockSetHostedKey,
+  mockSetHostedModel,
+  mockSetModelMode,
+  mockSwitch,
+} from "./mockApi";
 import type { AppEventName, WhisperTier, SetupStatus } from "./types";
 
 export const isTauri: boolean =
@@ -20,21 +29,41 @@ export async function callTool<T = unknown>(
   return mockCallTool(name, args) as Promise<T>;
 }
 
-/** Subscribe to a core event. Returns an unsubscribe function. */
-export function onAppEvent<T>(event: AppEventName, handler: (payload: T) => void): () => void {
+/** Subscribe to a core event. Returns an unsubscribe function. `onReady`
+ *  runs once the listener is live (Tauri registers it asynchronously): read
+ *  initial state there, so no event can fall between the read and the
+ *  subscription. */
+export function onAppEvent<T>(
+  event: AppEventName,
+  handler: (payload: T) => void,
+  onReady?: () => void,
+): () => void {
   if (isTauri) {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
       if (cancelled) fn();
-      else unlisten = fn;
+      else {
+        unlisten = fn;
+        onReady?.();
+      }
     });
     return () => {
       cancelled = true;
       unlisten?.();
     };
   }
-  return mockOn(event, handler as (payload: unknown) => void);
+  const off = mockOn(event, handler as (payload: unknown) => void);
+  onReady?.();
+  return off;
+}
+
+/** Open one of the app's known sites (Anthropic Console, Ollama, DaVinci
+ *  Resolve) in the system browser: the desktop webview doesn't follow
+ *  target=_blank links. The shell allow-lists the sites. */
+export async function openExternal(url: string): Promise<void> {
+  if (isTauri) return invoke("open_external", { url });
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /** True when the backend is running on fixture adapters. In a plain browser
@@ -61,7 +90,7 @@ export async function getSetupStatus(): Promise<SetupStatus> {
       { id: "compact", file: "ggml-small-q5_1.bin", approx_mb: 190, downloaded: false, recommended: false },
     ],
     ram_gb: 24,
-    inference_reachable: true,
+    inference_reachable: !mockSwitch("nomodel"),
     inference_endpoint: "http://localhost:11434/v1",
     inference_model: "(browser mock)",
     embedding_model: "nomic-embed-text",
@@ -83,6 +112,44 @@ export async function getSetupStatus(): Promise<SetupStatus> {
     demo: true,
     demo_reason: "browser mock",
   };
+}
+
+// ---- The LOCAL / HOSTED switch ----
+// Shell commands, not registry tools (ADR-0004): only the user, in the app,
+// turns Hosted on or handles the key. Errors reject with
+// `{ error: { code, message } }` (codes include hosted_no_key,
+// hosted_not_consented, hosted_key_rejected, invalid_argument).
+import type { HostedKeyResult, KeyCheck, ModelMode, ModelStatus } from "./types";
+
+/** In memory: no network, no key-store read. */
+export async function getModelStatus(): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("model_status");
+  return mockModelStatus();
+}
+
+/** Hosted needs a stored key, and `consent: true` the first time. */
+export async function setModelMode(mode: ModelMode, consent: boolean): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("set_model_mode", { mode, consent });
+  return mockSetModelMode(mode, consent);
+}
+
+/** One of claude-opus-5-5 | claude-sonnet-5-5 | claude-haiku-5-5. */
+export async function setHostedModel(model: string): Promise<ModelStatus> {
+  if (isTauri) return invoke<ModelStatus>("set_hosted_model", { model });
+  return mockSetHostedModel(model);
+}
+
+/** Save (checked first, no tokens spent) or forget (null; also switches to
+ *  Local) the Anthropic API key. */
+export async function setHostedKey(key: string | null): Promise<HostedKeyResult> {
+  if (isTauri) return invoke<HostedKeyResult>("set_hosted_key", { key });
+  return mockSetHostedKey(key);
+}
+
+/** Check the stored key against Anthropic again (Setup's "Test"). */
+export async function checkHostedKey(): Promise<KeyCheck> {
+  if (isTauri) return invoke<KeyCheck>("check_hosted_key");
+  return mockCheckHostedKey();
 }
 
 /** Download a whisper model; progress arrives via `progress` events with
@@ -130,89 +197,6 @@ export async function downloadGguf(url: string): Promise<string> {
 
 export async function startManagedLlm(ggufPath: string): Promise<string> {
   return invoke<string>("start_managed_llm", { ggufPath });
-}
-
-// ---- Recording (desktop only; shapes generated from core) ----
-import type { CaptureDevices } from "./generated/CaptureDevices";
-import type { RecordingStatus } from "./generated/RecordingStatus";
-export type { CaptureDevices, RecordingStatus };
-
-export async function recordDevices(): Promise<CaptureDevices> {
-  if (!isTauri) return { cameras: [], screens: [], microphones: [] };
-  return invoke<CaptureDevices>("record_devices");
-}
-
-/** Starts capture; resolves with the output path. First runs trigger the
- *  macOS camera+mic (or Screen Recording) permission prompts. */
-export async function recordStart(
-  video: number,
-  microphone: number,
-  screen: boolean,
-  dualScreen?: number,
-): Promise<string> {
-  return invoke<string>("record_start", { video, microphone, screen, dualScreen: dualScreen ?? null });
-}
-
-import type { RecordingOutcome } from "./generated/RecordingOutcome";
-export type { RecordingOutcome };
-
-/** Attach a dual-capture screen file to a project (probed; persisted). */
-export async function attachScreenMedia(projectId: string, filePath: string): Promise<void> {
-  return invoke("attach_screen_media", { projectId, filePath });
-}
-
-export async function recordStatus(): Promise<RecordingStatus> {
-  if (!isTauri) return { recording: false, paused: false, take: 0, elapsed_s: 0, total_s: 0, out_path: null };
-  return invoke<RecordingStatus>("record_status");
-}
-
-/** Finish the session: finalizes + stitches every take into one file per
- *  stream (camera always; screen too for dual sessions). */
-export async function recordStop(): Promise<RecordingOutcome> {
-  return invoke<RecordingOutcome>("record_stop");
-}
-
-export async function recordPause(): Promise<RecordingStatus> {
-  return invoke<RecordingStatus>("record_pause");
-}
-
-export async function recordResume(): Promise<RecordingStatus> {
-  return invoke<RecordingStatus>("record_resume");
-}
-
-import type { RecordingFile } from "./generated/RecordingFile";
-export type { RecordingFile };
-
-/** The recordings library (~/Movies/RoughCut), newest first. */
-export async function listRecordings(): Promise<RecordingFile[]> {
-  if (!isTauri) return [];
-  return invoke<RecordingFile[]>("list_recordings");
-}
-
-/** Screen Recording TCC status (true off-macOS). */
-export async function screenPermissionStatus(): Promise<boolean> {
-  if (!isTauri) return true;
-  return invoke<boolean>("screen_permission_status");
-}
-
-/** Trigger the ONE-TIME macOS prompt; returns the (possibly new) status. */
-export async function requestScreenPermission(): Promise<boolean> {
-  return invoke<boolean>("request_screen_permission");
-}
-
-/** Open System Settings at a privacy pane: "screen" | "camera" | "microphone". */
-export async function openPrivacySettings(pane: string): Promise<void> {
-  return invoke("open_privacy_settings", { pane });
-}
-
-/** Delete a recording from the library (the file itself). */
-export async function deleteRecording(path: string): Promise<void> {
-  return invoke("delete_recording", { path });
-}
-
-/** Stitch library recordings (same codec/resolution) into one new file. */
-export async function combineRecordings(paths: string[]): Promise<string> {
-  return invoke<string>("combine_recordings", { paths });
 }
 
 /** Reveal a file in Finder (desktop only). */

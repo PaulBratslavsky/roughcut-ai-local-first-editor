@@ -28,6 +28,7 @@ pub mod model;
 pub mod progress;
 pub mod pty;
 pub mod resolve;
+pub mod secrets;
 pub mod setup;
 pub mod story;
 pub mod store;

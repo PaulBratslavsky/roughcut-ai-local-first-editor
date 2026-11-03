@@ -59,19 +59,20 @@ pub fn registry() -> &'static [ToolSpec] {
 /// and which [`ActionSource`] the edits it lands are attributed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caller {
-    /// The app's own UI — the user. Every tool, including the meta tools that
-    /// start agent loops or opt in to a frontier provider.
+    /// The app's own UI — the user. Every tool, including the meta tool that
+    /// starts the agent loop. (The LOCAL / HOSTED switch isn't a tool at all.)
     Ui,
     /// An external MCP client (Claude Desktop/Code via the shim, the Resolve
     /// scripts). Everything except meta tools: an external model IS an
     /// orchestrator — handing it apply_instruction would route editing through
-    /// the weaker on-device model, and it must never opt the user into egress.
+    /// the app's own (often weaker, on-device) model, and it can never turn on
+    /// Hosted mode (that is a shell command, ADR-0007).
     Mcp,
-    /// An agent loop: the on-device model, or a frontier model the user
-    /// escalated to. Only the `agent` rows it is shown — never meta tools (so a
-    /// loop can't recurse) nor project lifecycle / export / preferences.
-    /// `attribute_to` is who its edits are credited to (`LocalAi`, or
-    /// `McpClient` for frontier escalation) — distinct from what it may call.
+    /// The agent loop (on the on-device model, or Claude in Hosted mode). Only
+    /// the `agent` rows it is shown — never meta tools (so a loop can't
+    /// recurse) nor project lifecycle / export / preferences. `attribute_to`
+    /// is who its edits are credited to (`LocalAi` for the in-app chat) —
+    /// distinct from what it may call.
     Agent { attribute_to: ActionSource },
 }
 
@@ -842,11 +843,13 @@ handler!(h_find_clips, |e, a, _s| {
         min_s: arg_f64_opt(a, "min_s")?.unwrap_or(defaults.min_s),
         max_s: arg_f64_opt(a, "max_s")?.unwrap_or(defaults.max_s),
         theme: a["theme"].as_str().map(str::to_string),
+        scan: a["scan"].as_bool().unwrap_or(false),
+        min_score: arg_f64_opt(a, "min_score")?,
+        multi_moment: a["multi_moment"].as_bool().unwrap_or(false),
     };
-    let candidates = crate::clip_finder::find_clips(e, arg_uuid(a, "project_id")?, opts).await?;
-    let method = candidates.first().map(|c| c.method.clone()).unwrap_or_default();
-    let theme = candidates.first().and_then(|c| c.theme.clone());
-    Ok(json!({ "candidates": candidates, "method": method, "theme": theme }))
+    let theme = opts.theme.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+    let found = crate::clip_finder::find_clips(e, arg_uuid(a, "project_id")?, opts).await?;
+    Ok(json!({ "candidates": found.candidates, "method": found.method, "theme": theme }))
 });
 
 handler!(h_get_clip_candidates, |e, a, _s| {
@@ -933,6 +936,16 @@ handler!(h_create_clip, |e, a, _s| {
     Ok(json!({ "clip": clip }))
 });
 
+handler!(h_create_clips, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let ids = arg_uuid_vec(a, "candidate_ids")?;
+    if ids.is_empty() {
+        return Err(CoreError::InvalidArg("candidate_ids is empty: pass the ids of the candidates to make".into()));
+    }
+    let (clips, errors) = e.create_clips(project_id, &ids, arg_clip_format(a)?).await?;
+    Ok(json!({ "clips": clips, "errors": errors }))
+});
+
 handler!(h_list_clips, |e, a, _s| {
     Ok(json!({ "clips": e.list_clips(arg_uuid(a, "project_id")?)? }))
 });
@@ -984,6 +997,32 @@ handler!(h_export_clip, |e, a, s| {
     }
     let path = e.export_clip(project_id, clip_id, &target, &out_path).await?;
     Ok(json!({ "path": path }))
+});
+
+handler!(h_export_clips, |e, a, s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let clip_ids = arg_uuid_vec(a, "clip_ids")?;
+    let out_dir = arg_str(a, "out_dir")?.to_string();
+    let target = a["target"].as_str().filter(|t| !t.is_empty()).unwrap_or("mp4").to_string();
+    // Check what can be checked before asking the user to approve anything.
+    if clip_ids.is_empty() {
+        return Err(CoreError::InvalidArg("clip_ids is empty: pass the ids of the saved clips to export".into()));
+    }
+    crate::export::check_target(&target)?;
+    if s == ActionSource::McpClient
+        && !e
+            .request_confirmation(&format!(
+                "Export {} clips as {target} to {out_dir}? (requested by an external MCP client)",
+                clip_ids.len()
+            ))
+            .await
+    {
+        return Err(CoreError::Unavailable(
+            "export denied: the user did not approve this externally-requested write".into(),
+        ));
+    }
+    let results = e.export_clips(project_id, &clip_ids, &out_dir, &target).await?;
+    Ok(json!({ "results": results }))
 });
 
 handler!(h_create_project, |e, a, _s| {
@@ -1098,23 +1137,6 @@ handler!(h_set_preferences, |e, a, s| {
     Ok(serde_json::to_value(e.update_preferences(&a["preferences"], s)?)?)
 });
 
-handler!(h_connect_external, |e, a, _s| {
-    let conn =
-        crate::mcp::client::connect_external(e, arg_str(a, "provider")?, arg_str(a, "api_key")?)?;
-    Ok(serde_json::to_value(conn)?)
-});
-
-handler!(h_escalate_to_frontier, |e, a, _s| {
-    let outcome = crate::mcp::client::escalate_to_frontier(
-        e,
-        arg_uuid(a, "project_id")?,
-        arg_str(a, "instruction")?,
-        arg_str(a, "connection_id")?,
-    )
-    .await?;
-    Ok(serde_json::to_value(outcome)?)
-});
-
 // ---------------------------------------------------------- the registry
 
 macro_rules! tool {
@@ -1138,7 +1160,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("import_media", "Probe a local video file and return its metadata. With project_id, attach it to that project: a project with no media gets it (and a fresh timeline); a project whose video was moved can be relinked to the same video at a new path (same duration, size, frame rate — cuts, history, and transcript are kept). A different video is refused: create a new project, or use append_media.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["file_path"]),
         agent: false, meta: false, h_import_media),
-    tool!("transcribe", "Transcribe the project's media on-device into time-aligned text.",
+    tool!("transcribe", "Transcribe the project's media on-device into time-aligned text. Afterwards the app polishes punctuation with its model in the background (on-device, or on Claude when the user has switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),
     tool!("detect_silences", "PREVIEW dead-air ranges (read-only): word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only. To actually remove them, use remove_silences.",
@@ -1192,10 +1214,10 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_global_padding", "Apply breathing room (seconds) to the start/end of all talking clips at once.",
         || obj(json!({"project_id": pid_schema(), "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}), &["project_id", "start_s", "end_s"]),
         agent: true, meta: false, mutating: true, h_set_global_padding),
-    tool!("attach_screen_media", "Attach a dual-capture screen file to a project (probed; rides the same clock as the primary media). set_layout then controls compositing.",
+    tool!("attach_screen_media", "Attach a screen recording that started at the same moment as the project's camera file (probed; offset 0, so both play on one clock). set_layout then controls compositing.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
         agent: false, meta: false, h_attach_screen_media),
-    tool!("set_layout", "Presentation layout for dual-capture projects (screen_media): mode pip|camera|screen, shape rounded|round, corner tl|tr|bl|br, size 0.10-0.45 (camera width fraction). Composited at preview/export; source files untouched.",
+    tool!("set_layout", "Presentation layout for projects with a screen recording (screen_media): mode pip|camera|screen, shape rounded|round, corner tl|tr|bl|br, size 0.10-0.45 (camera width fraction). Composited at preview/export; source files untouched.",
         || obj(json!({"project_id": pid_schema(), "mode": {"type": "string"}, "shape": {"type": "string"}, "corner": {"type": "string"}, "size": {"type": "number"}}), &["project_id"]),
         agent: false, meta: false, h_set_layout),
     tool!("set_audio_offset", "A/V sync nudge, seconds (clamped to ±2). POSITIVE delays audio — the fix when you hear words before lips move (mics start before cameras warm up). Applied non-destructively at preview and export; not an undoable edit.",
@@ -1204,13 +1226,13 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("append_media", "Append another video file to the END of the project's source (lossless concat to a new file; originals untouched; existing cuts keep their timestamps; timeline extends with an included clip). Inputs must match codec/resolution. Undo history and checkpoints are extended to cover the new footage; the append itself is not an undoable edit. Re-run transcribe afterwards to caption the appended span.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["project_id", "file_path"]),
         agent: false, meta: false, h_append_media),
-    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one on-device model pass per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the on-device beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
+    tool!("outline_transcript", "Split the FULL transcript into story beats (hook/setup/point/example/tangent/recap/outro) with titles, summaries, cut_priority (1=spine, 5=cut first), and segment_ids. SLOW: runs one model pass (on-device unless the user switched the app to Hosted) per ~5 min of video, so on long transcripts it can exceed an MCP client's tool timeout — it exists for the in-app LOCAL agent. If you are a frontier orchestrator, prefer read_transcript (paged) and build the outline yourself; only call this for short clips or when you specifically want the app's own beat map. Cached per transcript; refresh=true recomputes (use when an outline came out degenerate).",
         || obj(json!({"project_id": pid_schema(), "refresh": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_outline_transcript),
-    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower on-device semantic pass per seam.",
-        || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "on-device semantic pass per seam (slower); default false runs only the instant deterministic checks"}}), &["project_id"]),
+    tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower model pass per seam (on-device unless the user switched the app to Hosted).",
+        || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "a model pass per seam (slower; on-device unless the app is in Hosted mode); default false runs only the instant deterministic checks"}}), &["project_id"]),
         agent: true, meta: false, h_review_flow),
-    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several local-model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
+    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
         agent: true, meta: false, mutating: true, h_story_edit),
     tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: ranks still-included segments by how central they are to the video (least-central tangents cut first; intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
@@ -1234,7 +1256,7 @@ static REGISTRY: &[ToolSpec] = &[
             {"type": "object", "properties": {"type": {"const": "set_global_padding"}, "start_s": {"type": "number"}, "end_s": {"type": "number"}, "linked": {"type": "boolean"}}, "required": ["type", "start_s", "end_s"]}
         ]}}}), &["project_id", "edits"]),
         agent: true, meta: false, mutating: true, h_apply_edits),
-    tool!("apply_instruction", "Delegate a natural-language edit to the ON-DEVICE model's agent loop (slow; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
+    tool!("apply_instruction", "Delegate a natural-language edit to the app's agent loop (the on-device model, or Claude in Hosted mode; meant for the in-app chat). External orchestrators should use find_segments + apply_edits directly instead.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "history": {"type": "array", "description": "recent chat turns, oldest first", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["user", "agent"]}, "text": {"type": "string"}}}}}), &["project_id", "instruction"]),
         agent: false, meta: true, h_apply_instruction),
     tool!("generate_chapters", "Generate YouTube-style chapters from the transcript.",
@@ -1249,8 +1271,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
-    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8), min_s/max_s playable length bounds (default 15-60). Scored by the on-device model when reachable, else heuristically (method says which). Save one with create_clip (rank).",
-        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}}), &["project_id"]),
+    tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, pieces, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8, at most 60), min_s/max_s playable length bounds (default 15-60). scan: true judges moments from every part of the video and skips moments already saved as clips (use with a larger count, e.g. 40); it can take minutes, longer than some clients wait — the list still persists, so read it with get_clip_candidates. min_score drops moments the model scored below it. One run per project at a time. Scored by the app's model (on-device, unless the user switched the app to Hosted, then Claude) when reachable, else heuristically: method says which, and each candidate's scorer names the model. Save one with create_clip (rank), several with create_clips.",
+        || obj(json!({"project_id": pid_schema(), "theme": {"type": "string", "description": "only find clips about this topic (a few words)"}, "count": {"type": "integer", "description": "how many to return, 1-60 (default 8)"}, "min_s": {"type": "number", "description": "shortest playable length, seconds"}, "max_s": {"type": "number", "description": "longest playable length, seconds"}, "scan": {"type": "boolean", "description": "judge moments from every part of the video (slower)"}, "min_score": {"type": "number", "description": "drop moments the model scored below this (0-100)"}, "multi_moment": {"type": "boolean", "description": "also propose shorts made of several pieces (not available yet; ignored)"}}), &["project_id"]),
         agent: true, meta: false, h_find_clips),
     tool!("get_clip_candidates", "The candidates from the latest find_clips run, best first (no recompute).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
@@ -1258,6 +1280,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("create_clip", "Save a CLIP — a standalone edit made of one or more pieces of the video, played back to back, in format landscape (16:9, default for picked pieces) or vertical (9:16 short, default for candidates). Pieces from: rank (1 = top find_clips candidate) or candidate_id; OR segment_ids (whole transcript sentences, any number, from anywhere); OR ranges [{start, end}] in seconds; OR start + end. The clip keeps the current cut's removals inside its pieces, and later main-cut edits don't change it. (Not to be confused with the main timeline's clips that trim_clip / split_clip edit.)",
         || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_clips list, 1 = best"}, "candidate_id": {"type": "string"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id"]),
         agent: true, meta: false, h_create_clip),
+    tool!("create_clips", "Make several find_clips candidates into saved clips at once (vertical 9:16 shorts unless format says otherwise), then frame each short's crop on the speaker before returning. Returns {clips: [SavedClipSummary], errors: [{candidate_id, message}]}: a candidate whose material was cut from the main edit since the scan stays listed and is reported in errors; the rest are still made.",
+        || obj(json!({"project_id": pid_schema(), "candidate_ids": {"type": "array", "items": {"type": "string"}, "description": "ids from find_clips / get_clip_candidates"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id", "candidate_ids"]),
+        agent: true, meta: false, h_create_clips),
     tool!("list_clips", "List saved clips: {id, title, ranges, format, crop_x, start, end, duration, score, reason, hook, created_at}.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_list_clips),
@@ -1273,6 +1298,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "clip_id", "target", "out_path"]),
         agent: false, meta: false, h_export_clip),
+    tool!("export_clips", "Export several saved clips into one folder, one file each, named NN-<title>.<ext> in the order given (never overwrites: an existing name gets -2, -3…). target defaults to mp4 (vertical clips render 1080x1920); any export target works. One failure doesn't stop the rest. Returns {results: [{clip_id, path, error}]} in the order given.",
+        || obj(json!({"project_id": pid_schema(), "clip_ids": {"type": "array", "items": {"type": "string"}}, "out_dir": {"type": "string", "description": "folder to write into (created if missing; ~ expands)"}, "target": {"type": "string", "description": "mp4 (default) | premiere_xml | fcp_xml | resolve_xml | edl | otio | srt | txt"}}), &["project_id", "clip_ids", "out_dir"]),
+        agent: false, meta: false, h_export_clips),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
         || obj(json!({"name": {"type": "string"}, "file_path": {"type": "string"}}), &["name"]),
         agent: false, meta: false, h_create_project),
@@ -1332,12 +1360,6 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("set_preferences", "Update user preferences: pass only the keys to change (merged into the current preferences; unknown keys are rejected). Only the user, in the app, can point inference_endpoint off this machine.",
         || obj(json!({"preferences": {"type": "object"}}), &["preferences"]),
         agent: false, meta: false, h_set_preferences),
-    tool!("connect_external", "Opt in to an external frontier provider (stores key in OS keychain).",
-        || obj(json!({"provider": {"type": "string"}, "api_key": {"type": "string"}}), &["provider", "api_key"]),
-        agent: false, meta: true, h_connect_external),
-    tool!("escalate_to_frontier", "Send an instruction to the connected frontier model. Explicit opt-in only; never auto-invoked.",
-        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "connection_id": {"type": "string"}}), &["project_id", "instruction", "connection_id"]),
-        agent: false, meta: true, h_escalate_to_frontier),
 ];
 
 #[cfg(test)]

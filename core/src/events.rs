@@ -23,10 +23,13 @@ pub enum ProgressTask {
     RoughCut,
     Export,
     ModelDownload,
-    Recording,
     ModelPull,
     RuntimeInstall,
     FindClips,
+    /// `create_clips`: framing each new short on the speaker.
+    MakeClips,
+    /// `export_clips`: the whole batch (the per-clip render events are folded in).
+    ExportClips,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +72,14 @@ pub enum CoreEvent {
     /// Saved clips or clip candidates changed (by any caller) — refetch them.
     ClipsChanged {
         project_id: Uuid,
+    },
+    /// Where the AI steps actually run changed (Hosted fell back to Local,
+    /// came back, or the key was rejected) — the top-bar chip follows it.
+    ModelRoute {
+        mode: crate::model::ModelMode,
+        effective: crate::model::ModelMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::model::RouteReason>,
     },
     McpReady {
         url: String,
@@ -128,6 +139,7 @@ impl CoreEvent {
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
             CoreEvent::ClipsChanged { .. } => "clips-changed",
+            CoreEvent::ModelRoute { .. } => "model-route",
             CoreEvent::McpReady { .. } => "mcp-ready",
             CoreEvent::ConfirmRequest { .. } => "confirm-request",
             CoreEvent::TerminalOutput { .. } => "terminal-output",

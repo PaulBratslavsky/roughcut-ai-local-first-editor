@@ -8,7 +8,7 @@ import { useStore } from "@tanstack/react-store";
 import { useCreateClip, useTimeline } from "../ipc/queries";
 import type { ClipFormat } from "../ipc/types";
 import { clearClipDraft, previewRanges, setActiveTab, viewStore } from "../state/viewStore";
-import { errText, FORMAT_LABEL } from "./ClipsPanel";
+import { errText, FORMAT_LABEL } from "./clipUtil";
 
 export function ClipDraftBar({ projectId }: { projectId: string }) {
   const draft = useStore(viewStore, (s) => s.clipDraft);

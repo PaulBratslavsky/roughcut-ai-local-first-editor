@@ -41,10 +41,11 @@ function savePrefs(s: PersistedPrefs): void {
 }
 
 export type ActiveTab = "tools" | "chat" | "footage" | "clips" | "history" | "terminal";
-export type AppScreen = "editor" | "recorder";
+/** The editor (default) or the Shorts review. */
+export type AppScreen = "editor" | "shorts";
 
 export interface ViewState {
-  /** App-level screen: the editor (default) or the full-screen recorder. */
+  /** App-level screen: the editor (default) or Shorts. */
   screen: AppScreen;
   projectId: string | null;
   playhead: number; // seconds, source time
@@ -68,6 +69,9 @@ export interface ViewState {
   /** Auditioning a clip: play these pieces back to back, then pause. Gaps
    *  between pieces are skipped. Cleared by any seek. */
   audition: Range[] | null;
+  /** The audition is a scan candidate (Shorts screen): the preview shows a
+   *  centred 9:16 window, where its short would start. */
+  auditionIsCandidate: boolean;
   /** The clip being assembled in the transcript ("Add to clip"): pieces in
    *  source order, not yet saved. */
   clipDraft: Range[];
@@ -90,6 +94,7 @@ export const viewStore = new Store<ViewState>({
   selectedSegmentIds: [],
   activeTab: "tools",
   audition: null,
+  auditionIsCandidate: false,
   clipDraft: [],
   cropClipId: null,
   ...loadPrefs(),
@@ -137,8 +142,9 @@ export function seekTo(t: number): void {
   }));
 }
 
-/** Play these pieces back to back once and stop — auditioning a clip. */
-export function previewRanges(ranges: Range[]): void {
+/** Play these pieces back to back once and stop — auditioning a clip (or,
+ *  with `candidate`, a scan candidate on the Shorts screen). */
+export function previewRanges(ranges: Range[], opts: { candidate?: boolean } = {}): void {
   const pieces = [...ranges].sort((a, b) => a.start - b.start);
   if (pieces.length === 0) return;
   viewStore.setState((s) => ({
@@ -146,6 +152,7 @@ export function previewRanges(ranges: Range[]): void {
     playhead: Math.max(0, pieces[0]!.start),
     seekNonce: s.seekNonce + 1,
     audition: pieces,
+    auditionIsCandidate: !!opts.candidate,
     playing: true,
   }));
 }

@@ -4,6 +4,7 @@
 // current point is marked; future (undone) rows render dimmed.
 
 import { useHistory, useJumpTo } from "../ipc/queries";
+import { errText } from "./clipUtil";
 
 const SOURCE_ICON: Record<string, string> = {
   ui: "✋",
@@ -31,7 +32,7 @@ export function HistoryPanel({ projectId }: { projectId: string }) {
   const jumpTo = (id: string | null) =>
     jump.mutate({ project_id: projectId, action_id: id });
   const jumpError = jump.isError
-    ? String((jump.error as { message?: string })?.message ?? jump.error)
+    ? errText(jump.error)
     : null;
 
   // Newest first for reading; remember each row's original chronological index

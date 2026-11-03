@@ -2,8 +2,8 @@
 
 ## Overview
 
-`roughcut_core::mcp` (declared `pub mod mcp;` in `core/src/lib.rs`) is where the
-editor talks to models outside the app. It has two halves:
+`roughcut_core::mcp` (declared `pub mod mcp;` in `core/src/lib.rs`) exposes the
+editor to models outside the app:
 
 - **Server** (`server.rs`): exposes the tool registry (`core/src/tools.rs`) to
   external MCP clients as JSON-RPC at `POST http://127.0.0.1:<port>/mcp`,
@@ -14,15 +14,17 @@ editor talks to models outside the app. It has two halves:
   `mcp.json` file that `start` writes (see Invariants). The app also passes the
   endpoint to its in-app terminal, where Claude Code can connect to it over
   HTTP directly.
-- **Client** (`client.rs`): the opt-in outbound path. It stores the user's API
-  key for a frontier provider and runs the same agent loop
-  (`crate::agent::run_instruction_with`) against that provider through an
-  OpenAI-compatible client.
+
+The old outbound "frontier" client (`client.rs`: `connect_external`,
+`escalate_to_frontier`) was removed with Hosted mode (ADR-0007): the user's
+LOCAL / HOSTED switch (`crate::engine::route`, `crate::adapters::anthropic`)
+now covers every AI step, with the key in the OS key store
+(`crate::secrets`).
 
 The JSON-RPC layer is hand-written on top of axum. `rmcp` is not a dependency.
 The `mod.rs` doc says the build spec names `rmcp`, and that the module keeps
 rmcp's shape so a transport swap stays inside this directory. `mod.rs` holds
-only that doc comment and the two `pub mod` declarations. It has no re-exports.
+only that doc comment and the `pub mod server` declaration. It has no re-exports.
 
 In this README, `<data dir>` means `crate::store::data_dir()`. That is
 `dirs::data_dir()/roughcut`, or `./roughcut` (relative to the working
@@ -57,17 +59,6 @@ The `initialize` `instructions` string tells the client how to use the tools
 `cut_range`, `apply_edits`, `review_flow`). Those tools are defined in
 `core/src/tools.rs`, not here. Update the string if they are renamed.
 
-### `client.rs`
-
-| Item | Signature | Used by |
-| --- | --- | --- |
-| `connect_external` | `pub fn connect_external(editor: &Editor, provider: &str, api_key: &str) -> Result<ExternalConnection>` | `h_connect_external` (tool `connect_external`) in `core/src/tools.rs` |
-| `escalate_to_frontier` | `pub async fn escalate_to_frontier(editor: &Editor, project_id: Uuid, instruction: &str, connection_id: &str) -> Result<InstructionOutcome>` | `h_escalate_to_frontier` (tool `escalate_to_frontier`) in `core/src/tools.rs` |
-
-The private items are `provider_endpoint`, `store_secret`, and `load_secret`.
-
-This directory has no subdirectories.
-
 ## Invariants
 
 ### Server
@@ -85,7 +76,7 @@ This directory has no subdirectories.
   `invalid or missing auth token`.
 - **MCP clients never get meta tools.** Both `tools/list` and `tools/call` pass
   `tools::Caller::Mcp`. For that caller, `Caller::can_use` returns `!spec.meta`,
-  so `apply_instruction`, `connect_external`, and `escalate_to_frontier` are not
+  so the meta tool `apply_instruction` is not
   listed. A `tools/call` for one of them returns `isError: true` with
   `not available to MCP clients`. `Caller::Mcp` also turns on strict argument
   validation and credits edits to `ActionSource::McpClient`. Keep passing
@@ -156,51 +147,6 @@ This directory has no subdirectories.
   not the shim's `ROUGHCUT_MCP_ENDPOINT`, so a shim started from that shell
   still falls back to `mcp.json`.
 
-### Client
-
-- **Opt-in only.** The module doc says these functions run only after an
-  explicit user action. Both of their tools are registered with `meta: true`,
-  so only `Caller::Ui` can call them. `Caller::Mcp` and `Caller::Agent` cannot.
-- **One secret per provider string.** `connect_external` always creates a new
-  `ExternalConnection` with id `Uuid::new_v4()`, `enabled: true`, and
-  `api_key_ref = "roughcut-<provider>"`. Two connections with the same
-  provider string share one stored secret, and the newer key replaces the older
-  one.
-- **The provider is not validated on connect.** `connect_external` accepts any
-  provider string and stores the secret. An unknown provider is rejected only
-  when `escalate_to_frontier` runs.
-- **`escalate_to_frontier` errors.** The function checks these conditions in
-  this order:
-
-  | Condition | Error |
-  | --- | --- |
-  | `connection_id` is not a UUID | `CoreError::InvalidArg("connection_id is not a uuid")` |
-  | No kv entry for the connection | `CoreError::NotFound("external connection (run connect_external first)")` |
-  | The kv entry does not parse as an `ExternalConnection` | `CoreError::InvalidArg(<serde_json error>)` |
-  | The connection has `enabled == false` | `CoreError::InvalidArg("connection is disabled")` |
-  | On macOS, `security` cannot be spawned | `CoreError::Io` |
-  | No secret in the keychain or the secrets file | `CoreError::NotFound("credential <key_ref>")` |
-  | The provider string is unknown (checked after the secret loads) | `CoreError::InvalidArg("unknown provider '<provider>' — pass a full OpenAI-compatible base URL instead")` |
-
-  Store errors and errors from the agent loop are returned unchanged.
-- **Same agent loop, same undo path.** `escalate_to_frontier` calls
-  `agent::run_instruction_with` with an empty history (`&[]`) and
-  `ActionSource::McpClient`. Its edits therefore go through the normal undoable
-  path and are marked as externally driven.
-- **Provider mapping.** `provider_endpoint` maps the provider string to a base
-  URL and default model:
-
-  | Provider string | Base URL | Default model |
-  | --- | --- | --- |
-  | starts with `http://` or `https://` | the string itself | `"default"` |
-  | `claude` or `anthropic` | `https://api.anthropic.com/v1` | `claude-sonnet-4-6` |
-  | `openai` | `https://api.openai.com/v1` | `gpt-4o` |
-  | anything else | none; returns `CoreError::InvalidArg` | |
-
-  The env var `FRONTIER_MODEL`, when set, replaces the default model.
-- **Trimmed secrets.** `load_secret` trims surrounding whitespace from the
-  secret, whether it comes from the keychain or from the file.
-
 ## Side Effects
 
 ### Server (`start` and `handle`)
@@ -222,30 +168,6 @@ This directory has no subdirectories.
   `delete_project`, that includes a confirmation request to the UI (see
   Invariants).
 
-### Client
-
-- **`store_secret`.** On macOS it spawns `security add-generic-password -U -a
-  roughcut -s <key_ref> -w <secret>`, which puts the secret in the process
-  arguments. On other platforms, or when `security` exits non-zero, it writes
-  the secret in plaintext to `<data dir>/secrets/<key_ref>`. On unix it then
-  sets mode `0o600`. The mode is set after the write, so a newly created file
-  briefly has the default, umask-based permissions. If `security` cannot be
-  spawned at all, the error is returned and no file is written.
-  - **Known gap:** for a URL provider, `key_ref` contains `/`. The file
-    fallback creates only `secrets/`, so the write to the nested path fails.
-    The macOS keychain path does not have this problem.
-- **`load_secret`.** On macOS it spawns
-  `security find-generic-password -a roughcut -s <key_ref> -w` and reads the
-  secret from stdout. When that command exits non-zero, or on other platforms,
-  it reads `<data dir>/secrets/<key_ref>`. If `security` cannot be spawned, it
-  returns `CoreError::Io` and does not read the file.
-- **`connect_external`.** It writes the secret as described above, then stores
-  the connection as JSON under kv `external_connection:<uuid>`.
-- **`escalate_to_frontier`.** It reads the kv entry, the secret, and the env
-  var `FRONTIER_MODEL`. It then sends outbound HTTP requests carrying the API
-  key to the provider through `crate::adapters::OpenAiCompatClient`. The agent
-  loop can also edit the project.
-
 ## Verification
 
 - Run (from the workspace root): `cargo test -p roughcut-core`
@@ -254,6 +176,6 @@ This directory has no subdirectories.
   This test checks the 401 response without a token, then `initialize`,
   `tools/list` (with the meta tools hidden), `tools/call`, and the refusal of
   meta tools over the wire.
-- No test covers `client.rs`. This directory has no `#[cfg(test)]` modules.
+- This directory has no `#[cfg(test)]` modules.
 - The e2e test starts the server with `start_with(.., None)`, so it never
   writes `<data dir>/mcp.json` and cannot point `mcp-shim` at a test server.

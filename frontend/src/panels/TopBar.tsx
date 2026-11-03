@@ -1,13 +1,16 @@
-// Top chrome: project switcher, new-video button, undo/redo, export menu.
+// Top chrome: project switcher, new-video button, the LOCAL / HOSTED model
+// chip, the Shorts / Editor screen switch, undo/redo, export menu.
 
 import { useState } from "react";
+import { useStore } from "@tanstack/react-store";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
-import { setProjectId, setScreen } from "../state/viewStore";
+import { setProjectId, setScreen, viewStore } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { ExportMenu } from "./ExportMenu";
+import { ModelChip } from "./ModelChip";
 import { currentTheme, toggleTheme } from "../theme";
 import { SetupPanel } from "./SetupPanel";
 
@@ -25,8 +28,8 @@ export function TopBar({
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
+  const onShorts = useStore(viewStore, (s) => s.screen === "shorts");
 
-  const [newOpen, setNewOpen] = useState(false);
   const onNewVideo = async () => {
     const id = await newProjectFromDialog();
     if (id) {
@@ -92,39 +95,13 @@ export function TopBar({
             {projectName}
           </span>
         )}
-        <div className="export-menu new-video-menu">
-          <button
-            className="new-video-btn"
-            title="Load a video file or record a new one"
-            onClick={() => setNewOpen((v) => !v)}
-          >
-            + New video
-          </button>
-          {newOpen && (
-            <div className="export-dropdown">
-              <button
-                className="export-item"
-                onClick={() => {
-                  setNewOpen(false);
-                  void onNewVideo();
-                }}
-              >
-                ▸ Open a video file…
-              </button>
-              {isTauri && (
-                <button
-                  className="export-item"
-                  onClick={() => {
-                    setNewOpen(false);
-                    setScreen("recorder");
-                  }}
-                >
-                  ● Record camera
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <button
+          className="new-video-btn"
+          title="Open a video file (an OBS recording, a camera file, …) as a new project"
+          onClick={() => void onNewVideo()}
+        >
+          + New video
+        </button>
         <button
           className="icon-btn delete-project-btn"
           title="Delete this project (keeps the video file)"
@@ -137,6 +114,14 @@ export function TopBar({
         </button>
       </div>
       <div className="topbar-right">
+        <ModelChip />
+        <button
+          className="screen-btn"
+          title={onShorts ? "Back to the editor" : "Scan the video for shorts and make them in bulk"}
+          onClick={() => setScreen(onShorts ? "editor" : "shorts")}
+        >
+          {onShorts ? "Editor" : "Shorts"}
+        </button>
         <button
           className="icon-btn"
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}

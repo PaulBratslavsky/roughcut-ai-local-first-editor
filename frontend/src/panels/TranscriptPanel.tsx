@@ -31,6 +31,7 @@ import type { Range } from "../playback/time";
 import { ClipDraftBar } from "./ClipDraftBar";
 import { callTool, onAppEvent } from "../ipc/api";
 import type { CutSuggestion, ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
+import { errText } from "./clipUtil";
 
 const normalize = (w: string) => w.toLowerCase().replace(/[^a-z']/g, "");
 
@@ -251,7 +252,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     try {
       await callTool("transcribe", { project_id: projectId });
     } catch (err) {
-      setTranscribeError(String((err as { message?: string })?.message ?? err));
+      setTranscribeError(errText(err));
     } finally {
       setTranscribeStarting(false);
     }

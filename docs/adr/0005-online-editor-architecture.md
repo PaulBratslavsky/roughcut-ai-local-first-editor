@@ -35,7 +35,8 @@ What doesn't transfer:
   embeddings run on the user's machine.
 - **~30 bespoke shell commands** outside the registry (ADR-0004): recording,
   PTY, Resolve integration, model/toolchain provisioning, `reveal_path`,
-  privacy settings.
+  privacy settings. (Recording and the privacy-settings commands were later
+  removed: ADR-0008.)
 
 ## Decision
 
@@ -63,7 +64,7 @@ Browser (React SPA) ──HTTPS/WS──► API server (axum + roughcut-core) �
 | LLM | Ollama on localhost | Hosted API or self-hosted vLLM via `OpenAiCompatClient` |
 | Exports | file in `~/Downloads` | Object in the bucket + signed URL. MP4 is a job |
 | MCP | localhost + stdio shim | Remote MCP (streamable HTTP) with OAuth |
-| Recording | native capture | `getDisplayMedia` + `MediaRecorder`, uploaded as media |
+| Recording | none: removed in ADR-0008 (record in OBS, import the file) | none: upload the file like any other media |
 | PTY, Resolve, provisioning, `reveal_path` | shell commands | Dropped from the web build |
 
 Deployment:

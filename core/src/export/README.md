@@ -19,8 +19,9 @@ MP4 rendering to the video adapter.
 
 Callers outside this module:
 
-- The `export` and `export_clip` tool handlers in `core/src/tools.rs`. These
-  handlers ask the user to approve writes that an external MCP client requests.
+- The `export`, `export_clip` and `export_clips` tool handlers in
+  `core/src/tools.rs`. These handlers ask the user to approve writes that an
+  external MCP client requests (`export_clips` asks once for the batch).
   This module does no approval check of its own.
 - The `generate_captions` tool handler in `core/src/tools.rs`, which calls
   `export::srt::write` directly on `Editor::snapshot` output and bypasses
@@ -38,6 +39,7 @@ Callers outside this module:
 | `default_extension` | `pub fn default_extension(target: &str) -> &'static str` | File extension for a target. Never fails: unknown targets map to `"txt"`. |
 | `Editor::export` | `pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String>` | `snapshot`, then the private `write_export(.., None)`. Returns the written path after `~/` expansion. |
 | `Editor::export_clip` | `pub async fn export_clip(&self, project_id: Uuid, clip_id: Uuid, target: &str, out_path: &str) -> Result<String>` | Exports one saved clip by running the same writers on the clip's timeline (see Invariants). Returns the written path after `~/` expansion. |
+| `Editor::export_clips` | `pub async fn export_clips(&self, project_id: Uuid, clip_ids: &[Uuid], out_dir: &str, target: &str) -> Result<Vec<ClipExportResult>>` | Exports several saved clips into `out_dir` (created; `~/` expands), one at a time, as `NN-<slug>.<ext>` (`batch_file_name`), never overwriting (`reserve_path` creates each name empty with `create_new`, adding `-2`, `-3`, … when taken; a failed clip's file is removed). An unknown project, an empty id list or an unknown target fails before any folder is made. A failed clip becomes a result with `error`; the rest still run. Progress: a `BatchSink` turns each render's `export` events into one `export_clips` task at `(i + f) / n`, drops the per-clip "render complete", and the batch ends with "exported k of n". |
 | `Editor::snapshot` | `pub fn snapshot(&self, project_id: Uuid) -> Result<(Project, Option<Transcript>)>` | Synchronous. Returns clones of the project and its transcript, for callers that only read. |
 | `pub mod edl`, `fcpxml`, `otio`, `srt`, `txt`, `xmeml` | | The format writers listed below. |
 
@@ -161,7 +163,8 @@ There are no subdirectories.
     `<file id=".."/>`.
   - Clipitem ids are `clipitem-v{n}` (camera), `clipitem-a{n}` (audio), and
     `clipitem-s{n}` (screen), with `n` starting at 1.
-- **xmeml with `screen_media` (dual capture)**:
+- **xmeml with `screen_media` (a screen file that starts with the camera
+  file)**:
   - Screen clipitems use the camera's record and source frames and the
     camera's fps.
   - Each screen clip's out point is clamped to
@@ -215,12 +218,14 @@ There are no subdirectories.
     `project.name`, so only those targets show it. `srt`, `txt`, and `mp4`
     output is unaffected (`RenderJob` has no name field).
   - `project.timeline` is replaced with `clip.timeline`.
+  - The MP4 render gets `clip.piece_spans()` (one input per piece); the main
+    `export` gets `[timeline.play_spans()]` (one piece).
   - `vertical_crop_x` is `Some(clip.crop_x)` only when
     `clip.format == ClipFormat::Vertical`, and only the `mp4` render uses it
     (to render 9:16).
-- `expand_tilde` changes only a leading `~/`, which it replaces with
-  `dirs::home_dir()` joined with the rest of the path. A bare `~`, a `~user`
-  path, or a system with no home directory leaves the path unchanged.
+- `expand_tilde` changes a bare `~` or a leading `~/`, which it replaces with
+  `dirs::home_dir()` (joined with the rest of the path). A `~user` path, or a
+  system with no home directory, leaves the path unchanged.
 - `snapshot` returns owned clones. The project and the transcript are read
   under separate lock acquisitions, so together they are not an atomic
   snapshot.
@@ -239,7 +244,8 @@ There are no subdirectories.
   - I/O errors become `CoreError::Io`.
 - **MP4 render** (`Editor::write_export`, `target == "mp4"`):
   - Builds `crate::adapters::video::RenderJob` and awaits
-    `self.video().render_mp4(&job, &self.sink())`.
+    `self.video().render_mp4(&job, sink)`, where `sink` is the Editor's own,
+    or `export_clips`' `BatchSink` wrapping it.
   - This module does not create the parent directory for this path.
   - The rendering itself happens in the `VideoEngine` implementations in
     `core/src/adapters/video.rs` (`FfmpegCli`, `MockVideoEngine`,

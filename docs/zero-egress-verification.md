@@ -2,8 +2,8 @@
 
 **Claim:** core editing makes no network calls beyond this machine. The only
 sanctioned egress is a user-triggered model download (Hugging Face, sha256
-verified). The optional frontier path (`connect_external`) is opt-in and was
-not configured during this run.
+verified). Hosted mode (the user's LOCAL / HOSTED switch, ADR-0007) is the
+one opt-in exception for AI steps; this run was in Local mode.
 
 ## Method
 
@@ -46,5 +46,32 @@ was given), demonstrating the destructive-op protection in the same run.
 Caveats: `lsof` sampling at 2 Hz could miss a sub-half-second connection;
 for adversarial assurance use a packet capture (`tcpdump -i en0`) or Little
 Snitch instead. The architecture-level guarantee remains the code itself —
-the only `reqwest::get` to a non-configurable remote URL in the codebase is
-the model downloader in `core/src/setup.rs`.
+the only requests to a fixed remote URL in the codebase are the model
+downloader in `core/src/setup.rs` and, in Hosted mode only (or when the user
+saves or tests a key in Setup), `core/src/adapters/anthropic.rs`
+(`https://api.anthropic.com`).
+
+## Hosted mode (2026-10-31, ADR-0007)
+
+Hosted mode is off by default and can only be turned on in the app (a Tauri
+command, not a tool), after a stored API key and the user's confirmation of
+what is sent. To verify both modes:
+
+1. Resolve Anthropic's addresses at test time: `dig +short api.anthropic.com`.
+2. **Local mode with a key stored** — run the session above while sampling
+   `lsof -nP -i -a -p <pid>` at 2 Hz. Expected: no non-loopback peers (a
+   stored key changes nothing while the switch is on Local). The one
+   exception is a key check the user starts in Setup (Save or Test), which
+   calls `GET /v1/models/{model}` once.
+3. **Hosted mode** — the same session. Expected: non-loopback peers only
+   among the addresses from step 1, and only while an AI step runs (outline,
+   scan, chat, story edit, flow review with `llm`, cleanup, chapters, title)
+   or a key is checked. Search, face framing and export make no off-machine
+   connections in either mode. Transcription itself stays on-device, but in
+   Hosted mode it is followed by the background clean-up, which sends the
+   transcript to Claude.
+
+What Hosted sends is text: transcripts (with segment times and ids), the
+project name, the user's chat and recent chat turns, the agent's tool
+results (which can include the media file's path) and the app's prompts.
+Never video, audio, frames or thumbnails.

@@ -431,6 +431,12 @@ impl Timeline {
         tl
     }
 
+    /// The stretches of source that play, in output order: the included
+    /// clips as they sit in the timeline.
+    pub fn play_spans(&self) -> Vec<PlaySpan> {
+        self.included_clips().map(|c| PlaySpan { source_in: c.source_in, source_out: c.source_out }).collect()
+    }
+
     /// Map a source time to output (record) time, skipping excluded regions.
     pub fn source_to_output(&self, t: f64) -> f64 {
         let mut out = 0.0;
@@ -590,10 +596,113 @@ pub struct Preferences {
     /// same OpenAI-compatible endpoint as the chat model).
     #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
+    /// Where the AI steps run: on this machine, or on Claude with the user's
+    /// key. Only the user, in the app, changes it (never `set_preferences`).
+    #[serde(default)]
+    pub model_mode: ModelMode,
+    /// The Claude model Hosted mode uses: one of [`HOSTED_MODELS`].
+    #[serde(default = "default_hosted_model")]
+    pub hosted_model: String,
+    /// When the user confirmed what Hosted mode sends. Hosted runs refuse to
+    /// start without it.
+    #[serde(default)]
+    pub hosted_consent_at: Option<DateTime<Utc>>,
 }
 
 fn default_embedding_model() -> String {
     std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "nomic-embed-text".into())
+}
+
+fn default_hosted_model() -> String {
+    HOSTED_MODELS[0].0.to_string()
+}
+
+/// Where the AI steps run.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMode {
+    /// Ollama / llama-server on this machine. Works offline.
+    #[default]
+    Local,
+    /// Claude through the Messages API with the user's own key.
+    Hosted,
+}
+
+/// The Claude models Hosted mode offers, best first: (model id, display name).
+/// The one place ids map to names.
+pub const HOSTED_MODELS: &[(&str, &str)] = &[
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+];
+
+/// "Claude Opus 5.5" for a known id; the id itself otherwise (a refusal
+/// fallback can answer with a model outside the list).
+pub fn hosted_model_name(id: &str) -> String {
+    HOSTED_MODELS.iter().find(|(m, _)| *m == id).map(|(_, n)| n.to_string()).unwrap_or_else(|| id.to_string())
+}
+
+/// The result of checking an API key against Anthropic (no tokens spent).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyCheck {
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// What saving or forgetting the Hosted API key did.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct HostedKeyResult {
+    pub status: ModelStatus,
+    /// Present when a key was given: whether it checked out.
+    pub check: Option<KeyCheck>,
+    /// The key was stored (it checked out, or couldn't be checked offline).
+    pub saved: bool,
+}
+
+/// Why the AI steps aren't running where the user chose.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteReason {
+    /// Anthropic couldn't be reached (no network, timeout).
+    Offline,
+    /// Anthropic kept answering 429.
+    RateLimited,
+    /// Anthropic kept answering 5xx / 529.
+    ServerError,
+    /// Anthropic rejected the key (401 / 403).
+    KeyRejected,
+    /// Hosted is on but no key is stored.
+    NoKey,
+}
+
+/// The model switch as the app shows it (the top-bar chip and Setup).
+/// In memory apart from the preference fields; reading it never touches the
+/// network or the key store.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelStatus {
+    /// What the user chose.
+    pub mode: ModelMode,
+    pub hosted_model: String,
+    pub hosted_model_name: String,
+    pub key_present: bool,
+    pub consented: bool,
+    /// Where the last AI request actually ran.
+    pub effective: ModelMode,
+    /// Why `effective` differs from `mode`, or why Hosted is failing.
+    pub reason: Option<RouteReason>,
+    pub last_ok_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
 }
 
 impl Default for Preferences {
@@ -611,6 +720,9 @@ impl Default for Preferences {
             inference_model: std::env::var("INFERENCE_MODEL")
                 .unwrap_or_else(|_| "gemma4:26b".into()),
             embedding_model: default_embedding_model(),
+            model_mode: ModelMode::Local,
+            hosted_model: default_hosted_model(),
+            hosted_consent_at: None,
         }
     }
 }
@@ -670,6 +782,59 @@ pub struct Project {
 pub struct SourceRange {
     pub start: f64,
     pub end: f64,
+}
+
+/// How much two lists of pieces are the same moment: the source seconds
+/// they share (summed over every pair of pieces) as a fraction of the
+/// shorter list's source seconds. Cut material counts; 0 when either is empty.
+pub fn pieces_overlap(a: &[SourceRange], b: &[SourceRange]) -> f64 {
+    let total = |p: &[SourceRange]| p.iter().map(|r| (r.end - r.start).max(0.0)).sum::<f64>();
+    let shorter = total(a).min(total(b));
+    if shorter <= 0.0 {
+        return 0.0;
+    }
+    let shared: f64 = a
+        .iter()
+        .flat_map(|x| b.iter().map(move |y| (x.end.min(y.end) - x.start.max(y.start)).max(0.0)))
+        .sum();
+    shared / shorter
+}
+
+/// One stretch of source that plays, in output order. Exports and the MP4
+/// render walk a list of these instead of a timeline, so a clip's pieces can
+/// play in an order other than the source's.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlaySpan {
+    pub source_in: f64,
+    pub source_out: f64,
+}
+
+impl PlaySpan {
+    pub fn duration(&self) -> f64 {
+        (self.source_out - self.source_in).max(0.0)
+    }
+}
+
+/// A candidate `create_clips` could not make (its material was cut from the
+/// main edit since the scan, or it is no longer listed).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct ClipBatchError {
+    pub candidate_id: Uuid,
+    pub message: String,
+}
+
+/// One clip's outcome in `export_clips`: the written path, or why not.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct ClipExportResult {
+    pub clip_id: Uuid,
+    pub path: Option<String>,
+    pub error: Option<String>,
 }
 
 /// The frame a saved clip renders in.
@@ -749,6 +914,29 @@ pub struct SavedClipSummary {
 }
 
 impl SavedClip {
+    /// What plays, grouped by piece in `ranges` order: for each piece, the
+    /// kept stretches of the clip's timeline inside it, clipped to it.
+    pub fn piece_spans(&self) -> Vec<Vec<PlaySpan>> {
+        self.ranges
+            .iter()
+            .map(|r| {
+                self.timeline
+                    .included_clips()
+                    .filter_map(|c| {
+                        let (a, b) = (c.source_in.max(r.start), c.source_out.min(r.end));
+                        (b - a > EPS).then_some(PlaySpan { source_in: a, source_out: b })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|spans| !spans.is_empty())
+            .collect()
+    }
+
+    /// Every stretch that plays, in output order.
+    pub fn play_spans(&self) -> Vec<PlaySpan> {
+        self.piece_spans().into_iter().flatten().collect()
+    }
+
     pub fn summary(&self) -> SavedClipSummary {
         SavedClipSummary {
             id: self.id,
@@ -774,8 +962,13 @@ impl SavedClip {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipCandidate {
     pub id: Uuid,
+    /// The covered span: the earliest piece start and the latest piece end.
     pub start: f64,
     pub end: f64,
+    /// The pieces the short plays, in play order. One piece for a single
+    /// stretch. Never empty once loaded (`Project::upgrade` fills old ones).
+    #[serde(default)]
+    pub pieces: Vec<SourceRange>,
     /// Playable seconds (cuts inside the range don't count).
     pub duration: f64,
     pub title: String,
@@ -789,6 +982,10 @@ pub struct ClipCandidate {
     /// The theme it was found for, if the search asked for one.
     #[serde(default)]
     pub theme: Option<String>,
+    /// The model that scored it ("Claude Opus 5.5", or the local model's
+    /// name); None for a rule-based score.
+    #[serde(default)]
+    pub scorer: Option<String>,
 }
 
 /// A named, self-contained snapshot of the timeline — a "save point" the
@@ -936,6 +1133,12 @@ impl Project {
                 clip.ranges = vec![SourceRange { start: clip.start, end: clip.end }];
             }
         }
+        // Candidates from before multi-piece shorts were one stretch.
+        for c in &mut self.clip_candidates {
+            if c.pieces.is_empty() {
+                c.pieces = vec![SourceRange { start: c.start, end: c.end }];
+            }
+        }
     }
 
     pub fn fps(&self) -> f64 {
@@ -953,19 +1156,6 @@ pub struct ProjectSummary {
     /// Present when the project sits in the trash.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
-}
-
-// --------------------------------------------------- external connections
-
-#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts-bindings", ts(export))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalConnection {
-    pub id: Uuid,
-    pub provider: String,
-    /// Reference into the OS keychain (never the raw key).
-    pub api_key_ref: String,
-    pub enabled: bool,
 }
 
 #[cfg(test)]
@@ -1037,6 +1227,78 @@ mod tests {
         assert_eq!(c.format, ClipFormat::Vertical);
         assert_eq!(c.ranges, vec![SourceRange { start: 5.0, end: 25.0 }]);
         assert_eq!(c.crop_x, 0.5);
+    }
+
+    #[test]
+    fn old_preferences_load_in_local_mode_with_opus_as_the_hosted_model() {
+        let mut doc = serde_json::to_value(Preferences::default()).unwrap();
+        let obj = doc.as_object_mut().unwrap();
+        for k in ["model_mode", "hosted_model", "hosted_consent_at"] {
+            obj.remove(k);
+        }
+        let p: Preferences = serde_json::from_value(doc).unwrap();
+        assert_eq!(p.model_mode, ModelMode::Local);
+        assert_eq!(p.hosted_model, "claude-opus-5-5");
+        assert!(p.hosted_consent_at.is_none());
+        assert_eq!(hosted_model_name("claude-sonnet-5-5"), "Claude Sonnet 5.5");
+        assert_eq!(hosted_model_name("claude-x"), "claude-x");
+    }
+
+    #[test]
+    fn old_candidates_load_as_one_piece() {
+        let mut p = Project::new("old");
+        p.timeline = Timeline::new(60.0);
+        let mut doc = serde_json::to_value(&p).unwrap();
+        doc["clip_candidates"] = serde_json::json!([{
+            "id": Uuid::new_v4(), "start": 5.0, "end": 25.0, "duration": 20.0,
+            "title": "t", "hook": "h", "reason": "r", "score": 70.0,
+            "segment_ids": [], "method": "heuristic"
+        }]);
+        let mut loaded: Project = serde_json::from_value(doc).unwrap();
+        loaded.upgrade();
+        assert_eq!(loaded.clip_candidates[0].pieces, vec![SourceRange { start: 5.0, end: 25.0 }]);
+    }
+
+    #[test]
+    fn play_spans_keep_only_kept_material_piece_by_piece() {
+        let mut main = Timeline::new(100.0);
+        main.set_range_included(14.0, 16.0, false, ClipOrigin::Manual);
+        let ranges = vec![SourceRange { start: 10.0, end: 20.0 }, SourceRange { start: 50.0, end: 60.0 }];
+        let clip = SavedClip {
+            id: Uuid::new_v4(),
+            title: "c".into(),
+            ranges: ranges.clone(),
+            format: ClipFormat::Vertical,
+            crop_x: 0.5,
+            start: 10.0,
+            end: 60.0,
+            timeline: main.restricted_to(&ranges),
+            score: None,
+            reason: String::new(),
+            hook: String::new(),
+            created_at: Utc::now(),
+        };
+        let pieces = clip.piece_spans();
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(
+            pieces[0],
+            vec![PlaySpan { source_in: 10.0, source_out: 14.0 }, PlaySpan { source_in: 16.0, source_out: 20.0 }]
+        );
+        assert_eq!(pieces[1], vec![PlaySpan { source_in: 50.0, source_out: 60.0 }]);
+        assert_eq!(clip.play_spans().len(), 3);
+        // The main cut: its included clips, in order.
+        assert_eq!(main.play_spans().len(), 2);
+    }
+
+    #[test]
+    fn pieces_overlap_is_shared_source_over_the_shorter() {
+        let r = |a: f64, b: f64| SourceRange { start: a, end: b };
+        assert_eq!(pieces_overlap(&[r(0.0, 30.0)], &[r(40.0, 70.0)]), 0.0);
+        assert!((pieces_overlap(&[r(0.0, 30.0)], &[r(20.0, 30.0)]) - 1.0).abs() < 1e-9);
+        // Two pieces vs one: 10s shared of the 20s total of the shorter.
+        let two = [r(0.0, 10.0), r(50.0, 60.0)];
+        assert!((pieces_overlap(&two, &[r(55.0, 100.0)]) - 0.25).abs() < 1e-9);
+        assert_eq!(pieces_overlap(&[], &two), 0.0);
     }
 
     #[test]

@@ -26,7 +26,15 @@ function fmt(t: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-export function PreviewPanel({ projectId }: { projectId: string }) {
+export function PreviewPanel({
+  projectId,
+  shortsGuide = false,
+}: {
+  projectId: string;
+  /** Shorts screen: while a scan candidate plays, a centred 9:16 window over
+   *  the picture (where its short starts before face framing). */
+  shortsGuide?: boolean;
+}) {
   const { data: project } = useProject(projectId);
   const { data: timeline } = useTimeline(projectId);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -36,11 +44,21 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
   const playhead = useStore(viewStore, (s) => s.playhead);
   const skipCuts = useStore(viewStore, (s) => s.skipCuts);
   const collapsed = useStore(viewStore, (s) => s.previewCollapsed);
+  const candidatePlaying = useStore(
+    viewStore,
+    (s) => s.audition !== null && s.auditionIsCandidate && s.cropClipId === null,
+  );
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
-  // Some sources can't stream in a <video> tag (mp4 index at the end); the
-  // core then provides a remuxed playable copy alongside peaks/thumbnails.
+  // Some sources can't stream in a <video> tag (an mp4 index at the end, an
+  // OBS .mkv); the core then builds a playable copy in the background and
+  // media-assets-changed swaps it in.
   const { data: assets } = useMediaAssets(projectId);
+  const preparing =
+    isTauri &&
+    !!project?.media &&
+    !assets?.playback_path &&
+    !/\.(mp4|mov|m4v)$/i.test(project.media.file_path);
   const src = useMemo(() => {
     if (!project?.media) return null;
     const path = assets?.playback_path ?? project.media.file_path;
@@ -51,6 +69,15 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
 
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
   const [videoError, setVideoError] = useState<string | null>(null);
+  // Until the copy lands, a file WebKit can't open just fails: say it's
+  // being prepared instead of showing a player error.
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    // A new source (the copy landing) starts clean: the original's error
+    // mustn't flash while the copy loads.
+    setLoaded(false);
+    setVideoError(null);
+  }, [src]);
 
   // A/V sync nudge: with a non-zero offset the <video> is muted and a shadow
   // <audio> of the same source carries the sound, shifted by the offset and
@@ -200,7 +227,7 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             playsInline
             onError={() =>
               setVideoError(
-                "screen track missing or unplayable (was the file deleted from the library?) — Tools ▸ Layout ▸ camera only",
+                "screen track missing or unplayable (was the file moved or deleted?) — Tools ▸ Layout ▸ camera only",
               )
             }
           />
@@ -214,7 +241,10 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
             className="preview-video"
             onTimeUpdate={onTimeUpdate}
             onEnded={() => setPlaying(false)}
-            onLoadedData={() => setVideoError(null)}
+            onLoadedData={() => {
+              setVideoError(null);
+              setLoaded(true);
+            }}
             onError={() => {
               const err = videoRef.current?.error;
               setVideoError(
@@ -235,14 +265,26 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
           </div>
         )}
 
-        {videoError && (
+        {preparing && !loaded && assets?.playback_error ? (
           <div className="preview-error" role="alert">
-            {videoError}
+            Couldn't make a copy this player can open: {assets.playback_error}. Editing,
+            transcription and export still use the original file.
           </div>
+        ) : preparing && !loaded ? (
+          <div className="preview-preparing" role="status">
+            Preparing preview… (making a copy this player can open; the original is untouched)
+          </div>
+        ) : (
+          videoError && (
+            <div className="preview-error" role="alert">
+              {videoError}
+            </div>
+          )
         )}
 
         {/* A 9:16 clip's crop, when one is being framed (Clips ▸ crop). */}
         <CropGuide projectId={projectId} frameW={w} frameH={h} />
+        {shortsGuide && candidatePlaying && <CentredGuide frameW={w} frameH={h} />}
 
         {/* Big center affordance while paused */}
         {!playing && (
@@ -332,6 +374,19 @@ export function PreviewPanel({ projectId }: { projectId: string }) {
         >
           {collapsed ? "▸ show video" : "▾ hide video"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** A fixed, centred 9:16 window (nothing to drag): where a short made from
+ *  a candidate starts before face framing moves its crop. */
+function CentredGuide({ frameW, frameH }: { frameW: number; frameH: number }) {
+  const win = Math.min(1, (frameH * 9) / 16 / Math.max(1, frameW));
+  return (
+    <div className="crop-guide passive" aria-hidden>
+      <div className="crop-window" style={{ left: `${((1 - win) / 2) * 100}%`, width: `${win * 100}%` }}>
+        <span className="crop-label">9:16</span>
       </div>
     </div>
   );

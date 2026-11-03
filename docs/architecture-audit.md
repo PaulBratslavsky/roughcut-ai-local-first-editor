@@ -91,11 +91,11 @@ checklist item 8.
 | B15 | llama-server outlives a crash on a fixed port; next launch's health check passes against the orphan. | `llm_runtime.rs:17, 262, 271-285` |
 | B16 | `pty_write` is a sync Tauri command (main thread) doing a blocking write under the global sessions lock — a >1 KB paste into a busy shell freezes the UI. | `lib.rs:259-262`, `pty.rs:109-114` |
 | B17 | `cargo test` overwrites the live `mcp.json` (e2e starts the real server; `data_dir()` can't be overridden). | `tests/e2e.rs:140`, `mcp/server.rs:60-64` |
-| B18 | Recording races: stop-during-pause drops the last take; concurrent starts orphan an ffmpeg holding the camera. | `record.rs:464-508, 677-688` |
+| B18 | Recording races: stop-during-pause drops the last take; concurrent starts orphan an ffmpeg holding the camera. **Resolved: the recorder was removed (ADR-0008).** | `record.rs:464-508, 677-688` |
 | F2 | Errors render as `[object Object]` on desktop: Tauri rejects `{error:{code,message}}`, the mock `{code,message}`; 11 sites unwrap the wrong one. | `HistoryPanel.tsx:34` et al. |
 | F3 | Panel-local copies of core state survive a project switch (`<Editor>` not keyed) — Apply writes project A's padding into B. | `App.tsx:232`, `InspectorPanel.tsx:273-280` |
 | F4 | Transcript "segment is cut" is inferred from `linked_segment_ids`, which are provenance, not current state — wrong after partial restores. | `TranscriptPanel.tsx:251-257` |
-| F5 | "Screen only" recording opens the webcam anyway. | `RecorderPanel.tsx:339` |
+| F5 | "Screen only" recording opens the webcam anyway. **Resolved: the recorder was removed (ADR-0008).** | `RecorderPanel.tsx:339` |
 | F6 | `set_audio_offset`, `set_preferences`, `attach_screen_media` emit no event → MCP-driven changes never reach the UI; re-transcribe leaves a stale suggestions banner. | `projects.rs:185-218`, `queries.ts:109-114` |
 
 ### Packaging / security posture
@@ -105,7 +105,8 @@ checklist item 8.
   script in the page is a shell. Set a real CSP, scope assets per imported
   file, restrict commands with an `AppManifest`. (`tauri.conf.json:24-32`)
 - No `Info.plist` camera/mic usage strings or entitlements — a signed build
-  likely can't record. (`app/src-tauri`)
+  likely can't record. (`app/src-tauri`) **Resolved: the recorder was removed
+  (ADR-0008), so the app needs no camera or mic access.**
 - `install_llama_server` runs an unpinned, unverified `releases/latest`
   binary. (`llm_runtime.rs:127-157`)
 - `mcp.json` is 0644, non-atomic, never removed; the token never rotates and
@@ -128,8 +129,9 @@ Corrections to existing checklist items are applied in
    `jump_to`, `undo_actions`, `accept_*` are wrong in the mock only).
    ADR-0003's "WASM timeline" next step, or shared golden vectors.
 3. **Host commands seam.** 31 bespoke Tauri commands (recording, PTY,
-   Resolve, permissions) outside any written trust category; each costs a
-   Rust + TS wrapper + mock stub. `isTauri` appears 45× outside `api.ts`.
+   Resolve, permissions; the recording and permission ones were removed in
+   ADR-0008) outside any written trust category; each costs a Rust + TS
+   wrapper + mock stub. `isTauri` appears 45× outside `api.ts`.
 4. **Inference has no injection point** (`Editor::inference()` always builds
    a live client), so the 330-line online agent loop and every LLM path have
    0 tests. The LLM-or-heuristic fork is copied 7×; `llm::ask_json` is dead.
@@ -137,8 +139,8 @@ Corrections to existing checklist items are applied in
    flow >50%, planner ≥0.2 s, agent context ignores inclusion). One
    `Timeline::coverage` policy.
 6. **Child-process lifecycle has no owner** — PTY, recording, llama-server
-   are three globals the shell must remember to stop; ffmpeg renders aren't
-   tracked at all. A `Supervisor`.
+   are three globals the shell must remember to stop (recording was removed
+   in ADR-0008); ffmpeg renders aren't tracked at all. A `Supervisor`.
 7. **Per-project persisted state has no single owner** — tables + `journal:`
    / `outline:` kv + file cache; `Store` has no unit of work.
 8. **Events aren't generated** — `CoreEvent` payloads are hand-typed in TS;
