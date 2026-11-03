@@ -1,5 +1,6 @@
 // First-run flow: drop a video (or pick one), then
-// create_project -> import_media -> transcribe with a progress bar.
+// create_project { name, file_path } (probes and attaches the video in one
+// step) -> transcribe, with a progress bar. See ingest.ts.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";

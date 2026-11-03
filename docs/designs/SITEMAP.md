@@ -16,14 +16,14 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | ---- | ---- | ------ | ---------- | ----------- |
 | [bulk-shorts.md](bulk-shorts.md) | 2026-10-30 | Paul Bratslavsky | core/clip_finder, core/engine/clips, core/export, frontend/shorts, frontend/clips | Phase 1 implemented (Phases 2–3 to do): scan the whole video for shorts, review them as cards on a Shorts screen, make and export them in a batch; pieces of a clip in any play order; multi-moment shorts by condensing a stretch. |
 | [hosted-models.md](hosted-models.md) | 2026-10-31 | Paul Bratslavsky | core/adapters, core/engine, core/tools, app/src-tauri, frontend/setup, frontend/topbar | Implemented (live check pending): a Local / Hosted switch for every AI step; Hosted uses Claude's Messages API with the user's key in the OS key store, one model per run, visible errors instead of silent fallbacks, and only the user can turn it on; removes the hidden escalate_to_frontier path. |
-| [remove-recording.md](remove-recording.md) | 2026-11-03 | Paul Bratslavsky | core/adapters/record, core/adapters/video, core/engine/media, app, frontend/recorder, frontend/footage, frontend/preview | Implemented on `feat/remove-recording` (not merged): remove in-app recording; record in OBS as one file and import it; OBS `.mkv` files get a playable copy for the preview; adding footage no longer needs the recorder's folder; old dual-capture projects keep working. |
+| [remove-recording.md](remove-recording.md) | 2026-11-03 | Paul Bratslavsky | core/adapters/record, core/adapters/video, core/engine/media, app, frontend/recorder, frontend/footage, frontend/preview | Implemented and merged into `feat/shorts` (c6d6010): remove in-app recording; record in OBS as one file and import it; OBS `.mkv` files get a playable copy for the preview; adding footage no longer needs the recorder's folder; old dual-capture projects keep working. |
 
 ## Existing design artifacts
 
 | Link | Date | Author | Components | Description |
 | ---- | ---- | ------ | ---------- | ----------- |
-| [CONTEXT.md](../../CONTEXT.md) | 2026-06-16 | Paul Bratslavsky | all | Domain glossary: Project, Timeline/Clip, EditOp, SavedClip, ClipCandidate, Beat, Caller, adapters. The shared vocabulary for designs and reviews. |
-| [07-architecture.md](../07-architecture.md) | 2026-06-10 | Paul Bratslavsky | core, app, frontend, mcp-shim | Architecture and implementation guide: one tool registry with three callers, adapters, AI layer, MCP, persistence, the Tauri shell, the frontend. |
+| [CONTEXT.md](../../CONTEXT.md) | 2026-06-16 | Paul Bratslavsky | all | Domain glossary: Project, Timeline/Clip, EditOp, SavedClip, ClipCandidate, Shorts screen, Beat, Caller, adapters, ModelMode. The shared vocabulary for designs and reviews. |
+| [07-architecture.md](../07-architecture.md) | 2026-11-03 | Paul Bratslavsky | core, app, frontend, mcp-shim | Architecture and implementation guide: one tool registry with three callers, adapters, AI layer, MCP, persistence, the Tauri shell, the frontend. Rewritten to match `feat/shorts` (bulk shorts, Local / Hosted, OBS import, the in-app terminal). |
 | [tool-api.md](../tool-api.md) | 2026-06-10 | Paul Bratslavsky | core/tools, frontend/ipc | The tool contract every caller (UI, local agent, MCP clients) uses. Kept in sync with the registry by `core/tests/doc_parity.rs`. |
 | [01-product.md](../01-product.md) | 2026-06-10 | Paul Bratslavsky | product | Mission and product: a local-first, zero-egress AI video editor. |
 | [02-users.md](../02-users.md) | 2026-06-10 | Paul Bratslavsky | product | Target users and how they work. |
@@ -44,7 +44,13 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 | [export-validation.md](../export-validation.md) | 2026-06-10 | Paul Bratslavsky | core/export | NLE export validation against real editors. |
 | [zero-egress-verification.md](../zero-egress-verification.md) | 2026-06-10 | Paul Bratslavsky | all | How the zero-egress guarantee is verified. |
 
+There is no ADR-0006 here: that number was taken by the unmerged
+`feat/native-capture` branch (see ADR-0008).
+
 Features built before EGM without a design document of their own: **Clips**
 (saved clips, the clip finder, vertical export, face-framed crop) — see
 `SavedClip` / `ClipCandidate` in `CONTEXT.md` and the Clips section of
-`tool-api.md`.
+`tool-api.md`. Also without one: the **in-app terminal** (the editor's
+Terminal tab and the Shorts screen's terminal drawer, one shared shell) and
+**open over MCP** (an MCP client's `open_project` switches the app, via
+`project-opened`) — see [`07-architecture.md`](../07-architecture.md).

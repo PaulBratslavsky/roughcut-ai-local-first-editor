@@ -1,7 +1,9 @@
 # Tool API — the shared command surface
 
-One tool registry, three callers: the local agent loop (Gemma via llama.cpp/Ollama),
-external MCP clients (Claude Desktop via the stdio shim), and the UI (Tauri IPC).
+One tool registry, three callers: the in-app agent loop (the local model via
+llama.cpp/Ollama, or Claude in Hosted mode), external MCP clients (Claude Desktop
+via the stdio shim, Claude Code via the shim or directly over HTTP), and the UI
+(Tauri IPC).
 
 All times crossing this API are **seconds (f64)**. Internally the core is frame-exact
 (rational time, OTIO-style `value/rate`).
@@ -18,14 +20,22 @@ invoke<JsonValue>("call_tool", { name: string, args: object })
 
 // convenience commands (same dispatch underneath)
 invoke("list_tools")          // -> ToolDef[] { name, description, input_schema }
-invoke("mcp_endpoint_info")   // -> { url: string, token: string } for the MCP server
-// plus bespoke shell commands OUTSIDE the registry (ADR-0004): demo_mode,
-// setup_status, download_whisper_model, ollama_pull_model,
-// install_llama_server, download_gguf, start_managed_llm, reveal_path,
-// confirm_action, install_resolve_plugin, resolve_status, send_to_resolve
+invoke("mcp_endpoint_info")   // -> { url: string, token: string } | null (null until the MCP server is up)
+// plus bespoke shell commands OUTSIDE the registry (ADR-0004):
+//   core:      demo_mode, confirm_action
+//   OS:        reveal_path, open_external (three allowed sites only)
+//   setup:     setup_status, download_whisper_model (sha256-checked)
+//   local LLM: ollama_pull_model, install_llama_server, download_gguf,
+//              start_managed_llm
+//   hosted:    model_status, set_model_mode, set_hosted_model,
+//              set_hosted_key, check_hosted_key (see "Model switch")
+//   terminal:  pty_spawn { id, cols, rows }, pty_write { id, data },
+//              pty_resize { id, cols, rows }, pty_kill { id }
+//   Resolve:   install_resolve_plugin, resolve_status, send_to_resolve
 ```
 
-Events emitted by the core (listen via `@tauri-apps/api/event`):
+Events emitted by the core (listen via `@tauri-apps/api/event`); `mcp-ready`
+is the one exception, emitted by the Tauri shell:
 
 | event | payload |
 |---|---|
@@ -35,8 +45,11 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 | `transcript-changed` | `{ project_id }` |
 | `projects-changed` | `{}` — library changed (create/duplicate/delete/restore); refetch `list_projects` |
 | `project-opened` | `{ project_id }` — an MCP client called `open_project`; the app switches to show that project (never sent for the UI's own calls) |
-| `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers) |
-| `mcp-ready` | `{ url, token }` — MCP server is up |
+| `clips-changed` | `{ project_id }` — saved clips or clip candidates changed (by any caller); refetch them |
+| `confirm-request` | `{ id, summary }` — externally-driven destructive op wants user approval (`confirm_action` Tauri command answers; no answer in 120 s = deny) |
+| `mcp-ready` | `{ url, token }` — MCP server is up. Emitted by the Tauri shell, not through the core's event sink; the frontend doesn't listen for it |
+| `terminal-output` | `{ id, data }` — a chunk of in-app terminal output; `data` is base64 of the raw bytes |
+| `terminal-exit` | `{ id, code? }` — the terminal's shell exited |
 | `media-assets-changed` | `{ project_id }` — peaks/thumbnails/playable copy finished generating in the background, or the playable copy failed; refetch `get_media_assets` |
 | `model-route` | `{ mode, effective, reason? }` — where the AI steps actually run changed (Hosted fell back to Local, came back, or the key was rejected); `reason`: `offline` \| `rate_limited` \| `server_error` \| `key_rejected` \| `no_key`. The app's LOCAL / HOSTED chip follows it |
 
@@ -44,10 +57,17 @@ Events emitted by the core (listen via `@tauri-apps/api/event`):
 Whether the AI steps run on the local model or on Claude (Hosted mode, ADR-0007) is the user's choice in the app. The switch, the hosted model and the API key are changed only by Tauri commands — `model_status`, `set_model_mode { mode, consent }`, `set_hosted_model { model }`, `set_hosted_key { key | null }`, `check_hosted_key` — never by a tool, so no MCP client or agent can turn Hosted on or read the key. `get_preferences` shows `model_mode` and `hosted_model`. In Hosted mode a step can fail with `hosted_no_key`, `hosted_not_consented`, `hosted_key_rejected` or `hosted_bad_request` (shown, never replaced by a rule-based result); `hosted_refused` / `hosted_truncated` affect one request.
 
 ### MCP
-Same tools exposed over a localhost HTTP JSON-RPC endpoint guarded by a per-install
-token; `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop. Exception:
-the orchestration meta-tool `apply_instruction` is neither advertised nor
-callable over MCP — an
+Same tools exposed over a localhost HTTP JSON-RPC endpoint,
+`POST http://127.0.0.1:<port>/mcp` with `Authorization: Bearer <token>` (a
+per-install token). The port is stable: saved and reused when free, a new one
+only if it is taken. The app writes `{ url, token }` to `<data dir>/mcp.json`.
+`mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop (or Claude Code).
+Claude Code can also connect over HTTP directly: the in-app terminal's shell
+has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its env, and its "Connect
+Claude Code" button runs `claude mcp add --transport http` with them.
+`initialize` returns an `instructions` string on how to use the tools.
+One tool is left out: the orchestration meta-tool `apply_instruction` is
+neither advertised nor callable over MCP — an
 external client IS an orchestrator and should compose the granular tools /
 `apply_edits` itself. MCP arguments are schema-checked (required fields and
 primitive types) before a handler runs.
@@ -159,7 +179,8 @@ A saved clip is a standalone edit made of one or more pieces of the long-form vi
 
 ```ts
 interface Media { id: string; file_path: string; duration: number; frame_rate: number;
-  width: number; height: number; audio_sample_rate: number; codec: string }
+  width: number; height: number; audio_sample_rate: number; codec: string;
+  imported_at: string }
 
 interface Word { text: string; start: number; end: number; confidence: number }
 
@@ -182,7 +203,9 @@ interface Timeline { id: string; clips: Clip[]; global_padding: Padding;
 // Edits are DATA: a serializable op plus exact snapshot inverse/redo
 // (see docs/adr/0002). The journal persists, so undo survives restarts.
 type EditOp =
-  | { type: "cut_range"; start: number; end: number; snap?: "none" | "word" | "sentence" }
+  | { type: "cut_range"; start: number; end: number }
+  // (`snap` is a tool argument only — `cut_range` / `apply_edits` resolve it
+  // to plain start/end before building the op)
   | { type: "restore_range"; start: number; end: number }
   | { type: "cut_segments"; segment_ids: string[] }
   | { type: "restore_segments"; segment_ids: string[] }
@@ -199,7 +222,9 @@ interface EditAction { id: string; kind: string; source: "ui"|"local_ai"|"mcp_cl
 // not on the public action (ADR-0002)
 
 interface Project { id: string; name: string; media: Media | null;
-  timeline: Timeline; created_at: string; updated_at: string }
+  timeline: Timeline; created_at: string; updated_at: string;
+  /* … plus checkpoints, suggestions, saved_clips, clip_candidates and more:
+     see generated/Project.ts */ }
 // Note: preferences are GLOBAL (get/set_preferences) and read fresh at use
 // time — projects no longer carry a settings copy.
 
@@ -218,6 +243,8 @@ interface Preferences { default_padding: Padding;
 
 ## Demo mode
 
-`FABLE_DEMO=1` (or no whisper/ffmpeg binaries found) switches the Transcriber /
+`FABLE_DEMO=1` (or no ffmpeg/ffprobe found) switches the Transcriber /
 VideoEngine adapters to fixture-backed mocks so the full edit loop is drivable
 without media tooling installed. `import_media` accepts any path in demo mode.
+A missing whisper model does not start demo mode: `transcribe` fails with
+`unavailable` instead.

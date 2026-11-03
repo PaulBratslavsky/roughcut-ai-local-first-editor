@@ -25,8 +25,10 @@ the local agent loop and the UI. One tool set, three callers.
 - **"Make this 20 minutes"** — semantic duration planner ranks segments by importance (local embeddings) and batches the cut, via chat or one tool call
 - **Hybrid transcript search** — BM25 + local embeddings; "find the part about…" works on meaning, not keywords
 - **NLE hand-off** — Premiere/Resolve XML, FCPXML, EDL, OTIO, SRT, or a rendered MP4
-- **Claude can drive it** — 30+ MCP tools with batch editing; every external edit is tagged and undoable
-- **Zero egress** — the only network use is user-triggered model downloads; everything is verifiable with a network monitor
+- **Shorts** — scan the whole video for shorts, review the candidates as cards, make and export them in a batch; vertical 9:16 crops are framed on the speaker's face
+- **Claude can drive it** — 65 MCP tools with batch editing; every external edit is tagged and undoable
+- **In-app terminal** — run Claude Code inside the app; ask it to open a project and the app switches to it
+- **Zero egress** — the only network use is user-triggered downloads (models, runtimes) and, only when you turn it on, Hosted mode (text to Anthropic's API); everything is verifiable with a network monitor
 
 ---
 
@@ -36,7 +38,7 @@ macOS 11+ (Apple Silicon or Intel).
 
 ### Install
 
-**Option A — download:** grab the latest `.dmg` from
+**Option A — download:** grab the latest `.dmg` (Apple silicon) from
 [Releases](https://github.com/PaulBratslavsky/roughcut-ai-local-first-editor/releases)
 (unsigned for now: right-click → Open on first launch).
 
@@ -74,8 +76,10 @@ no restarts:
    [llama.cpp](https://github.com/ggml-org/llama.cpp) runtime. Without it,
    everything still works except conversational editing and semantic search.
 
-Without ffmpeg or a speech model the app runs in honest **demo mode** on
-fixture footage, so the whole edit loop is explorable with nothing installed.
+Without ffmpeg the app runs in honest **demo mode** on fixture footage, so
+the whole edit loop is explorable with nothing installed. Without a speech
+model the app is not in demo mode; transcription fails and says the model is
+missing.
 
 ### The edit loop
 
@@ -90,9 +94,14 @@ fixture footage, so the whole edit loop is explorable with nothing installed.
 
 ### Claude as your editor (MCP)
 
-Run the app once (it writes the endpoint + per-install token to
-`~/Library/Application Support/roughcut/mcp.json`), build the shim with
-`cargo build --release -p roughcut-mcp-shim`, then:
+**Claude Code, inside the app** — open the Terminal tab (or the terminal
+drawer under the Shorts player) and click **Connect Claude Code**. It runs
+`claude mcp add` against the running server for you; no shim needed. Then
+run `claude` in that terminal.
+
+**From outside the app** — run the app once (it writes the endpoint +
+per-install token to `~/Library/Application Support/roughcut/mcp.json`),
+build the shim with `cargo build --release -p roughcut-mcp-shim`, then:
 
 **Claude Desktop** — add to `claude_desktop_config.json`:
 
@@ -109,6 +118,9 @@ Run the app once (it writes the endpoint + per-install token to
 ```bash
 claude mcp add roughcut -- /path/to/target/release/roughcut-mcp-shim
 ```
+
+The port and token stay the same between launches (a new port only if
+another program took it), so you register once.
 
 Claude can then read the transcript in pages, search it semantically, land a
 batch of cuts in one `apply_edits` call, plan duration targets, and export.
@@ -173,11 +185,15 @@ the two surfaces can't silently drift. Keep it green.
 
 ```
 core/        Rust core — models, tool registry, agent loop, MCP server, export
-  engine/    the Editor: projects, media, edits+journal, semantic, confirmations
+  engine/    the Editor: projects, media, edits+journal, clips, semantic,
+             confirmations, route (LOCAL / HOSTED)
+  adapters/  ffmpeg, whisper, local LLM + embeddings, Anthropic, face framing
+  pty.rs     the in-app terminal (a login shell with the MCP URL + token)
 app/         Tauri v2 shell (src-tauri) wiring core ↔ frontend
 frontend/    React + TanStack UI; playback/ is the engine, timeline/ the canvas
 mcp-shim/    stdio ⇄ localhost proxy that Claude Desktop/Code spawn
 resolve-plugin/  DaVinci Resolve Scripts-menu integration
+scripts/     build-macos-app.sh — local signed app build
 docs/        planning docs, tool API contract, architecture walkthrough, ADRs
 ```
 
@@ -243,7 +259,7 @@ chat, prompts), never video or audio. Only you can turn it on, in the app
 
 ## Releases & packaging
 
-Tagging `vX.Y.Z` builds an unsigned macOS `.dmg` plus the MCP shim via
+Tagging `vX.Y.Z` builds an unsigned Apple silicon `.dmg` plus the MCP shim via
 [`release.yml`](.github/workflows/release.yml); signing/notarization activates
 automatically once Apple Developer secrets are added (see the workflow
 header). Deliberately **not** bundled, per the lean-app design: ffmpeg, model

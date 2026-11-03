@@ -55,8 +55,8 @@ Wire surface (one route, `POST /mcp`, handled by `handle`):
 | any other method | JSON-RPC error `-32601`, `method not found: <method>` |
 
 The `initialize` `instructions` string tells the client how to use the tools
-(`list_projects`, `read_transcript`, `outline_transcript`, `find_segments`,
-`cut_range`, `apply_edits`, `review_flow`). Those tools are defined in
+(`list_projects`, `open_project`, `read_transcript`, `outline_transcript`,
+`find_segments`, `cut_range`, `apply_edits`, `review_flow`). Those tools are defined in
 `core/src/tools.rs`, not here. Update the string if they are renamed.
 
 ## Invariants
@@ -80,10 +80,9 @@ The `initialize` `instructions` string tells the client how to use the tools
   listed. A `tools/call` for one of them returns `isError: true` with
   `not available to MCP clients`. `Caller::Mcp` also turns on strict argument
   validation and credits edits to `ActionSource::McpClient`. Keep passing
-  `Caller::Mcp`. `Caller::Ui` can use every tool, including the ones that send
-  data to a frontier provider.
+  `Caller::Mcp`. `Caller::Ui` can use every tool, including `apply_instruction`.
 - **External writes need the user's approval.** The `export`, `export_clip`,
-  and `delete_project` handlers in `core/src/tools.rs` check for
+  `export_clips`, and `delete_project` handlers in `core/src/tools.rs` check for
   `ActionSource::McpClient` and first await `Editor::request_confirmation`
   (`core/src/engine/confirm.rs`). That returns `false` when the user denies or
   does not answer within 120 s, and the tool then fails with
@@ -117,9 +116,7 @@ The `initialize` `instructions` string tells the client how to use the tools
 - **Port.** The listener binds `127.0.0.1` only. `start` tries the port saved
   in kv `mcp_port` first. If none is saved or that bind fails, it binds port 0
   and gets an ephemeral port. Either way, the port actually bound is written
-  back to `mcp_port`. `EndpointInfo.url` is `http://127.0.0.1:<port>/mcp`. The
-  header comment in `mcp-shim/src/main.rs` still says the app binds a new
-  random port on each launch. That comment is out of date.
+  back to `mcp_port`. `EndpointInfo.url` is `http://127.0.0.1:<port>/mcp`.
 - **`mcp.json` is a contract with `mcp-shim`.** `start` writes `EndpointInfo`
   as pretty JSON (`{url, token}`) to `<data dir>/mcp.json`. The shim reads `url`
   and `token` from `dirs::data_dir()/roughcut/mcp.json`. Renaming the fields or
@@ -164,9 +161,9 @@ The `initialize` `instructions` string tells the client how to use the tools
   `start_with(editor, None)` writes no file; the e2e test uses it so a test
   server never replaces the running app's endpoint.
 - **Tool calls.** `tools/call` has whatever side effects the dispatched tool
-  has, credited to `ActionSource::McpClient`. For `export`, `export_clip`, and
-  `delete_project`, that includes a confirmation request to the UI (see
-  Invariants).
+  has, credited to `ActionSource::McpClient`. For `export`, `export_clip`,
+  `export_clips`, and `delete_project`, that includes a confirmation request
+  to the UI (see Invariants).
 
 ## Verification
 

@@ -2,666 +2,878 @@
 
 This document explains how RoughCut works end to end: every layer, every
 feature, and where each one lives in the code. It is written for a developer
-who has never seen the codebase and wants to either contribute or build their
-own version of it. The planning docs (`01`–`06`) explain *why* the product is
-shaped this way; this document explains *how* the shipped code actually does it.
+who has never seen the codebase and wants to contribute or build their own
+version. The planning docs (`01`–`06`) explain *why* the product is shaped this
+way; this document explains *how* the code does it.
 
-Companion reference: [`tool-api.md`](tool-api.md) is the wire-level contract
-for the tool registry. This document is the narrative around it.
+Checked against the code on 2026-11-03 (branch `feat/shorts`, 166afad):
+bulk shorts, the LOCAL / HOSTED switch, OBS import instead of in-app
+recording, and the in-app terminal are all covered.
+
+Companions:
+- [`tool-api.md`](tool-api.md) — the wire-level contract for every tool,
+  event and shell command.
+- [`../CONTEXT.md`](../CONTEXT.md) — the domain glossary. Terms here follow it.
+- [`designs/SITEMAP.md`](designs/SITEMAP.md) — every design doc and ADR.
+- The module READMEs (`core/src/README.md`, `core/src/engine/README.md`,
+  `core/src/adapters/README.md`, `core/src/mcp/README.md`, …) — the contract
+  of each module in detail.
 
 ---
 
 ## 1. The big picture
 
-RoughCut is three programs that share one brain:
+RoughCut runs as **one desktop process**. Everything it needs runs on the
+user's Mac.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Desktop app (Tauri v2)                                             │
-│                                                                     │
-│  ┌──────────────────────────┐      ┌─────────────────────────────┐  │
-│  │  React frontend (WebView)│ IPC  │  Tauri shell (Rust)         │  │
-│  │  panels, canvas timeline │◄────►│  app/src-tauri/src/lib.rs   │  │
-│  │  TanStack Query + Store  │      │  4 commands, event bridge   │  │
-│  └──────────────────────────┘      └──────────────┬──────────────┘  │
-│                                                   │                 │
-│                       ┌───────────────────────────▼──────────────┐  │
-│                       │  roughcut-core (Rust crate)              │  │
-│                       │  • domain model + frame-exact time       │  │
-│                       │  • Editor engine (state, undo/redo)      │  │
-│                       │  • TOOL REGISTRY (32 tools)              │  │
-│                       │  • local agent loop (Gemma)              │  │
-│                       │  • detection (silence/filler/takes)      │  │
-│                       │  • export writers (XML/EDL/OTIO/SRT/MP4) │  │
-│                       │  • SQLite store                          │  │
-│                       │  • MCP server (localhost HTTP)           │  │
-│                       └──┬──────────┬──────────┬─────────────────┘  │
-│                          │          │          │                    │
-│                  ┌───────▼──┐ ┌─────▼─────┐ ┌──▼──────────────┐     │
-│                  │ ffmpeg / │ │ whisper-  │ │ Ollama / llama- │     │
-│                  │ ffprobe  │ │ cli       │ │ server (HTTP)   │     │
-│                  │ (CLI)    │ │ (CLI)     │ │ OpenAI-compat   │     │
-│                  └──────────┘ └───────────┘ └─────────────────┘     │
-└─────────────────────────────────────────────────────────────────────┘
-                                                   ▲
-                  ┌────────────────┐  stdio  ┌─────┴──────────┐
-                  │ Claude Desktop │◄───────►│ roughcut-mcp-  │  HTTP + Bearer token
-                  │ (or any MCP    │         │ shim (proxy)   │──► localhost MCP server
-                  │  client)       │         └────────────────┘
-                  └────────────────┘
+┌─ your Mac ─────────────────────────────────────────────────────────────────┐
+│                                                                            │
+│  ┌─ RoughCut.app · one process ─────────────────┐   adapters               │
+│  │                                              │                          │
+│  │  React UI (WebView): screens, timeline       │   ┌───────────────┐      │
+│  │     ▲ events             │ call_tool         │   │ ffmpeg /      │      │
+│  │     │                    ▼                   │   │ ffprobe       │      │
+│  │  Tauri shell: 25 commands, PTY               │   ├───────────────┤      │
+│  │     ▲ events             │ dispatch          │   │ Ollama /      │      │
+│  │     │                    ▼                   │   │ llama-server  │      │
+│  │  ┌─ roughcut-core ──────────────────────┐    │   ├───────────────┤      │
+│  │  │ Editor · registry (66) · agent loop  ├────┼──►│ Apple Vision  │      │
+│  │  │ whisper.cpp, in-process              │    │   ├───────────────┤      │
+│  │  │ MCP server 127.0.0.1:<port>/mcp      │    │   │ SQLite        │      │
+│  │  └─────────────────▲────────────────────┘    │   └───────────────┘      │
+│  └────────────────────┼─────────────────────────┘                          │
+│                       │ POST /mcp + Bearer token                           │
+│         ┌─────────────┴────────────────┐                                   │
+│   In-app terminal                Claude Desktop                            │
+│   Claude Code, direct HTTP       via roughcut-mcp-shim (stdio → HTTP)      │
+└────────────────────────────────────────────────────────────────────────────┘
+   Only Hosted mode (when the user turns it on) sends text to api.anthropic.com.
 ```
 
-The architecture is built around one idea: **a single tool registry with
-three callers**. Every operation the app can perform — import, transcribe,
-cut, trim, export — is a named tool with a JSON schema. The UI calls tools,
-the local LLM agent calls tools, and external MCP clients (Claude Desktop)
-call tools. There is exactly one implementation of each operation, and every
-mutation, regardless of who triggered it, is recorded, undoable, and tagged
-with its source (`ui` / `local_ai` / `mcp_client`).
+- The **React UI** draws the screens and keeps no data of its own.
+- The **Tauri shell** passes calls in and events out, and hosts the in-app
+  terminal's shell process.
+- The **Rust core** (`roughcut-core`) owns every project and does all the work.
+  It reaches the outside world only through **adapters**, so each helper can be
+  swapped or mocked.
+- Outside AI clients use the core's **MCP server**. Claude Code in the in-app
+  terminal connects to it directly over HTTP; Claude Desktop (or Claude Code
+  outside the app) goes through `roughcut-mcp-shim`.
 
-Six principles shape everything (see `README.md` and `docs/06-build-spec.md`):
+### The principles every change keeps
 
-1. **Local-first / zero egress by default** — the app is fully functional with
-   networking disabled; the only network calls are to localhost (Ollama) unless
-   the user switches the app to Hosted mode (Claude with their own key, text
-   only — ADR-0007). Only a human action can *enable* egress; once Hosted is
-   on, every caller's AI steps use it.
-2. **Non-destructive editing** — source media is never modified. Edits toggle
-   visibility of clip ranges; nothing is ever lost.
-3. **The Rust core owns all state** — the frontend is a pure view layer that
-   reads via tools and re-reads when the core says something changed.
-4. **One tool registry, three callers.**
-5. **Frame-exact time internally, seconds at the API edge.**
-6. **No accounts, no secrets in the repo.**
+1. **Local-first / zero egress by default.** The app works with networking off.
+   The only outbound traffic is downloads the user starts (models, runtimes)
+   and, only after the user turns it on, Hosted mode: text sent to Claude with
+   the user's own key (ADR-0007). Embeddings never leave the machine.
+2. **Non-destructive editing.** Source files are never changed. A cut hides a
+   range; restoring brings it back.
+3. **The Rust core owns all state.** The frontend reads through tools and
+   re-reads when the core says something changed.
+4. **One tool registry, three callers.** Every capability is one registry row;
+   who may call it is decided by `Caller`, nowhere else.
+5. **Frame-exact time inside, seconds at the API edge.**
+6. **No accounts, no secrets in the repo.** The Hosted key lives in the OS key
+   store.
 
 ### Repository layout
 
 ```
-core/          roughcut-core — the portable asset; all logic lives here
-  src/model.rs        domain types (Project, Timeline, Clip, Transcript…)
-  src/time.rs         frame-exact RationalTime, snapping, timecode
-  src/engine.rs       the Editor: state, mutations, undo/redo
-  src/tools.rs        the tool registry + dispatcher
-  src/agent.rs        local LLM agent loop + transcript cleanup + metadata
-  src/detect.rs       silence / filler / take detection, keyword search
-  src/adapters/       traits + impls: video (ffmpeg), transcribe (whisper),
-                      inference (OpenAI-compatible HTTP)
-  src/export/         srt, edl, fcpxml, xmeml (Premiere/Resolve), otio
-  src/store.rs        SQLite persistence
-  src/events.rs       EventSink trait + payload builders
-  src/mcp/            MCP server (axum)
-  src/engine/route.rs the LOCAL / HOSTED switch: per-run router, key, chip status
-  src/adapters/anthropic.rs  Claude Messages API client (Hosted mode)
-  src/secrets.rs      the Hosted API key in the OS key store
-  src/demo.rs         fixture media + transcript for demo mode
-  tests/e2e.rs        full edit loop + MCP-over-HTTP, runs on fixtures
-  examples/agent_live.rs  smoke test against a real local model server
-
-app/src-tauri/ Tauri v2 shell: 4 IPC commands, event bridge, MCP startup
-frontend/      React + TanStack UI; runs in a plain browser via a mock API
-mcp-shim/      tiny stdio⇄HTTP proxy so Claude Desktop can connect
-docs/          planning docs (01–06), tool-api.md, this document
+core/                 roughcut-core — all logic lives here
+  src/tools.rs          the tool registry, Caller policy and every handler
+  src/engine/           the Editor (see §3)
+  src/model.rs          domain types (Project, Timeline, Clip, SavedClip, …)
+  src/time.rs           frame snapping and timecode
+  src/agent.rs          chat agent loop, transcript cleanup, metadata
+  src/detect.rs         silences, fillers, takes, keyword search
+  src/clip_finder.rs    short-form candidates (find_clips, the scan)
+  src/story.rs          outline, flow review, story edits
+  src/llm.rs            small JSON-prompt helpers over the inference client
+  src/llm_runtime.rs    the managed llama-server (install, start, stop)
+  src/adapters/         video (ffmpeg), transcribe (whisper), inference
+                        (OpenAI-compatible), anthropic (Claude API), embed,
+                        face (Apple Vision)
+  src/export/           edl, fcpxml, xmeml (Premiere/Resolve), otio, srt, txt
+  src/mcp/              MCP server (axum)
+  src/pty.rs            the in-app terminal's shell
+  src/store.rs          SQLite persistence
+  src/events.rs         CoreEvent (every event the core can emit)
+  src/secrets.rs        the Hosted API key in the OS key store
+  src/setup.rs, capabilities.rs   first-run checks, demo-mode detection
+  src/resolve.rs        DaVinci Resolve hand-off
+  src/demo.rs           fixture media + transcript for demo mode
+  tests/                e2e.rs, doc_parity.rs, mock_parity.rs
+  examples/             live smoke tests (agent_live, playable_check, …)
+app/src-tauri/        Tauri v2 shell (§12)
+frontend/             React + TanStack UI; runs in a browser on a mock API
+mcp-shim/             stdio ⇄ HTTP proxy for MCP clients that spawn a process
+resolve-plugin/       DaVinci Resolve Scripts-menu integration
+scripts/              build-macos-app.sh — signed local release build
+docs/                 planning docs, tool-api.md, this document, adr/, designs/
 ```
 
-Cargo workspace members: `core`, `app/src-tauri`, `mcp-shim`
-(root `Cargo.toml`). License: GPL-3.0.
+Cargo workspace members: `core`, `app/src-tauri`, `mcp-shim`. License: GPL-3.0.
 
 ---
 
-## 2. The domain model (`core/src/model.rs`, `core/src/time.rs`)
+## 2. The tool registry (`core/src/tools.rs`)
 
-### Project, Media, Transcript
+This is the centrepiece. Every operation is one `ToolSpec` row in `REGISTRY`:
+a name, a description, a JSON schema, a handler, and the flags `agent`,
+`meta` and `mutating`. One async dispatcher runs them all:
 
-A **Project** (`model.rs:439`) is the top-level unit: a name, optional
-imported `Media`, a `Timeline`, per-project `Preferences`, and timestamps.
-A project has at most one source video (MVP scope: single-track talking-head
-footage).
+```
+tools::dispatch(editor, name, args, caller)   // run a tool
+tools::defs(caller)                           // what this caller may see
+```
 
-**Media** (`model.rs:14`) is probe metadata only — path, duration, frame rate
-(possibly fractional, e.g. 29.97), resolution, audio sample rate, codec. The
-file itself is never touched.
+There are **66 rows**. **28** are `agent: true` (the in-app chat assistant may
+use them). **1** is `meta: true`: `apply_instruction`, which starts the agent
+loop itself.
 
-A **Transcript** (`model.rs:50`) belongs to a media file and holds ordered
-**TranscriptSegment**s (`model.rs:37`), each with:
+`Caller` decides what is visible *and* callable, so listing and calling can
+never disagree:
 
-- `start`/`end` in seconds, the spoken `text`, and word-level `words` —
-  every **Word** has its own `start`/`end`/`confidence`. Word timing is what
-  makes transcript-driven editing possible (click a word to seek, select words
-  to cut a precise range).
-- Analysis flags written by the detectors: `is_filler`, `is_silence`,
-  `take_group_id` + `is_best_take` (repeated takes of the same line are
-  grouped; the last take is presumed best).
+| Caller | Who | Sees | Extra rules | Edits credited to |
+|---|---|---|---|---|
+| `Ui` | the user's clicks, via the Tauri `call_tool` command | all 66 | none | `ui` |
+| `Agent { attribute_to }` | the chat assistant's loop | the 28 agent rows, never meta | arguments schema-checked | `attribute_to` (see §16) |
+| `Mcp` | Claude Code, Claude Desktop, any MCP client | 65 (all but meta) | arguments schema-checked; `export`, `export_clip`, `export_clips` and `delete_project` wait for the user's approval (§9) | `mcp_client` |
 
-### Timeline and clips — the editing model
+Because the agent never sees meta tools, a loop can't start another loop: the
+recursion guard is structural, not a prompt. The LOCAL / HOSTED switch, the
+Hosted key and toolchain installs are **not tools at all**; they are Tauri
+commands only the UI can call (ADR-0004, ADR-0007), so no AI client can turn
+on egress or read the key.
 
-The **Timeline** (`model.rs:108`) is the heart of the editor. It is a
-**contiguous partition of the source duration into ordered `Clip`s**. Every
-moment of source time belongs to exactly one clip; a clip is either
-`included: true` (appears in the output) or `included: false` (a cut). This
-representation makes "cutting" trivial and perfectly reversible: a cut is just
-a region whose clip(s) are flipped to excluded.
-
-Each **Clip** (`model.rs:89`) stores:
-
-- `source_in` / `source_out` — frame-snapped boundaries in source seconds
-- `included` — in or out of the output
-- `order` — position in the timeline
-- `origin: ClipOrigin` — provenance: `Initial | AiCut | Manual | Split`
-- `linked_segment_ids` — which transcript segments motivated this cut, so the
-  transcript panel can show a strikethrough exactly where the timeline has a cut
-
-Every mutation ends with `Timeline::normalize()` (`model.rs:149`): sort by
-`source_in`, drop empty clips, merge adjacent clips with the same state, and
-recompute `order` and `cut_count`. Because normalize runs after every edit,
-the partition invariant can never drift, and all editing operations are
-implemented as simple range manipulations:
-
-- `set_range_included(start, end, included, origin)` (`model.rs:204`) — the
-  primitive behind cut/restore. It ensures boundaries exist at `start` and
-  `end` (splitting covering clips), then flips the state of clips in between.
-- `cut_linked(...)` (`model.rs:225`) — same, but records the motivating
-  transcript segment ids on the affected clips.
-- `trim_clip` (`model.rs:240`) — moves a clip's edges while keeping the
-  partition contiguous by adjusting neighbors.
-- `split_clip` (`model.rs:266`) — splits at a time, marking origin `Split` so
-  normalize won't immediately merge the halves back.
-- `apply_padding` (`model.rs:296`) — "breathing room": extends included clips
-  slightly into adjacent excluded gaps. Implemented as an idempotent delta so
-  re-applying with a new value adjusts rather than accumulates.
-- `source_to_output(t)` (`model.rs:340`) — maps source time to output time,
-  skipping cuts; used by the SRT writer and the player.
-
-### Time: frame-exact inside, seconds at the edge
-
-All public APIs (tools, JSON, frontend) use `f64` seconds — clean to read and
-serialize. Internally, anything that must be exact goes through
-`core/src/time.rs`:
-
-- `snap_to_frame(seconds, fps)` (`time.rs:48`) — every boundary entering the
-  timeline (cut, trim, split) is snapped to the nearest frame **before** the
-  mutation, in `engine.rs`. So the model only ever contains frame-aligned values.
-- `RationalTime` (`time.rs:12`) — integer `value/rate` arithmetic used by the
-  export writers, so a 29.97fps timeline survives the round-trip to an NLE
-  without float drift (rescaling goes through `i128`).
-- `timecode(seconds, fps)` (`time.rs:62`) — SMPTE-style `HH:MM:SS:FF` for EDL.
-
-### EditAction — the audit trail
-
-Every mutation produces an **EditAction** (`model.rs:367`): kind, timestamp,
-human-readable description, and crucially `source: ActionSource` —
-`Ui | LocalAi | McpClient`. The UI's chat panel, the undo stack, and the MCP
-audit story all hang off this one type: you can always answer "who did this
-edit and when, and can I undo it?" (always yes).
-
----
-
-## 3. The Editor engine (`core/src/engine.rs`)
-
-The `Editor` is the single stateful object in the system. It is a cheap-to-
-clone `Arc<Inner>` (`engine.rs:35`) holding:
-
-- `store: Box<dyn Store>` — SQLite persistence
-- `video: Box<dyn VideoEngine>` — ffmpeg or mock
-- `transcriber: Box<dyn Transcriber>` — whisper.cpp or mock
-- `sink: SharedSink` — where events go (the Tauri webview in production)
-- `state: Mutex<HashMap<Uuid, ProjectState>>` — per-project in-memory cache:
-  the `Project`, its `Transcript`, and the undo/redo stacks
-
-### Bootstrap and demo mode
-
-`Editor::bootstrap(sink)` (`engine.rs:71`) opens SQLite at the platform data
-dir and picks adapters via `adapters::demo_mode()` (`adapters/mod.rs:16`):
-if `FABLE_DEMO=1`, or ffmpeg/whisper aren't on PATH, the mock adapters are
-used and the entire edit loop runs on fixture footage (`core/src/demo.rs`).
-This is why CI and a fresh `git clone` work with nothing installed — demo
-mode is a first-class citizen, not a test hack. `Editor::test_instance()`
-(`engine.rs:89`) is the same thing with an in-memory store.
-
-### The mutation funnel
-
-Every edit goes through one function: `mutate_timeline()` (`engine.rs:337`).
-It snapshots the timeline, runs the mutation closure, normalizes, records an
-`UndoEntry { action, before, after }`, clears the redo stack, persists project
-and transcript, and emits a `timeline-changed` event. This single funnel is
-what guarantees properties the product promises: *everything* is undoable,
-*everything* is persisted, and the UI *always* finds out.
-
-Undo/redo (`engine.rs:622`) are plain stack pops that swap the stored `before`/
-`after` timeline snapshots back in — simple because timelines are small values,
-not object graphs.
-
-The public editing methods (`cut_range`, `restore_range`, `cut_by_transcript`,
-`trim_clip`, `split_clip`, `reorder_clip`, `set_global_padding`,
-`generate_rough_cut`, …) are thin wrappers: snap incoming times to frames,
-then call `mutate_timeline` with the corresponding `Timeline` operation.
-
-### Transcription flow
-
-`Editor::transcribe()` (`engine.rs:228`) extracts a 16 kHz mono WAV via the
-video adapter, calls the transcriber (which emits `progress` events), persists
-the transcript, emits `transcript-changed` — and then, when a model is
-available (the local server, or Claude in Hosted mode), spawns a background
-**cleanup pass**
-(`agent.rs:299`): the LLM fixes casing/punctuation/mishearings in chunks of 40
-segments, constrained to *keep exactly the same number of words* so word-level
-timestamps stay valid. `update_segment_texts()` (`engine.rs:296`) enforces the
-word-count check before applying anything.
-
----
-
-## 4. The tool registry (`core/src/tools.rs`)
-
-This is the architectural centerpiece. Every tool is one `ToolSpec` row in
-`REGISTRY` — name, description, JSON schema, handler, and the `agent` / `meta` /
-`mutating` flags — executed by one async dispatcher. The same definitions are
-served to:
-
-1. the **UI** — via the Tauri `call_tool` command
-2. the **local agent** — formatted as OpenAI function-calling schemas
-3. **MCP clients** — via `tools/list` / `tools/call`
+### All tools by job (`*` = agent-visible, `†` = meta)
 
 | Group | Tools |
 |---|---|
-| Ingest | `import_media`, `transcribe` |
-| Analysis | `detect_silences`, `detect_fillers`, `detect_takes`, `generate_rough_cut` |
-| Range edits | `cut_range`, `restore_range`, `trim_clip`, `split_clip`, `reorder_clip`, `set_global_padding` |
-| Transcript edits | `cut_by_transcript`, `restore_by_transcript`, `find_segments` |
-| Agent | `apply_instruction` (meta-tool: runs the agent loop) |
-| Metadata | `generate_chapters`, `generate_title_description`, `generate_captions` |
-| Export | `export` (target: `premiere_xml \| fcp_xml \| resolve_xml \| edl \| otio \| mp4 \| srt`) |
-| Project | `create_project`, `open_project`, `save_project`, `list_projects` |
-| Read state | `get_timeline`, `get_transcript` |
-| History | `undo`, `redo` |
-| Settings | `get_preferences`, `set_preferences` |
+| Media | `import_media`, `transcribe`, `append_media`, `attach_screen_media`, `set_layout`, `set_audio_offset`, `get_media_assets` |
+| Analysis | `detect_silences`\*, `remove_silences`\*, `detect_fillers`, `detect_takes`, `generate_rough_cut`\* |
+| Suggestions | `get_suggestions`\*, `accept_suggestion`\*, `accept_all_suggestions`\*, `dismiss_suggestion`\* |
+| Range edits | `cut_range`\*, `restore_range`\*, `trim_clip`\*, `split_clip`\*, `reorder_clip`, `set_global_padding`\*, `apply_edits`\* |
+| Transcript | `cut_by_transcript`\*, `restore_by_transcript`\*, `find_segments`\*, `read_transcript`\*, `get_transcript` |
+| Story | `outline_transcript`\*, `review_flow`\*, `story_edit`\*, `plan_duration_cut`\* |
+| Agent | `apply_instruction`† |
+| Metadata | `generate_chapters`\*, `generate_title_description`, `generate_captions` |
+| Clips & shorts | `find_clips`\*, `get_clip_candidates`\*, `create_clip`\*, `create_clips`\*, `list_clips`\*, `update_clip`, `center_clip_on_face`, `delete_clip` |
+| Export | `export`, `export_clip`, `export_clips` |
+| Projects | `create_project`, `duplicate_project`, `delete_project`, `restore_project`, `open_project`, `save_project`, `list_projects` |
+| History | `undo`, `redo`, `undo_actions`, `get_history`, `jump_to` |
+| Checkpoints | `create_checkpoint`, `get_checkpoints`, `restore_checkpoint`, `delete_checkpoint` |
+| Read / settings | `get_timeline`\*, `get_preferences`, `set_preferences` |
 
-Exact parameter and result shapes for every tool are in
-[`tool-api.md`](tool-api.md); edit tools uniformly return
-`{ action: EditAction, timeline: Timeline }`.
-
-One dispatcher, one policy: `tools::dispatch(editor, name, args, caller)` and
-`tools::defs(caller)`, where `Caller` is `Ui | Mcp | Agent { attribute_to }`.
-The caller decides which rows are visible *and* callable (so listing and
-dispatch can never disagree), whether arguments are schema-checked, and which
-`ActionSource` the resulting edits carry:
-
-- `Ui` — every tool, including the meta tool `apply_instruction`.
-- `Mcp` — everything except meta tools; arguments schema-checked.
-- `Agent` — only `agent`-flagged rows, never meta tools, so recursion is
-  prevented structurally rather than by prompt engineering. Deliberately
-  excluded: project lifecycle (the agent works within the open project),
-  `export` (handing off is a user decision), and preferences. The model
-  switch and its key are not tools at all (Tauri commands, ADR-0004/0007).
-
-**To add a feature to RoughCut, you almost always add a tool**: implement the
-operation on `Editor`, add a handler and a `tool!(…)` row to `REGISTRY` — and
-it is instantly available to the UI, scriptable from Claude Desktop, and (if
-you flag it `agent: true`) usable by the local agent.
+Exact arguments and results are in [`tool-api.md`](tool-api.md). Result shapes
+vary: most edit tools return `{ action, timeline }`, `split_clip` adds the new
+clip ids, `generate_rough_cut` adds `cut_count` and `suggestions`, and
+`apply_edits` / `remove_silences` return lean receipts without the timeline.
 
 ---
 
-## 5. Adapters: the portability boundary (`core/src/adapters/`)
+## 3. The Editor (`core/src/engine/`)
 
-Everything platform- or binary-dependent sits behind an async trait, with a
-production implementation and a fixture mock:
+The `Editor` is the one stateful object in the system: a cheap-to-clone handle
+around shared state (`engine/mod.rs`). It holds the store, the adapters, the
+event sink, a per-project cache (project, transcript, undo journal), and
+smaller pieces of runtime state: pending confirmations, the running scans, the
+model router.
 
-| Trait | Production | Mock | What it does |
-|---|---|---|---|
-| `VideoEngine` (`video.rs:18`) | `FfmpegCli` | `MockVideoEngine` | `probe` (ffprobe JSON → `Media`), `render_mp4` (trim/concat filtergraph, libx264 crf 18), `extract_audio_wav` (mono 16 kHz PCM for whisper) |
-| `Transcriber` (`transcribe.rs:13`) | `WhisperRs` (feature `whisper-native`), else `WhisperCli` | `MockTranscriber` | `WhisperRs` runs whisper.cpp **in-process** via whisper-rs (GPU/Metal where available, real progress via the model's callback); `WhisperCli` shells out to `whisper-cli -ojf` for core builds without the feature. Both resolve the model via `resolve_whisper_model()`: `WHISPER_MODEL` env, then the best file present in `<data dir>/models/` (large-v3-turbo-q5_0 → small-q5_1 → base) |
-| `InferenceClient` (`inference.rs:67`) | `OpenAiCompatClient` | (offline fallback in agent.rs) | `chat()` against any OpenAI-compatible `/chat/completions` (Ollama, llama-server, vLLM…); `healthy()` = 2s-timeout GET `/models` |
-| `Store` (`store.rs:12`) | `SqliteStore` | in-memory SQLite | documents-in-SQLite persistence (§8) |
+| Submodule | Owns |
+|---|---|
+| `projects.rs` | create, open, save, list, duplicate; trash and restore; the preferences patch and its egress guard |
+| `media.rs` | import and relink, transcription, `append_media`, legacy screen media |
+| `edits.rs` | the edit seam, the journal, undo/redo, history and `jump_to`, checkpoints, rough-cut suggestions |
+| `clips.rs` | saved clips and candidates, face framing, the one-scan-per-project guard |
+| `semantic.rs` | the embedding index, hybrid search, `plan_duration_cut` |
+| `confirm.rs` | approvals for destructive ops from MCP clients |
+| `route.rs` | the LOCAL / HOSTED switch: which model each run uses |
 
-The whisper model path comes from `WHISPER_MODEL` or defaults to
-`<data dir>/models/ggml-base.bin`; the inference endpoint/model come from
-preferences, seeded by `INFERENCE_ENDPOINT` (default
-`http://localhost:11434/v1`) and `INFERENCE_MODEL` (default `gemma4:26b`).
+### Bootstrap and demo mode
 
-In Hosted mode (§7) `Editor::inference()` hands out a per-run router that
-sends the same OpenAI-shaped requests to Claude's Messages API through
-`adapters/anthropic.rs`, which translates them; every AI step is unchanged.
+`Editor::bootstrap(sink)` opens SQLite in the platform data dir and wires the
+adapters. Video and transcription use `AutoVideoEngine` / `AutoTranscriber`,
+which pick the real tool or the fixture mock **on every call** through
+`capabilities::probe()`. **Demo mode** means `FABLE_DEMO=1` is set or
+ffmpeg/ffprobe can't be found; the whole edit loop then runs on fixture footage
+(`demo.rs`). A missing whisper model does not start demo mode: `transcribe`
+fails and says the model is missing. Bootstrap also purges trash older than 30
+days and deletes the legacy plaintext `secrets/` folder.
+`Editor::test_instance()` is the same with an in-memory store.
+
+### The edit seam
+
+Every change to the cut goes through `apply_edit` / `apply_edit_labeled` in
+`engine/edits.rs`, whoever asked for it:
+
+```
+ React UI ──call_tool(cut_range)──► Tauri shell ──dispatch(Ui)──► tools.rs
+ MCP client ──POST /mcp──────────────────────────dispatch(Mcp)──► tools.rs
+                                                                     │
+                                         handler builds an EditOp    ▼
+                                                              Editor::apply_edit
+                                   check bounds · snap to frames · apply_op
+                                   Timeline::normalize · journal the inverse
+                                                                     │
+                                       save project + journal (SQLite)
+                                                                     │
+ React UI ◄── timeline-changed ──────────────────────────────────────┘
+   drop cached data → get_timeline → re-render
+```
+
+- **Edits are data.** An `EditOp` is one of `CutRange`, `RestoreRange`,
+  `CutSegments`, `RestoreSegments`, `TrimClip`, `SplitClip`, `ReorderClip`,
+  `SetGlobalPadding`, `RoughCut`, or `SetClips` (journal only). Tool handlers
+  build the op; there are no per-edit Editor methods.
+- **Undo stores snapshots, not math** (ADR-0002). Each `JournalEntry` keeps the
+  action plus an inverse and a redo, both `SetClips` snapshots of the clips.
+  Undo and redo (`step_history`) replay them through the same `apply_op`. The
+  journal keeps the last 100 entries and is saved under kv `journal:{id}`.
+- **Every applied edit is an `EditAction`**: id, op, description, time and
+  source (`ui` / `local_ai` / `mcp_client`). History, `undo_actions` and
+  `jump_to` all work off these.
+- **Not everything is journaled.** Saved clips, checkpoints, layout, audio
+  offset, suggestions and appended footage are saved immediately but are not
+  undone by undo.
+- Because an MCP edit goes through the same seam, the UI updates live while
+  Claude edits, and one undo reverts an edit whoever made it.
+
+### Transcription
+
+`Editor::transcribe` (`engine/media.rs`) extracts a 16 kHz mono WAV from the
+first audio track, runs the transcriber, saves the transcript, clears stale
+suggestions, and emits `transcript-changed`. When a model is available it then
+runs a **cleanup pass** (`agent.rs`): the model fixes casing, punctuation and
+mishearings in chunks and must keep exactly the same number of words, so the
+word timings stay valid (`clean_transcript` checks this). After cleanup the
+**semantic index** is built (§6). In demo mode both steps are skipped.
+
+---
+
+## 4. The editing model (`core/src/model.rs`, `core/src/time.rs`)
+
+### Project
+
+A **Project** is the unit of work: a name, the source `Media`, a `Timeline`,
+`saved_clips`, `clip_candidates`, checkpoints, suggestions, `audio_offset_s`,
+`deleted_at` and `schema_version` (2; `Project::upgrade()` runs on every
+load). Old two-file projects also keep `screen_media` and a `layout`. The
+**Transcript** is stored separately, keyed by project. **Preferences** are
+global (since schema v2), not per project.
+
+**Media** is probe metadata only: path, duration, frame rate (possibly
+fractional), resolution, audio sample rate, codec, import time. The file
+itself is never touched.
+
+A **Transcript** holds ordered segments with `start`/`end`, text, word-level
+timings (`words`, each with its own start/end/confidence), and analysis flags
+(`is_filler`, `is_silence`, take grouping).
+
+### Timeline and clips
+
+The **Timeline** is a contiguous partition of the source duration into ordered
+`Clip`s. Every moment of source time belongs to exactly one clip, and a clip is
+either included (in the output) or excluded (a cut):
+
+```
+imported            [────────────── included 0–60 s ──────────────]
+cut_range(24, 33)   [── included 0–24 ──][/// cut ///][── 33–60 ──]
+restore_range(…)    [────────────── included 0–60 s ──────────────]   ← normalize merges
+```
+
+Each `Clip` has `source_in` / `source_out`, `included`, `order`, an origin
+(`Initial`, `AiCut`, `Manual`, `Split`) and `linked_segment_ids`, the
+transcript segments that caused a cut (so the script shows a strike-through
+exactly where the timeline has a gap).
+
+`Timeline::normalize()` runs after every edit: it sorts clips by `source_in`,
+drops empty ones, merges neighbours with the same state (except deliberate
+splits of included clips) and renumbers. Because it always runs, the partition
+can never drift, and every edit is a simple range operation:
+`set_range_included` (cut / restore), `cut_linked`, `trim_clip` (with a small
+magnet and a minimum kept length), `split_clip`, and `apply_padding` (an
+idempotent "breathing room" delta).
+
+### Time
+
+Tools, JSON and the frontend use `f64` seconds. Every boundary that enters the
+timeline is snapped to a frame first (`snap_to_frame`, applied in
+`normalize_op` in `engine/edits.rs`), so the model only ever holds
+frame-aligned values. The export writers work in whole frames (`to_frame`;
+EDL timecodes from `timecode_frames`), so a 29.97 fps timeline survives the
+trip to an NLE.
+
+### Other things in the model
+
+- **Checkpoint** — a named snapshot of the cut to jump back to. Up to 40;
+  automatic ones are dropped first. The rough cut saves "Before rough cut"
+  before it runs.
+- **CutSuggestion** — a reviewable cut proposed by the rough cut (repeated
+  takes, near-repeats). Accepting one applies it as an edit; dismissing drops it.
+- **SavedClip** — a standalone short or excerpt: one or more pieces of the
+  source, landscape or vertical (9:16), and `crop_x` for the vertical crop. It
+  keeps the main cut's removals inside its pieces and isn't changed by later
+  main-cut edits. Not the same thing as a timeline `Clip` (see CONTEXT.md).
+- **ClipCandidate** — a moment `find_clips` proposed: pieces, title, hook,
+  reason, score and the model that scored it. Kept until the next run.
+- **Trash** — `delete_project` sets `deleted_at`; `restore_project` brings it
+  back; projects in the trash longer than 30 days are purged at startup.
+- **ModelMode / ModelStatus / RouteReason** — the LOCAL / HOSTED switch and
+  what the top-bar chip shows (§6).
+
+---
+
+## 5. Chat versus the terminal
+
+Both end up calling the same tools through the same seam. The difference is
+**who runs the loop** and **which model thinks**.
+
+```
+ CHAT TAB                                   TERMINAL TAB
+ you type ─► apply_instruction              Claude Code (its own loop, its own
+                │                           model, online)
+ ┌──────────────┼─── inside RoughCut.app ──────────┼─────────────────────────┐
+ │              ▼                                  │ POST /mcp               │
+ │   agent loop (core, ≤ 12 steps) ◄─► app's model │                         │
+ │              │                      (Local or ◄─┼── AI tools it calls     │
+ │              ▼                       Hosted)    ▼   still use this model  │
+ │        28 agent tools                    65 MCP tools (risky ones ask)    │
+ │              └──────────────► Editor ◄──────────┘                         │
+ └───────────────────────────────────────────────────────────────────────────┘
+```
+
+| | Chat tab | Terminal tab |
+|---|---|---|
+| Who runs the loop | RoughCut, inside the core (`agent.rs`) | Claude Code, outside the app |
+| Model | the app's model: Local or Hosted | Claude Code's own model |
+| Tools | 28, about editing the open project | 65: projects, export, history, checkpoints, settings too |
+| Works offline | yes, in Local mode | no |
+| Edits credited to | `ui` today; should be `local_ai` (§16) | `mcp_client` |
+
+AI-backed tools that Claude Code calls (`find_clips`, `story_edit`,
+`outline_transcript`, `review_flow` with `llm`, `generate_chapters`) still run
+on the **app's** model through `editor.inference()`.
 
 ---
 
 ## 6. The AI layer
 
-### Deterministic detection (`core/src/detect.rs`)
+### LOCAL or HOSTED (`engine/route.rs`, `adapters/anthropic.rs`, `secrets.rs`)
 
-The "AI first pass" is mostly *not* an LLM — it's fast, explainable heuristics
-over the transcript:
+The user's LOCAL / HOSTED switch decides where every AI step runs (ADR-0007,
+[`designs/hosted-models.md`](designs/hosted-models.md)).
 
-- **Silences** (`detect.rs:26`): explicit silence segments plus gaps between
-  speech longer than `silence_min_duration_s` (default 0.8s), merged.
-- **Fillers** (`detect.rs:67`): a stoplist (`um, uh, uhm, er, ah, hmm, mhm,
-  erm` + user's custom words). Whole segments of filler get `is_filler`;
-  filler words *inside* sentences are returned as word-level time ranges so
-  they can be cut individually.
-- **Takes** (`detect.rs:97`): consecutive non-silence segments are compared by
-  Jaccard similarity over normalized word sets; ≥ 0.5 similarity groups them
-  as repeated takes, and the *last* take is marked best (people usually re-do
-  a line until they nail it).
-- **`find_segments`** (`detect.rs:209`): stopword-filtered keyword scoring,
-  top 8 matches — used by the UI search and as the agent's retrieval tool.
+- An AI step asks `editor.inference()` (one-off jobs) or
+  `editor.inference_conversation()` (the chat). The mode is re-read on every
+  request.
+- **Local**: an OpenAI-compatible `/chat/completions` server, Ollama or
+  llama-server (`adapters/inference.rs`). Defaults come from preferences,
+  seeded by `INFERENCE_ENDPOINT` (`http://localhost:11434/v1`) and
+  `INFERENCE_MODEL` (`gemma4:26b`). The app can install and run its own
+  llama-server (`llm_runtime.rs`, port 47861).
+- **Hosted**: a `HostedRouter` sends the same OpenAI-shaped request to Claude's
+  Messages API, translated by `adapters/anthropic.rs`, with the user's key from
+  the OS key store (`secrets.rs`; macOS Keychain service
+  `dev.localfirst.roughcut.hosted`). Models: Opus, Sonnet and Haiku 5.5;
+  default `claude-opus-5-5`. Text only: no video or audio ever leaves.
+- **Failures are visible.** If Claude can't be reached, a one-off job falls
+  back to the local model; a chat that already used Claude stops instead. A
+  missing or rejected key is a `CoreError::Hosted` that every call site
+  re-raises (`is_fatal_model_error`), never a quiet fallback to rules.
+- **Only a human turns it on.** Mode, model, key and consent change only
+  through Tauri commands; `set_preferences` rejects those fields. The chip
+  follows `model-route` events.
+- **Embeddings always stay local** (`adapters/embed.rs`, `OllamaEmbedder`,
+  model `EMBEDDING_MODEL`, default `nomic-embed-text`).
 
-`generate_rough_cut` (`detect.rs:155`, orchestrated by `engine.rs:583`)
-composes them: remove silences (leaving a small "breath" margin — 0.12s
-natural / 0.04s aggressive), remove filler segments and words, remove
-non-best takes, then apply the user's default padding. All resulting cuts are
-tagged `ClipOrigin::AiCut`. One click, undoable as a single action.
+### Rough cut (`detect.rs`, `engine/edits.rs`)
 
-### The local agent loop (`core/src/agent.rs`)
+`generate_rough_cut` saves a "Before rough cut" checkpoint, then adds cuts on
+top of what's already there:
 
-`apply_instruction` runs a textbook tool-calling loop against the app's model
-— the local one, or Claude in Hosted mode (one model per run, §7):
+- **Silences** — gaps between words, confirmed against the audio peaks. A small
+  breath margin (0.12 s natural / 0.04 s aggressive) applies only where the
+  audio didn't confirm the gap.
+- **Fillers** — a stoplist (`um`, `uh`, `er`, …) plus the user's words. Whole
+  filler segments, and filler words inside sentences as word-level ranges.
+- **Takes and repeats are not cut.** Repeated takes (word overlap) and
+  near-repeats (embedding cosine ≥ 0.93) become **suggestions** the user
+  accepts or dismisses.
 
-1. **Context**: `project_context()` (`agent.rs:45`) renders the project stats
-   and the full transcript as `id | start–end | flags | text` lines (capped at
-   24 KB). The system prompt (`agent.rs:29`) tells the model the workflow:
-   *find segments → inspect → apply the edit → reply with a one-sentence
-   summary; make the requested change and nothing more.*
-2. **Loop** (`run_instruction_with`, `agent.rs:118`): up to 12 iterations of
-   chat-completion (temperature 0.1) with the 12 agent tools. Each tool call
-   is dispatched through `dispatch(…, Caller::Agent)`, its result appended as a `tool`
-   message, and an `agent-step` event emitted (`thinking` / `tool_call` /
-   `tool_result` / `final`) so the chat panel can stream progress live.
-   `EditAction`s are harvested from results into the final
-   `InstructionOutcome { actions, summary }`.
-3. **Graceful degradation** (`agent.rs:209`): if `healthy()` fails (no model
-   server running), a deterministic fallback handles the common case — a
-   cut-intent instruction is served by `find_segments` + `cut_by_transcript`
-   on the best match; anything else gets an honest "this needs a model server"
-   reply. The app never hard-requires the LLM.
+The whole pass is one undoable action, tagged `AiCut`.
 
-The same loop also powers transcript cleanup (§3) and metadata generation
-(`generate_chapters` / `generate_title_description`, `agent.rs:380` and
-`agent.rs:441`), each with a heuristic fallback for offline use (chapters from
-silence boundaries, title from the first strong sentence).
+### Search (`engine/semantic.rs`)
+
+The embedding index (one vector per segment, in SQLite) is built after
+transcript cleanup, and backfilled the first time an older project is opened.
+The `find_segments` tool runs **BM25 and embedding cosine** and merges the two
+rankings with reciprocal-rank fusion (`1 / (60 + rank)`); default limit 8,
+clamped to 1–50. It reports `method: "hybrid"` or `"bm25"` (no index or no
+embedder). The keyword-only `detect::find_segments` is used only by the
+offline fallback.
+
+### The chat assistant (`agent.rs`)
+
+`apply_instruction` runs a tool-calling loop on the app's model:
+
+1. **Context.** Project stats and the transcript as `id | start–end | flags |
+   text` lines, plus the last turns of the chat. The system prompt tells the
+   model the workflow: find segments at most once, batch edits, send silence
+   requests to `remove_silences`, narrative edits to `story_edit`, length
+   targets to `plan_duration_cut`, shorts to `find_clips` / `create_clip`, and
+   handle suggestions with the suggestion tools.
+2. **Loop.** Up to 12 steps (`MAX_STEPS`) with the 28 agent tools, each call
+   dispatched with `Caller::Agent`. Every step is emitted as an `agent-step`
+   event (`thinking` / `tool_call` / `tool_result` / `final`) so the chat panel
+   streams it live.
+3. **Guards for small models.** Repeated calls are answered from cache; two
+   read-only rounds in a row get a steering message; bad arguments come back
+   with the schema; `project_id` is filled in; `story_edit` ends the turn. The
+   final receipt is built from the edits that actually landed. After cuts, the
+   chat runs `review_flow` with the model to catch broken seams.
+4. **Offline fallback (Local mode only).** If no model server answers, simple
+   requests are handled by rules: a cut request becomes `find_segments` +
+   `cut_by_transcript`, silence requests cut confirmed silences, shorts
+   requests run `find_clips`. Anything else gets a plain "this needs a model
+   server" reply. Hosted mode never falls back to rules.
+
+### Story tools (`story.rs`)
+
+- `outline_transcript` — beats in chunks of 120 segments, cached per
+  transcript and model (kv `outline:{id}`).
+- `review_flow` — finds seams that read broken after cuts (mid-sentence cuts,
+  orphaned connectives). Rule-based by default; `llm: true` adds the model.
+- `story_edit` — a whole story-level edit in one call: outline, choose beats to
+  cut against the instruction, apply, re-read every cut point, restore what
+  breaks the flow, summarize. Several model calls; one per project at a time.
+- `plan_duration_cut` — ranks segments by importance to hit a target length;
+  previews, then applies in one batch.
+
+### Metadata (`agent.rs`)
+
+`generate_chapters` and `generate_title_description` are single JSON prompts,
+each with a rule-based fallback (chapters from silence boundaries, a title from
+a strong early sentence). `generate_captions` needs no model: it returns SRT
+written from the transcript.
 
 ---
 
-## 7. MCP: external agents drive the editor (`core/src/mcp/`, `mcp-shim/`)
+## 7. From a recording to a transcript
 
-### Server (`mcp/server.rs`)
+The user records in OBS as one file and imports it. In-app recording was
+removed (ADR-0008, [`designs/remove-recording.md`](designs/remove-recording.md)).
 
-When the app starts, the Tauri shell spawns `mcp::server::start(editor)`
-(`server.rs:30`):
+1. **Import.** `create_project { name, file_path }` probes the file with
+   ffprobe and attaches it in one step. MP4, MOV, MKV, WebM and AVI work.
+2. **Extract audio.** ffmpeg writes a 16 kHz mono WAV from the first audio
+   track (OBS track 1).
+3. **Transcribe.** `WhisperRs` runs whisper.cpp in-process (Metal on Apple
+   silicon, real progress). It uses `WHISPER_MODEL` or the best model in
+   `<data dir>/models/`: large-v3-turbo-q5_0, then small-q5_1, then base.
+   `WhisperCli` is the fallback for core builds without the `whisper-native`
+   feature.
+4. **Clean and index** (§3, §6).
+5. **Media assets.** `get_media_assets` builds waveform peaks and a thumbnail
+   filmstrip in `cache/<key>/`. For a file the WebView can't play (MKV, WebM,
+   AVI, or an MP4 with its index at the end) it starts a **playable copy**,
+   `cache/<key>/play.mp4` (first video and first audio track, stereo AAC,
+   H.264 when needed). `media-assets-changed` says when it's ready or failed;
+   the preview shows "Preparing preview…" until then.
+6. **Edit and export.** The preview plays the copy; edits, renders and exports
+   always read the original file.
 
-- an **axum** HTTP server on `127.0.0.1:<random port>`, single route
-  `POST /mcp`, speaking JSON-RPC 2.0 (MCP protocol version `2024-11-05`)
-- guarded by a **per-install 40-char Bearer token**, generated once and kept
-  in the SQLite KV store
-- the endpoint + token are written to `<data dir>/mcp.json` so local clients
-  can discover the running instance
+`append_media` (the Footage tab) joins more footage onto a project's source:
+`video::concat_media` writes `<data dir>/media/joined-<ts>-<hex>.{mp4|mkv}`,
+and the result is transcribed. Old projects with a separate screen file still
+play and composite with their saved layout.
 
-It implements `initialize`, `ping`, `tools/list` (all 32 defs), and
-`tools/call` — which goes through the very same `dispatch()` with
-`ActionSource::McpClient`. An edit made by Claude Desktop lands in the same
-undo stack and triggers the same `timeline-changed` event, so the UI updates
-live while an external agent edits.
+### The video adapter (`adapters/video.rs`)
 
-### The shim (`mcp-shim/src/main.rs`)
-
-Claude Desktop spawns MCP servers as stdio subprocesses, but our server must
-live *inside* the running app (it needs the Editor). The shim bridges the two:
-a ~100-line binary that reads JSON-RPC lines from stdin, discovers the app's
-endpoint (CLI args → `ROUGHCUT_MCP_ENDPOINT`/`ROUGHCUT_MCP_TOKEN` env vars →
-`mcp.json`), forwards each request over HTTP with the Bearer token, and writes
-responses to stdout. Claude Desktop config just points at the shim binary
-(see README "Claude Desktop (MCP)").
-
-### Hosted mode (`engine/route.rs`, `adapters/anthropic.rs`) — the only model egress
-
-The user's LOCAL / HOSTED switch (ADR-0007, `docs/designs/hosted-models.md`).
-The key lives in the OS key store (`secrets.rs`); the switch, the model and
-the key are changed only through Tauri commands, never the registry. In
-Hosted mode `Editor::inference()` returns a `HostedRouter` per run: one model
-per run, "unreachable" falls back to the local model (a conversation that
-already used Claude stops instead), and no key / a rejected key / a rejected
-request is a visible `CoreError::Hosted` that no call site papers over. Only
-a human action can enable egress; once on, every caller's AI steps use it.
-The chip in the top bar follows `model-route` events.
+`VideoEngine` covers `probe`, `extract_audio_wav`, `extract_frame`,
+`media_assets` and `render_mp4`. A render takes a `RenderJob`: the pieces to
+play, the audio offset, an optional screen file with a camera bubble, and an
+optional 9:16 crop position (renders 1080×1920). Each group of pieces is one
+seeked input, so long sources render quickly.
 
 ---
 
-## 8. Persistence and events
+## 8. Clips and shorts
 
-### Store (`core/src/store.rs`)
+**Clips** (the Clips tab) are standalone excerpts saved from the transcript
+(select text → "Add to clip") or from `find_clips` candidates. **Shorts** are
+the same thing done in bulk, on their own screen
+([`designs/bulk-shorts.md`](designs/bulk-shorts.md)):
 
-Persistence is deliberately boring: **SQLite as a document store**. Tables
-`projects`, `transcripts`, `preferences`, and `kv` each hold whole serialized
-JSON documents — the Rust types in `model.rs` *are* the schema
-(`schema_version` on `Project` reserves room for migrations). Everything lives
-under the platform data dir (`store.rs:72`; macOS:
-`~/Library/Application Support/roughcut/`) — `library.db`, `models/` for
-downloaded weights, `mcp.json`, `secrets/`.
+1. **Scan.** `find_clips { scan: true }` (`clip_finder.rs`) uses the story
+   beats to make sentence-aligned windows of 15–60 s, scores them by rules,
+   optionally filters by a theme through hybrid search, then has the model
+   rescore them in batches of 6 (a pool of 90 when scanning, 24 otherwise).
+   Picks that overlap more than 30 % are dropped, and moments already saved as
+   clips are skipped. One scan per project at a time.
+2. **Candidates** are saved on the project; `clips-changed` tells the Shorts
+   screen to show them as cards, best first.
+3. **Review.** Clicking a card's picture plays its pieces with a centred 9:16
+   window; the user ticks the ones they want.
+4. **Make.** `create_clips` turns candidates into saved clips (vertical by
+   default) and frames each on the speaker: `adapters/face.rs` uses Apple
+   Vision to find faces in sampled frames, and the median position becomes
+   `crop_x`. (`center_clip_on_face` does the same for one clip; it refuses
+   projects that composite a screen file.) A candidate whose material was cut
+   from the main edit since the scan is reported in `errors`.
+5. **Export.** `export_clips` renders each clip into one folder as
+   `NN-<title>.<ext>` (MP4 by default, 1080×1920 for vertical), never
+   overwriting. One failure doesn't stop the rest.
 
-Saves happen automatically inside the mutation funnel; `save_project` exists
-as a tool but users never need to think about saving.
+Progress for scan, make and export is kept per project in the frontend's
+`shortsStore`, so the user can leave the Shorts screen and come back.
 
-### Events (`core/src/events.rs`)
+---
 
-The core pushes, the frontend pulls. `EventSink` is a one-method trait
-(`emit(event, payload)`); production wires it to Tauri's event system, tests
-use a channel. Five events cover everything:
+## 9. MCP: outside clients drive the editor (`core/src/mcp/`, `mcp-shim/`)
 
-| Event | Payload | Meaning |
+### The server (`mcp/server.rs`)
+
+When the app starts, the shell spawns `mcp::server::start(editor)`:
+
+- **axum** on `127.0.0.1`, one route `POST /mcp`, hand-rolled JSON-RPC 2.0
+  (ADR-0001). `initialize` echoes the client's protocol version and returns an
+  `instructions` string that tells clients how to work: read the transcript
+  yourself, locate with `find_segments`, snap cuts to words, batch with
+  `apply_edits`, check with `review_flow`, and call `open_project` when the
+  user asks to open or switch to a project.
+- A **per-install Bearer token** (kv `mcp_token`).
+- A **stable port**: saved in kv `mcp_port` and reused when free; a new port
+  only if another program took it. So a client registered once keeps working.
+- The endpoint and token are written to `<data dir>/mcp.json` for the shim.
+- `tools/list` returns the 65 non-meta tools; `tools/call` goes through
+  `dispatch(…, Caller::Mcp)`.
+
+Two MCP-only behaviours:
+
+- **Confirmations** (`engine/confirm.rs`). `export`, `export_clip`,
+  `export_clips` and `delete_project` from an MCP client emit
+  `confirm-request`; the app shows a dialog and answers with the
+  `confirm_action` command. No answer in 120 s counts as no.
+  `ROUGHCUT_NO_CONFIRM=1` turns this off.
+- **Opening switches the app.** When an MCP client calls `open_project`, the
+  core emits `project-opened` and the app shows that project. The UI's own
+  `open_project` calls are refetches of what's on screen, so they never send it.
+
+### Two ways in
+
+| Route | For | How |
 |---|---|---|
-| `progress` | `{ task, project_id, fraction, message }` | transcribe / rough cut / export progress |
-| `timeline-changed` | `{ project_id }` | any edit, undo, redo |
-| `transcript-changed` | `{ project_id }` | transcription or cleanup finished |
-| `agent-step` | `{ project_id, step, kind, … }` | live agent progress for the chat panel |
-| `mcp-ready` | `{ url, token }` | emitted by the shell once the MCP server is up |
+| Direct HTTP | Claude Code in the in-app terminal | The terminal's shell has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its environment. **Connect Claude Code** types `claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" --header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"`, so the token never appears on screen. |
+| The shim | Claude Desktop, or Claude Code outside the app | `roughcut-mcp-shim` finds the endpoint (arguments → `ROUGHCUT_MCP_ENDPOINT` / `ROUGHCUT_MCP_TOKEN` → `mcp.json`) and forwards each stdio line over HTTP with the token, retrying while the app starts. |
 
-Note the change events carry **no data** — just "something changed". The
-frontend re-fetches via tools. This keeps the core's event surface tiny and
-makes the frontend trivially correct (it can never render stale partial
-updates; it always re-reads the source of truth).
+### The in-app terminal (`core/src/pty.rs`, `frontend/src/state/terminalSession.ts`)
 
----
+`pty.rs` uses portable-pty to start the user's login shell (`$SHELL -l`) in
+their home folder with `TERM=xterm-256color` and the MCP URL and token in its
+environment. Output streams to the WebView as base64 `terminal-output` events
+(raw bytes, so a character split across reads survives); `terminal-exit`
+reports the end. The shell commands `pty_spawn`, `pty_write`, `pty_resize` and
+`pty_kill` drive it.
 
-## 9. The Tauri shell (`app/src-tauri/src/lib.rs`)
-
-The shell is intentionally tiny (~80 lines). On setup it:
-
-1. wraps the app handle in `TauriSink` (`lib.rs:13`) — the `EventSink` impl
-   that forwards core events to the webview,
-2. calls `Editor::bootstrap(sink)`,
-3. registers `AppState { editor, mcp }` (`lib.rs:21`), and
-4. spawns the MCP server, storing the endpoint and emitting `mcp-ready`.
-
-It exposes six commands (`lib.rs`):
-
-- **`call_tool(name, args)`** — the entire functional surface; delegates to
-  `tools::dispatch(..., ActionSource::Ui)`
-- `list_tools()` — registry introspection
-- `mcp_endpoint_info()` — for a future "connect Claude Desktop" settings UI
-- `demo_mode()` — so the UI can label fixture data (the demo banner)
-- `setup_status()` — first-run toolchain report (`core/src/setup.rs`):
-  ffmpeg resolved? which whisper model is installed? native engine compiled in?
-- `download_whisper_model(tier)` — streams a model from Hugging Face into
-  `<data dir>/models/` with `progress` events (task `model_download`),
-  writing to a `.part` file and renaming on completion
-
-There is no per-feature IPC. New core features need **zero shell changes**.
-
-Config highlights (`tauri.conf.json`): 1440×920 window, drag-drop enabled,
-asset protocol enabled with scope `**` (lets the `<video>` tag play local
-files via `convertFileSrc`), Vite dev server pinned to port 1420.
+On the frontend, `terminalSession.ts` owns **one** xterm and one shell for the
+whole app. The editor's Terminal tab and the drawer under the Shorts player
+move the same element between them (the newest host wins), so switching tabs
+or screens never kills a running `claude`. The shell starts on first show;
+only **Restart** or quitting the app ends it.
 
 ---
 
 ## 10. The frontend (`frontend/`)
 
-Stack: **React 18 + TypeScript (strict) + Vite**, with three TanStack
-libraries doing the heavy lifting: **Query** (server state), **Store**
-(ephemeral view state), **Virtual** (transcript list virtualization).
+Stack: **React 18 + TypeScript (strict) + Vite**, with TanStack **Query**
+(data from the core), **Store** (view state) and **Virtual** (the transcript
+list).
 
-### The IPC seam and browser mock (`src/ipc/`)
+### Screens and layout
 
-`api.ts` is the only file that knows about Tauri:
+`viewStore.screen` is `"editor"` or `"shorts"`. With no projects,
+`EmptyState` asks for a file.
 
-- `callTool<T>(name, args)` (`api.ts:13`) — `invoke("call_tool", …)` in the
-  app; `mockCallTool` in a plain browser (detected via `__TAURI_INTERNALS__`)
-- `onAppEvent(event, handler)` (`api.ts:24`) — Tauri `listen` or the mock
-  emitter
-- `mediaSrc(path)` (`api.ts:41`) — `convertFileSrc` or `null`
-
-`mockApi.ts` is a complete in-memory implementation of the tool registry —
-fixture transcript, working undo/redo stacks, even simulated streaming
-`agent-step` events. This is why `npm run dev` in a browser exercises the full
-UX with nothing else installed, and why UI development never blocks on the
-Rust build. `types.ts` mirrors the Rust model types by hand (the shapes are
-frozen in `tool-api.md`).
-
-### State management (`src/ipc/queries.ts`, `src/state/viewStore.ts`)
-
-Server state and view state, with a clean division:
-
-- **Server state** lives in TanStack Query under keys `["projects"]`,
-  `["project", id]`, `["timeline", id]`, `["transcript", id]`,
-  `["preferences"]`. Each edit is a mutation hook wrapping `callTool`
-  (`useCutByTranscript`, `useTrimClip`, `useApplyInstruction`, …) that
-  invalidates the affected keys. On top of that,
-  `useCoreEventInvalidation()` (`queries.ts:83`, mounted in `App.tsx`)
-  subscribes to `timeline-changed` / `transcript-changed` and invalidates —
-  so edits made by the agent or an MCP client refresh the UI exactly like the
-  user's own clicks. This event→invalidate→refetch loop *is* the frontend
-  architecture.
-- **View state** lives in a small TanStack Store (`viewStore.ts:9`): playhead,
-  `seekNonce` (bumped to force the `<video>` element to seek), playing/rate,
-  timeline `zoom`/`scrollX`, selected clip and segment ids, `showCuts` /
-  `skipCuts` toggles, and the active left-panel tab. Nothing here is persisted
-  or owned by the core.
-- Two smaller view stores follow the same rule: `shortsStore.ts` (the Shorts
-  screen's ticks, progress lines and last results, kept across screen
-  switches) and `modelStore.ts` (the LOCAL / HOSTED chip's copy of the core's
-  `model_status`, refreshed on `model-route` events and after each command).
-
-### Layout and panels
-
-`App.tsx` renders the Gling-style layout: `TopBar` over a main row (left:
-tabbed **Script/Chat** panel at 55%; right: **Preview** above **Inspector**)
-over a bottom strip (**TransportBar** + canvas **Timeline**). Before a project
-exists, `EmptyState.tsx` runs onboarding: pick/drop a file →
-`create_project` → `import_media` → `transcribe`, with a progress bar driven
-by `progress` events.
-
-- **TranscriptPanel** (`panels/TranscriptPanel.tsx`) — the primary editing
-  surface. Virtualized segment list; silences render as chips; cut content
-  renders struck-through with a Restore button. Click a word →
-  `seekTo(word.start)`. Select paragraphs (⌘-click multi-select) and press
-  Delete → `cut_by_transcript`. Select *text across words* and right-click →
-  context menu reads `data-wstart`/`data-wend` off the word spans and issues a
-  precise `cut_range`. Toolbar hosts search and the one-click **Rough cut**
-  button.
-- **ChatPanel** (`panels/ChatPanel.tsx`) — conversational editing. Sends
-  `apply_instruction`, renders streamed `agent-step` events as the agent
-  thinks/calls tools, then the final summary with an "Undo this edit" link.
-- **PreviewPanel** (`panels/PreviewPanel.tsx`) — a `<video>` element fed by
-  `mediaSrc` (or an rAF clock in mock mode). Syncs play/pause/rate/seek with
-  the view store; when **Skip cuts** is on, `skipTarget()` jumps the playhead
-  over excluded ranges during playback — previewing the edit without
-  rendering.
-- **InspectorPanel** (`panels/InspectorPanel.tsx`) — padding sliders
-  (`set_global_padding`), cut aggressiveness, custom filler words
-  (`set_preferences`).
-- **TopBar / ExportMenu** — project switcher, undo/redo, and export to the
-  seven targets (writes to `~/Downloads/<project>-export.<ext>`).
-
-### The canvas timeline (`src/timeline/`)
-
-`Timeline.tsx` owns a DPR-aware canvas with an rAF draw loop and pointer
-handling; `renderer.ts` is pure drawing + math, the most subtle part being
-`buildTimeMap()` (`renderer.ts:14`): when **Show cuts** is off, excluded
-ranges collapse and the map converts source↔display time both ways — layout,
-scrubbing, and trims all round-trip through it. Clips render as rounded rects
-(hatched when excluded) with deterministic placeholder waveforms (seeded per
-clip id; real peaks are a planned M7 item). Drag a clip edge (6px hit zone) to
-trim with live preview → `trim_clip` on release; click elsewhere to scrub;
-wheel scrolls, vertical wheel zooms around the playhead. `TransportBar` has
-play/pause, speed, the Show/Skip cuts toggles, split-at-playhead
-(`split_clip`), and zoom buttons.
-
----
-
-## 11. Feature walkthroughs (end to end)
-
-**Import & transcribe.** Drop a file → `create_project` + `import_media`
-(ffprobe → `Media`) → `transcribe`: ffmpeg extracts 16 kHz mono WAV →
-`whisper-cli` writes full JSON → parsed into segments with per-word timing →
-persisted, `transcript-changed` emitted → Query invalidates → transcript
-renders. In the background, the LLM cleanup pass fixes punctuation without
-moving a single timestamp.
-
-**One-click rough cut.** Transcript panel button → `generate_rough_cut` →
-detect silences/fillers/takes (§6) → one composed timeline mutation tagged
-`AiCut` → `{ timeline, cut_count }` returns, badge shows "N cuts made". One
-undo reverts the whole pass.
-
-**Edit by transcript.** Select two rambling paragraphs, press Delete →
-`cut_by_transcript` → `Timeline::cut_linked` flips those ranges to excluded
-and links the segment ids → strikethrough appears in the script *and* the
-timeline gap appears in the canvas, because both views re-derive from the
-same timeline.
-
-**Chat edit.** "cut the tangent about hiking" → `apply_instruction` → agent
-calls `find_segments("hiking")`, inspects, calls `cut_by_transcript` →
-`agent-step` events stream into the chat → summary + Undo link. Offline?
-The deterministic fallback does the find+cut anyway.
-
-**Preview the cut.** Toggle Skip cuts → playhead jumps over excluded ranges
-during playback. Toggle Show cuts off → the timeline collapses cuts via the
-time map, showing output time.
-
-**Export.** ExportMenu → `export { target, out_path }` → the matching writer
-(§ `core/src/export/`) renders included clips with `RationalTime` math:
-`premiere_xml`/`resolve_xml` (FCP7 XMEML), `fcp_xml` (FCPXML 1.9), `edl`
-(CMX3600), `otio` (OTIO JSON), `srt` (captions remapped to output time via
-`source_to_output`), or `mp4` (ffmpeg trim/concat render).
-
-**Claude Desktop session.** Claude spawns the shim → reads `mcp.json` →
-`tools/list` → user says "tighten up my video" → Claude calls
-`generate_rough_cut` over JSON-RPC → the running app's timeline updates live
-in front of the user, tagged `mcp_client`, one Cmd-Z away from reverting.
-
----
-
-## 12. Building, testing, and your own version
-
-### Dev workflow
-
-```sh
-cargo test -p roughcut-core         # unit + e2e + MCP-over-HTTP, offline (fixtures)
-cd frontend && npm run dev          # UI alone in a browser, full mock API
-cargo tauri dev                     # the real app (frontend npm install first)
-cargo run -p roughcut-core --example agent_live   # agent loop vs real Ollama
-FABLE_DEMO=1 cargo tauri dev        # full app on fixtures, nothing installed
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ TopBar: project picker · trash · LOCAL/HOSTED chip · Editor/Shorts · undo/redo · export · setup  │
+├──────────────────────────────────────┬───────────────────────────────────────────────────────────┤
+│ TranscriptPanel                      │ PreviewPanel (video, skip cuts, 9:16 crop guide)          │
+│ click a word to seek; select text    ├───────────────────────────────────────────────────────────┤
+│ to cut or add to a clip; review      │ tabs: tools · chat · clips · footage · history · terminal │
+│ rough-cut suggestions                │                                                           │
+├──────────────────────────────────────┴───────────────────────────────────────────────────────────┤
+│ TransportBar: play, speed, show/skip cuts, split, zoom, level meter                              │
+│ Timeline (canvas): real peaks + thumbnails, drag an edge to trim, right-click to cut             │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-CI (`.github/workflows/ci.yml`) runs core tests on macOS/Linux/Windows with
-`FABLE_DEMO=1`, builds the shim, builds the frontend, then builds the Tauri
-app. The e2e test (`core/tests/e2e.rs`) is the best "executable documentation"
-in the repo: it walks create → transcribe → rough cut → transcript edit →
-trim → padding → chat instruction → undo → all exports → persistence, then
-does the full JSON-RPC dance against a live MCP server.
+The **Shorts** screen has the player, a note and the terminal drawer on the
+left, and the candidate cards and saved shorts on the right.
 
-### Extension points — where to plug in
+| Panel | What it does |
+|---|---|
+| `TranscriptPanel` | The main editing surface: segments, silences, cuts (struck through), suggestions with accept/dismiss, a menu with Cut / Restore / Add to clip / Play from here, search, the Rough cut button |
+| `ChatPanel` | Sends `apply_instruction` with the last 8 turns; streams `agent-step`; "Undo all N edits" calls `undo_actions` |
+| `InspectorPanel`, `MetadataPanel` | The Tools tab: padding, aggressiveness, filler words, target length, audio sync, layout; chapters, title, captions |
+| `ClipsPanel`, `SavedClipRow`, `CandidateCard` | Find and save clips; rename, format, crop, export |
+| `ShortsScreen` | Scan, review cards, make and export shorts in bulk |
+| `FootagePanel` | `append_media` + transcribe |
+| `HistoryPanel` | `get_history` / `jump_to` |
+| `TerminalPanel` | The shared terminal session and **Connect Claude Code** |
+| `PreviewPanel`, `CropGuide` | Video (the playable copy when there is one), crop dragging, "◎ face" |
+| `SetupPanel`, `ModelChip` | Toolchain status and installs; the LOCAL / HOSTED chip |
+
+Keyboard (`hooks/useEditorKeyboard.ts`): Space, ←/→ by word, ⌥ by frame, ⇧ by
+second, `?` for the shortcut sheet. Keys are ignored while typing, including
+in the terminal.
+
+### The IPC seam and the browser mock (`src/ipc/`)
+
+- `api.ts` holds `callTool` (Tauri `invoke("call_tool")`, or the mock in a
+  plain browser), `onAppEvent`, `mediaSrc`, and wrappers for about 20 shell
+  commands (model switch, setup, local LLM, Resolve, terminal, `open_external`).
+  A few files also use Tauri plugins directly: file dialogs, drag-and-drop,
+  and the `confirm_action` answer in `App.tsx`.
+- `mockApi.ts` implements every registry tool in memory (one project plus one
+  in the trash), so `npm run dev` works with no Rust build; `core/tests/
+  mock_parity.rs` fails if a tool is missing. URL flags like `?nomodel` or
+  `?failexport` simulate failures.
+- **Types are generated from Rust** by ts-rs into `ipc/generated/` (ADR-0003).
+  `types.ts` re-exports them; only event payloads and result envelopes are
+  written by hand.
+
+### Server state and events (`src/ipc/queries.ts`)
+
+Data from the core lives in TanStack Query under keys such as `["projects"]`,
+`["project", id]`, `["timeline", id]`, `["transcript", id]`,
+`["media-assets", id]`, `["suggestions", id]`, `["history", id]`,
+`["clips", id]` and `["clip-candidates", id]`. Mutation hooks wrap `callTool`.
+`useCoreEventInvalidation()` (mounted in `App.tsx`) turns core events into
+invalidations, so edits by the agent or an MCP client refresh the UI exactly
+like the user's own clicks:
+
+| Event | Invalidates |
+|---|---|
+| `timeline-changed` | timeline, project, projects, suggestions, history |
+| `transcript-changed` | transcript, media-assets |
+| `projects-changed` | projects |
+| `media-assets-changed` | media-assets |
+| `clips-changed` | clips, clip-candidates |
+
+Other listeners: `progress` (progress bars, `shortsStore`), `agent-step`
+(chat), `model-route` (`modelStore`), `confirm-request` (`App.tsx`),
+`project-opened` (`App.tsx`), `terminal-output` / `terminal-exit`
+(`terminalSession.ts`).
+
+**Which project is open:** the one the user picked, if it still exists;
+otherwise the most recently updated. `setProjectId` resets playhead, scroll,
+selection, clip draft and crop. On `project-opened` the app refreshes the
+project list, then switches, and stays on the current screen.
+
+### View state (`src/state/`)
+
+| Store | Holds | Saved |
+|---|---|---|
+| `viewStore` | screen, open project, playhead, zoom, scroll, selection, active right-hand tab, audition, clip draft, crop being framed | show/skip cuts, collapsed preview and the Shorts terminal drawer, in localStorage `rc-view-prefs` |
+| `shortsStore` | per project: picks, ticks, scan / make / export progress and results | no |
+| `modelStore` | the chip's copy of `model_status` (numbered reads, so a stale reply can't win) | no |
+| `terminalStore` | whether the shell is running, or its exit code | no |
+
+The theme (`theme.ts`) is saved as `roughcut-theme`; dark is the default.
+`styles.css` is one sheet built on `:root` tokens, with `[data-theme="light"]`
+swapping the variables.
+
+### Playback and the timeline
+
+`playback/engine.ts` (`usePlaybackEngine`) drives the `<video>` element: it
+skips excluded ranges when **Skip cuts** is on, plays clip pieces back to back
+for auditions, and keeps the audio offset. `timeline/Timeline.tsx` owns a
+DPR-aware canvas; `renderer.ts` is pure drawing and math. Its `buildTimeMap()`
+collapses excluded ranges when **Show cuts** is off and converts between
+source and display time both ways. Real waveform peaks and thumbnails come
+from `get_media_assets` (`timeline/assets.ts`); a seeded placeholder waveform
+is only the fallback in the mock or before assets load.
+
+---
+
+## 11. Persistence and events
+
+### Store (`core/src/store.rs`)
+
+SQLite as a document store: the Rust types are the schema. Tables:
+`projects`, `transcripts`, `preferences`, `kv`, and `embeddings` (project,
+segment, model, f32 vector). The `Store` trait has 12 methods;
+`Store::delete_project` hard-deletes, while `Editor::delete_project` only
+moves a project to the trash.
+
+```
+~/Library/Application Support/roughcut/     (macOS data dir)
+├── library.db     projects · transcripts · preferences · kv · embeddings
+├── mcp.json       MCP URL + token, for the shim
+├── models/        whisper models
+├── cache/<key>/   waveform peaks, thumbnails, play.mp4, face samples
+├── media/         footage joined by append_media
+└── bin/           runtimes the app installed (e.g. llama-server)
+```
+
+kv keys: `journal:{id}` (undo history), `outline:{id}`, `mcp_token`,
+`mcp_port`. The Hosted key is in the OS key store, never on disk. Saving is
+automatic inside the edit seam; `save_project` exists but users never need it.
+
+### Events (`core/src/events.rs`)
+
+The core pushes, the frontend pulls. Every event is a `CoreEvent` variant
+serialized at one point; `EventSink` is a one-method trait (Tauri in the app,
+a channel in tests). There are 13:
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `progress` | `{ task, project_id?, fraction, message }` | long jobs: transcribe, rough_cut, export, model_download, model_pull, runtime_install, find_clips, make_clips, export_clips |
+| `agent-step` | `{ project_id, step, kind, tool?, args?, result?, text? }` | live chat-assistant steps |
+| `timeline-changed` | `{ project_id }` | any edit, undo or redo |
+| `transcript-changed` | `{ project_id }` | transcription or cleanup finished |
+| `media-assets-changed` | `{ project_id }` | peaks, thumbnails or the playable copy are ready |
+| `projects-changed` | `{}` | project created, copied, deleted or restored |
+| `project-opened` | `{ project_id }` | an MCP client opened a project: show it |
+| `clips-changed` | `{ project_id }` | saved clips or candidates changed |
+| `model-route` | `{ mode, effective, reason? }` | where AI steps really run changed |
+| `confirm-request` | `{ id, summary }` | an MCP client wants to export or delete |
+| `terminal-output` | `{ id, data }` | base64 shell output |
+| `terminal-exit` | `{ id, code? }` | the shell ended |
+| `mcp-ready` | `{ url, token }` | the MCP server is up; emitted directly by the shell |
+
+The change events carry only an id. The frontend re-fetches through tools, so
+it can never render a stale, half-applied state.
+
+---
+
+## 12. The Tauri shell (`app/src-tauri/src/lib.rs`)
+
+One generic command runs every tool. The other commands are the things that
+must stay out of the registry (OS access, the model switch and key, installs,
+the terminal):
+
+| Purpose | Commands |
+|---|---|
+| Core | `call_tool`, `list_tools`, `mcp_endpoint_info` (null until the server is up), `demo_mode`, `confirm_action` |
+| OS | `reveal_path`, `open_external` (three allowed sites) |
+| Setup | `setup_status`, `download_whisper_model` (checked against a pinned sha256) |
+| LOCAL / HOSTED | `model_status`, `set_model_mode`, `set_hosted_model`, `set_hosted_key`, `check_hosted_key` |
+| Local model | `ollama_pull_model`, `install_llama_server`, `download_gguf`, `start_managed_llm` |
+| Terminal | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill` |
+| DaVinci Resolve | `install_resolve_plugin`, `resolve_status`, `send_to_resolve` |
+
+At startup the shell registers the single-instance plugin (a second launch
+focuses the first window), the dialog plugin, an `EventSink` that forwards core
+events to the WebView, and the Editor; then it starts the MCP server and emits
+`mcp-ready`. On exit it stops the managed model server and kills every
+terminal. The app builds the core with `whisper-native`.
+
+Config (`tauri.conf.json`): drag-and-drop on, the asset protocol enabled (the
+`<video>` element plays local files through `convertFileSrc`), minimum window
+1100×700, Vite dev server on port 1420.
+
+---
+
+## 13. Feature walkthroughs
+
+**Import and transcribe.** Drop an OBS file → `create_project { name,
+file_path }` (probe + attach) → `transcribe` in the background: WAV → whisper
+→ segments with word timings → saved, `transcript-changed` → the script
+appears. Cleanup and the search index follow; peaks, thumbnails and (for MKV)
+the playable copy land via `media-assets-changed`.
+
+**One-click rough cut.** The Rough cut button → `generate_rough_cut` →
+checkpoint, confirmed silences and fillers cut, takes and repeats offered as
+suggestions → the badge reads "N cuts · M to review". One undo reverts it.
+
+**Edit by transcript.** Select paragraphs and press Delete →
+`cut_by_transcript` → `Timeline::cut_linked` excludes those ranges and links
+the segment ids → the strike-through in the script and the gap in the canvas
+both appear, because both re-read the same timeline.
+
+**Chat edit.** "cut the tangent about hiking" → `apply_instruction` → the agent
+calls `find_segments("hiking")`, then `cut_by_transcript` → `agent-step` events
+stream into the chat → a summary with "Undo all N edits".
+
+**Bulk shorts.** Shorts screen → Scan (`find_clips { scan: true }`) → cards →
+tick → Make (`create_clips`, face framing) → Export (`export_clips` to a
+folder).
+
+**Claude Code session.** Terminal tab → Connect Claude Code → `claude` → "open
+my AI doom video and make three shorts" → `open_project` (the app switches) →
+`find_clips` / `create_clips` → the Shorts screen fills in live through
+`clips-changed`; exports ask the user first.
+
+**Export.** Export menu → `export { target, out_path }` → the matching writer
+in `core/src/export/`: `premiere_xml` / `resolve_xml` (FCP7 XMEML), `fcp_xml`
+(FCPXML), `edl` (CMX3600), `otio`, `srt` (captions in output time), `txt`
+(plain transcript) or `mp4` (ffmpeg render). Files go to
+`~/Downloads/<project>-export.<ext>` and are revealed in Finder; "Send to
+DaVinci Resolve" appears when Resolve is installed.
+
+---
+
+## 14. Building and testing
+
+```sh
+cargo test -p roughcut-core            # unit + e2e + MCP-over-HTTP + parity guards (fixtures, offline)
+cd frontend && npx tsc -b && npm run build
+npm --prefix frontend run dev          # UI alone in a browser on the mock API
+cargo tauri dev                        # the real app (from app/src-tauri)
+FABLE_DEMO=1 cargo tauri dev           # full app on fixtures, nothing installed
+cargo run -p roughcut-core --example agent_live      # agent loop against a real local model
+cargo run -p roughcut-core --example playable_check  # OBS-style playable copy
+scripts/build-macos-app.sh             # signed release RoughCut.app
+```
+
+- `core/tests/e2e.rs` is the best executable documentation: it walks the whole
+  edit loop through the registry and drives a live MCP server over HTTP.
+- `core/tests/doc_parity.rs` fails if a registry tool is missing from
+  `tool-api.md` (or the doc lists one that doesn't exist).
+- `core/tests/mock_parity.rs` fails if a registry tool is missing from the
+  browser mock.
+- **Signing.** `scripts/build-macos-app.sh` signs with a local "RoughCut Local
+  Signing" identity when it exists (so camera and microphone grants survive
+  rebuilds), ad hoc otherwise. CI's `release.yml` builds an Apple silicon
+  `.dmg` and signs and notarizes it once the Apple secrets are set; unsigned
+  until then.
+
+---
+
+## 15. Extension points
 
 | You want to… | Do this |
 |---|---|
-| Add an operation/feature | Add an `Editor` method → handler + `tool!(…)` row in `tools.rs` → (optional) mutation hook in `queries.ts` + UI. It's automatically available over MCP. |
-| Let the agent use it | Flag its row `agent: true`. Mind the budget: more tools = worse small-model tool selection. |
-| Swap the transcriber (e.g. whisper-rs, Parakeet) | Implement `Transcriber` (`adapters/transcribe.rs:13`), select it in `Editor::bootstrap_with_store`. Contract: segments + word-level timestamps. |
-| Use a different LLM/server | No code: set `INFERENCE_ENDPOINT`/`INFERENCE_MODEL` (anything OpenAI-compatible). New protocol: implement `InferenceClient`. |
-| Add an export format | New writer in `core/src/export/`, register it in `render_text_target` (`export/mod.rs:31`), add the target string to the `export` tool def and `ExportMenu`. |
-| Add a panel | New component + `callTool`/query hooks; subscribe to events if it shows live state. No Rust changes needed. |
-| Replace the storage layer | Implement `Store` (`store.rs:12`) — it's seven methods of JSON document I/O. |
-| Embed the core elsewhere (CLI, server, another shell) | Depend on `roughcut-core`, provide an `EventSink`, call `Editor::bootstrap` + `tools::dispatch`. The Tauri shell is 80 lines; yours can be too. |
+| Add an operation | Implement it on the Editor (`core/src/engine/`) → a handler and a `tool!` row in `tools.rs` → document it in `tool-api.md` and add it to `mockApi.ts` (the parity tests insist) → a query or mutation hook and the UI. MCP clients get it with no extra work. |
+| Let the chat assistant use it | Flag the row `agent: true`. Every extra tool makes a small model choose worse, so add only what it needs. |
+| Change model types | Regenerate the frontend types: `TS_RS_EXPORT_DIR="$(pwd)/frontend/src/ipc/generated" cargo test -p roughcut-core --features ts-bindings export_bindings`. |
+| Use a different local model or server | No code: change the endpoint and model in Setup (or `INFERENCE_ENDPOINT` / `INFERENCE_MODEL`). Anything OpenAI-compatible works. |
+| Swap the transcriber | Implement `Transcriber` (`adapters/transcribe.rs`). Contract: segments with word-level timings. |
+| Add an export format | A new writer in `core/src/export/`, registered in `export/mod.rs`; add the target to the `export` tool and the Export menu. |
+| Add a panel | A component plus `callTool` / query hooks; subscribe to the events it shows. No Rust changes. |
+| Embed the core elsewhere | Depend on `roughcut-core`, provide an `EventSink`, call `Editor::bootstrap` and `tools::dispatch`. |
 
-### Known gaps (honest list)
+---
 
-Per README status: no M0 WebView spike on Windows/Linux yet (WebCodecs/canvas
-performance is the project's top technical risk), waveforms are placeholder
-peaks, no WebCodecs frame-accurate preview, no bundled llama.cpp or ffmpeg
-sidecars, and no signed bundles (M7). The CLI-based `WhisperCli` fallback
-still reports no fine-grained progress; the default in-app `WhisperRs` engine
-does.
+## 16. Known issues (found while writing this)
+
+- **`reorder_clip` does nothing.** `apply_op` moves the clip, then
+  `Timeline::normalize` sorts clips by `source_in` and undoes the move. No test
+  covers it; MCP clients can still call it. (`engine/edits.rs`)
+- **Chat edits are credited to `ui`.** `h_apply_instruction` passes the UI
+  caller's source into the loop as `attribute_to`, so History shows the
+  assistant's edits as the user's. The intent is `local_ai`. (`tools.rs`)
+- **A failed transcription after a new import is silent.**
+  `newProjectFromDialog` resolves as soon as the project exists, so a later
+  transcription error is dropped. (`frontend/src/newProject.ts`)
+- **`mcp-ready` bypasses `CoreEvent`.** The shell emits it directly,
+  `CoreEvent::McpReady` is unused, and nothing listens for it.
+- **Not yet built:** no WebCodecs frame-accurate preview. By design, ffmpeg,
+  model weights and the llama-server runtime are not bundled; Setup finds them
+  or downloads them on request (checksum-verified). CI builds and tests the core
+  and the app on macOS, Linux and Windows, but day-to-day use is on macOS
+  (Apple silicon).

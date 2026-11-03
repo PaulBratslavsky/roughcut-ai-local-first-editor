@@ -9,13 +9,21 @@ Keep entries short. When a refactor names a new module, add the term here.
 
 ## Core nouns
 
-- **Project** (`model.rs`) — the editing unit: `Media` + `Timeline` + `Transcript`
-  + metadata (`checkpoints`, `suggestions`, preferences). Persisted whole via the
-  `Store`. Has a lifecycle: Draft → Exported → Trashed (today inferred, not an enum
-  — see state machines).
+- **Project** (`model.rs`) — the editing unit: `Media` + `Timeline` + metadata
+  (`checkpoints`, `suggestions`, `saved_clips`, `clip_candidates`, `audio_offset_s`,
+  `deleted_at`, `schema_version` 2; legacy `screen_media` / `layout`). The
+  `Transcript` is stored separately, keyed by project; preferences are global
+  (since schema v2), not on the Project. Persisted whole via the `Store`. Has a
+  lifecycle: Draft → Exported → Trashed (today inferred, not an enum — see state
+  machines).
 - **Media** (`model.rs`) — the source video: path, duration, frame rate. Edits
   never touch the file. ⚠ The `Media` record is replaced by `append_media`
   (stitched source) outside the journal — see audit B4.
+- **Playable copy** (`adapters/video.rs::ensure_playable_copy`) — an MP4 built
+  in the background at `<data dir>/cache/<key>/play.mp4` when the webview can't
+  play the source (OBS `.mkv`, `.webm`, `.avi`, an MP4 with its index at the
+  end). Only the preview uses it; transcription, render and export read the
+  original. `media-assets-changed` says when it is ready or failed.
 - **Transcript** (`model.rs`) — the spoken content: an ordered list of
   `TranscriptSegment`. Edits flip clip inclusion, not text — but it is NOT
   immutable: LLM cleanup rewrites `segment.text` (`media.rs::update_segment_texts`)
@@ -85,14 +93,18 @@ Keep entries short. When a refactor names a new module, add the term here.
   sentence-aligned stretch of the current cut inside one Beat, scored 0–100 for
   short-form potential (hook, stands alone, payoff) `{ id, start, end, pieces,
   duration, title, hook, reason, score, segment_ids, method: "llm"|"heuristic",
-  theme }`. `pieces` are the stretches it plays, in play order (one today);
+  theme, scorer }` (`scorer`: the model that scored it, null for a rule-based
+  score). `pieces` are the stretches it plays, in play order (one today);
   `start`/`end` cover them. A `theme` restricts candidates to moments the hybrid
   search finds about it. A **scan** (`find_clips { scan: true }`) judges moments
   from every Beat and skips moments already saved as clips; one run per project
   at a time. The latest run is persisted on the Project until the next run.
 - **Shorts screen** (`frontend/src/panels/ShortsScreen.tsx`) — the app screen
   for reviewing a scan: the player beside a grid of candidate cards and the
-  saved clips, with "Scan for shorts", "Make N shorts" and "Export N".
+  saved clips, with "Scan for shorts", "Make N shorts" and "Export N". A
+  terminal drawer under the player shows the app's one Terminal session.
+- **Footage tab** (`frontend/src/panels/FootagePanel.tsx`) — adds another video
+  file to the end of the current project's source (`append_media`).
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.
 - **Beat** (`story.rs`) — one story unit: `{ title, summary, role, cut_priority
   (1=spine…5=cut first), segment_ids, start, end }`.
@@ -118,8 +130,24 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **ActionSource** (`model.rs`) — the attribution tag on an `EditAction`
   (`ui` / `local_ai` / `mcp_client`); derived from the `Caller`. Visibility is
   decided by `Caller` alone; handlers still key their confirmation prompts
-  (`export`, `delete_project`) and the preferences egress guard on the source
-  (moving those guards onto `ToolSpec` is refactor item 8's follow-up).
+  (`export`, `export_clip`, `export_clips`, `delete_project`) and the preferences
+  egress guard on the source (moving those guards onto `ToolSpec` is refactor
+  item 8's follow-up).
+- **MCP endpoint** (`mcp/server.rs`) — `POST http://127.0.0.1:<port>/mcp`,
+  JSON-RPC, guarded by a per-install Bearer token (kv `mcp_token`). The port is
+  stable: saved in kv `mcp_port` and reused when free. URL + token are written
+  to `<data dir>/mcp.json` for the shim. An MCP client's `open_project` sends
+  `project-opened`, and the app switches to that project.
+- **Confirmation** (`engine/confirm.rs`) — the user's approval of a destructive
+  op from an MCP client (`export`, `export_clip`, `export_clips`,
+  `delete_project`): a `confirm-request` event, answered by the
+  `confirm_action` command. No answer in 120 s = deny; `ROUGHCUT_NO_CONFIRM=1`
+  skips it.
+- **Terminal session** (`pty.rs`; `frontend/src/state/terminalSession.ts`) — the
+  app's one login shell, shared by the editor's Terminal tab and the Shorts
+  screen's drawer. Its env carries `ROUGHCUT_MCP_URL` / `ROUGHCUT_MCP_TOKEN`, so
+  "Connect Claude Code" can register the MCP endpoint over HTTP. Switching tabs
+  never kills it; only Restart (or quitting the app) does.
 
 ## Seams (adapters — swappable behind traits)
 
@@ -127,14 +155,21 @@ Keep entries short. When a refactor names a new module, add the term here.
   embeddings, preferences, kv). A deep seam; intentionally one trait.
 - **VideoEngine** (`adapters/video.rs`), **Transcriber** (`adapters/transcribe.rs`),
   **Embedder** (`adapters/embed.rs`), **InferenceClient** (`adapters/inference.rs`)
-  — the portability seam; each has an `Auto*` variant that picks real-vs-mock at
-  runtime via `capabilities::probe`.
+  — the portability seam. Only video and transcription have an `Auto*` variant
+  (`AutoVideoEngine`, `AutoTranscriber`), which picks real-vs-mock on every call
+  via `capabilities::probe`. Embeddings use `OllamaEmbedder`. Inference has two
+  production clients (`OpenAiCompatClient`, `AnthropicClient`) and no mock;
+  `engine/route.rs` picks one per run.
 - **EventSink** (`events.rs`) — core → UI push; `CoreEvent` is the one typed event
-  vocabulary, serialized at a single choke point.
+  vocabulary, serialized at a single choke point. Exception: the shell emits
+  `mcp-ready` raw (`app/src-tauri/src/lib.rs`); `CoreEvent::McpReady` is unused.
 - **ModelMode** (`model.rs`; the LOCAL / HOSTED chip) — where the AI steps run:
   `local` (Ollama / llama-server, the default) or `hosted` (Claude through the
   user's own API key, text only). Changed only by the user in the app (Tauri
-  commands), never by a tool (ADR-0007).
+  commands), never by a tool (ADR-0007). **ModelStatus** (`model_status`) is
+  what the chip shows: the chosen `mode`, the `effective` one, and a
+  **RouteReason** (`offline` | `rate_limited` | `server_error` | `key_rejected` |
+  `no_key`) when they differ.
 - **HostedRouter** (`engine/route.rs`) — the per-run client `Editor::inference()`
   hands out in Hosted mode: one model per run; only "unreachable" falls back to
   the local model; no key / a rejected key or request is a visible

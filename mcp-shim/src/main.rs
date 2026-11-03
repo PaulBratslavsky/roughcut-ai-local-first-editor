@@ -4,9 +4,11 @@
 //! running app's localhost MCP endpoint (with the per-install auth token),
 //! and writes responses back to stdout.
 //!
-//! The app binds a NEW random port each launch and rewrites its endpoint
-//! file, so discovery is re-run lazily: on the first request, and again
-//! whenever a send fails. A long-lived shim therefore survives app restarts.
+//! The app keeps its port between launches (saved, and reused when free); it
+//! takes a new one only if the old one is taken, and rewrites its endpoint
+//! file either way. So discovery is re-run lazily: on the first request, and
+//! again whenever a send fails. A long-lived shim therefore survives app
+//! restarts, even one that moves the port.
 //!
 //! Endpoint discovery, in order:
 //!   1. --endpoint <url> --token <token> arguments (pinned; no re-discovery)

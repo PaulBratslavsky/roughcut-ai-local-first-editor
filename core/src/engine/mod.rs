@@ -8,8 +8,10 @@
 //! - [`projects`] — project lifecycle + read access
 //! - [`media`] — import, transcription, transcript text updates
 //! - [`edits`] — THE mutation seam: apply_edit, journal, undo/redo
+//! - [`clips`] — saved clips + candidate storage, one scan per project, face crop
 //! - [`semantic`] — embedding index + cosine search
 //! - [`confirm`] — user approval of externally-driven destructive ops
+//! - [`route`] — the LOCAL / HOSTED switch: which inference client a run gets
 
 mod clips;
 mod confirm;

@@ -101,9 +101,9 @@ export function hitTestClipEdge(rects: ClipRect[], x: number): EdgeHit {
 }
 
 // ---------------------------------------------------------------------------
-// Waveform peaks. Deterministic pseudo-random per clip id for now; this hook
-// point is where real peaks from the Rust VideoEngine adapter will plug in
-// later (binary over the asset/stream protocol, never JSON IPC).
+// Fallback waveform: deterministic pseudo-random peaks per clip id, drawn only
+// while the real peaks (from get_media_assets, loaded as binary over the asset
+// protocol in assets.ts, never JSON IPC) aren't available.
 // ---------------------------------------------------------------------------
 
 const peakCache = new Map<string, number[]>();

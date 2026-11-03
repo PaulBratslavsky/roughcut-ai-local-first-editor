@@ -424,10 +424,15 @@ There are no child directories with contracts.
     deletes them.
   - A temp concat list (`roughcut-concat-<uuid>.txt`) in
     `std::env::temp_dir()`, removed after the join.
-- **Network.** HTTP to the configured local or remote endpoint only:
+- **Network.** HTTP to the configured local or remote endpoint, and to
+  Anthropic in Hosted mode only:
   - `POST {endpoint}/chat/completions`, with an optional `Authorization: Bearer`.
   - `POST {endpoint}/embeddings`.
   - `GET {endpoint}/models`.
+  - `anthropic.rs`, only when the user turns on Hosted mode:
+    `POST https://api.anthropic.com/v1/messages` and
+    `GET https://api.anthropic.com/v1/models/{model}`. Embeddings never go
+    there; they always use `{endpoint}/embeddings`.
 - **Environment reads.** `FABLE_DEMO` (via `capabilities`), `FFMPEG_PATH`,
   `FFPROBE_PATH`, `PATH`, `WHISPER_MODEL`, `HOME` (via `dirs`, for
   `crate::store::data_dir()`), and `TMPDIR` (via

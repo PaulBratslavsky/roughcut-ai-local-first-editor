@@ -1,4 +1,6 @@
-// Canvas timeline: ruler, clip blocks, fake waveform, playhead.
+// Canvas timeline: ruler, clip blocks, waveform + thumbnails, playhead.
+// Real peaks and thumbnails come from get_media_assets; the seeded waveform
+// in renderer.ts is only a fallback until they load.
 // Interactions: click/drag to seek, edge-drag to trim (-> trim_clip),
 // wheel to zoom around the playhead / horizontal scroll.
 

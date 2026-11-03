@@ -27,9 +27,9 @@ pub struct ToolSpec {
     pub schema: fn() -> Value,
     /// Exposed to the LOCAL agent loop (meta tools and project lifecycle are not).
     pub agent: bool,
-    /// Dispatches into the agent loop / external escalation / provider opt-in —
-    /// callable from the UI only (see [`Caller`]), so a loop can never recurse
-    /// into itself and an external client can't opt the user into egress.
+    /// Dispatches into the agent loop — callable from the UI only (see
+    /// [`Caller`]), so a loop can never recurse into itself. Today the only
+    /// meta tool is `apply_instruction`.
     pub meta: bool,
     /// Lands undoable EditActions (drives the agent loop's act/read
     /// accounting — the registry owns this, not a parallel hand list).
