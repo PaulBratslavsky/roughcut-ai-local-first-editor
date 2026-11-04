@@ -1,8 +1,8 @@
 # App log
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Implemented on `feat/logging` (see "As built"); the manual
-    check in the desktop app is still to do. Reviewed (scope + accuracy
+*   **Status:** Implemented on `feat/logging` (see "As built") and checked
+    in the installed desktop app on 2026-11-04. Reviewed (scope + accuracy
     goldfish reviews, see "Review"); the owner chose the recommendation for
     each open question.
 *   **Date:** 2026-11-03 (built 2026-11-04)
