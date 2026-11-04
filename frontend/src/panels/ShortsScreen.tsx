@@ -45,17 +45,19 @@ import {
   toggleTicked,
 } from "../state/shortsStore";
 import { CandidateCard } from "./CandidateCard";
+import { ChatPanel } from "./ChatPanel";
 import { errText, scoredBy, slugify, useSecondsSince } from "./clipUtil";
 import { modelLabel, useModelStatus } from "../state/modelStore";
 import { PreviewPanel } from "./PreviewPanel";
 import { SavedClipRow } from "./SavedClipRow";
 import { TerminalPanel } from "./TerminalPanel";
 import { TopBar } from "./TopBar";
-import { toggleShortsTerminal, viewStore } from "../state/viewStore";
+import { showShortsDrawerTab, toggleShortsDrawer, viewStore, type ShortsDrawerTab } from "../state/viewStore";
 import { transcribeErrors } from "../state/transcribeStore";
 
 /** "Scan for shorts" (count and threshold are starting values to tune). */
 const SCAN = { scan: true, count: 40, min_score: 40, multi_moment: true } as const;
+const DRAWER_TABS: ShortsDrawerTab[] = ["chat", "terminal"];
 
 // Run outcomes go to the store, keyed by the project the run was for. These
 // are hook-level callbacks: they still run if the screen is gone by then.
@@ -133,7 +135,8 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
   const exporting = useIsMutating({ mutationKey: clipRunKeys.export(projectId) }) > 0;
 
   const s = useStore(shortsStore, (all) => all[projectId] ?? EMPTY_SHORTS);
-  const terminalOpen = useStore(viewStore, (v) => v.shortsTerminalOpen);
+  const drawerOpen = useStore(viewStore, (v) => v.shortsDrawerOpen);
+  const drawerTab = useStore(viewStore, (v) => v.shortsDrawerTab);
   const transcribeError = useStore(transcribeErrors, (all) => all[projectId] ?? null);
   const elapsed = useSecondsSince(scanning ? s.scanStartedAt : null);
   const picked = useMemo(() => new Set(s.picked), [s.picked]);
@@ -208,22 +211,40 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
             Click a card's picture to play it here · Space plays / pauses. While a card plays, the centred 9:16
             window shows where its short starts; making it frames the crop on the speaker.
           </p>
-          {/* The app's one shell (the editor's Terminal tab shows the same
-              session): run Claude Code here and watch the cards update. */}
-          <div className={`shorts-terminal${terminalOpen ? " open" : ""}`}>
-            <button
-              className="shorts-terminal-toggle"
-              onClick={toggleShortsTerminal}
-              aria-expanded={terminalOpen}
-              title="The same shell as the editor's Terminal tab — closing it keeps it running"
-            >
-              <span className="shorts-terminal-caret" aria-hidden>
-                {terminalOpen ? "▾" : "▸"}
+          {/* Ask for changes while you review: the app's own chat (Local or
+              Hosted, same conversation as the editor's Chat tab) or the app's
+              one shell for Claude Code (same session as the Terminal tab). */}
+          <div className={`shorts-drawer${drawerOpen ? " open" : ""}`}>
+            <div className="shorts-drawer-bar">
+              <button
+                className="shorts-drawer-toggle"
+                onClick={toggleShortsDrawer}
+                aria-expanded={drawerOpen}
+                aria-label={drawerOpen ? "Hide the chat and terminal" : "Show the chat and terminal"}
+                title={drawerOpen ? "Hide (the chat and the terminal keep running)" : "Show"}
+              >
+                {drawerOpen ? "▾" : "▸"}
+              </button>
+              <div className="shorts-drawer-tabs" role="tablist" aria-label="Drawer">
+                {DRAWER_TABS.map((t) => (
+                  <button
+                    key={t}
+                    role="tab"
+                    aria-selected={drawerOpen && drawerTab === t}
+                    className={`tab${drawerOpen && drawerTab === t ? " active" : ""}`}
+                    onClick={() => showShortsDrawerTab(t)}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <span className="shorts-drawer-hint">
+                {drawerTab === "chat"
+                  ? `the app's assistant · runs on ${modelLabel(model)}`
+                  : "Claude Code over MCP · needs internet"}
               </span>
-              terminal
-              <span className="shorts-terminal-hint">ask Claude Code to make or change shorts</span>
-            </button>
-            {terminalOpen && <TerminalPanel />}
+            </div>
+            {drawerOpen && (drawerTab === "chat" ? <ChatPanel projectId={projectId} /> : <TerminalPanel />)}
           </div>
         </section>
 

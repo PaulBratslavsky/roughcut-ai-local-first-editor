@@ -64,7 +64,8 @@ only if it is taken. The app writes `{ url, token }` to `<data dir>/mcp.json`.
 `mcp-shim` proxies stdio ⇄ that endpoint for Claude Desktop (or Claude Code).
 Claude Code can also connect over HTTP directly: the in-app terminal's shell
 has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its env, and its "Connect
-Claude Code" button runs `claude mcp add --transport http` with them.
+Claude Code" button runs `claude mcp remove` then `claude mcp add --transport
+http` with them (so a repeat click refreshes the registration).
 `initialize` returns an `instructions` string on how to use the tools.
 One tool is left out: the orchestration meta-tool `apply_instruction` is
 neither advertised nor callable over MCP — an

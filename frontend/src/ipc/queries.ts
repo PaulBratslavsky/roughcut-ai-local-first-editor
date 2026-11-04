@@ -15,7 +15,6 @@ import type {
   EditResult,
   ExportResult,
   ExportTarget,
-  InstructionResult,
   ListProjectsResult,
   Media,
   Preferences,
@@ -325,13 +324,6 @@ export interface ApplyInstructionArgs extends Record<string, unknown> {
   history?: { role: "user" | "agent"; text: string }[];
 }
 
-export function useApplyInstruction() {
-  return useEditMutation<ApplyInstructionArgs, InstructionResult>("apply_instruction", [
-    "timeline",
-    "transcript",
-    "project",
-  ]);
-}
 
 export function useUndo() {
   return useEditMutation<{ project_id: string }, UndoResult>("undo", ["timeline", "transcript", "project"]);

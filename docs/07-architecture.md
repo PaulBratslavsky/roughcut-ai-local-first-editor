@@ -565,7 +565,7 @@ Two MCP-only behaviours:
 
 | Route | For | How |
 |---|---|---|
-| Direct HTTP | Claude Code in the in-app terminal | The terminal's shell has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its environment. **Connect Claude Code** types `claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" --header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"`, so the token never appears on screen. |
+| Direct HTTP | Claude Code in the in-app terminal | The terminal's shell has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its environment. **Connect Claude Code** types `claude mcp remove roughcut -s local` and then `claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" --header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"` with its output hidden, so a repeat click refreshes the registration and the token never appears on screen. It is typed at the shell prompt, so click it before starting `claude`. |
 | The shim | Claude Desktop, or Claude Code outside the app | `roughcut-mcp-shim` finds the endpoint (arguments → `ROUGHCUT_MCP_ENDPOINT` / `ROUGHCUT_MCP_TOKEN` → `mcp.json`) and forwards each stdio line over HTTP with the token, retrying while the app starts. |
 
 ### The in-app terminal (`core/src/pty.rs`, `frontend/src/state/terminalSession.ts`)
@@ -610,13 +610,16 @@ list).
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The **Shorts** screen has the player, a note and the terminal drawer on the
-left, and the candidate cards and saved shorts on the right.
+The **Shorts** screen has the player, a note and a drawer on the left, and
+the candidate cards and saved shorts on the right. The drawer has two tabs:
+**chat** (the default; the same conversation as the editor's Chat tab, on the
+app's Local or Hosted model) and **terminal** (the same shell as the editor's
+Terminal tab, for Claude Code). Its open state and tab are saved.
 
 | Panel | What it does |
 |---|---|
 | `TranscriptPanel` | The main editing surface: segments, silences, cuts (struck through), suggestions with accept/dismiss, a menu with Cut / Restore / Add to clip / Play from here, search, the Rough cut button |
-| `ChatPanel` | Sends `apply_instruction` with the last 8 turns; streams `agent-step`; "Undo all N edits" calls `undo_actions` |
+| `ChatPanel` | Shows the project's conversation from `chatStore` (the editor's Chat tab and the Shorts drawer show the same one); sends `apply_instruction` with the last 8 turns; streams `agent-step`; "Undo all N edits" calls `undo_actions` |
 | `InspectorPanel`, `MetadataPanel` | The Tools tab: padding, aggressiveness, filler words, target length, audio sync, layout; chapters, title, captions |
 | `ClipsPanel`, `SavedClipRow`, `CandidateCard` | Find and save clips; rename, format, crop, export |
 | `ShortsScreen` | Scan, review cards, make and export shorts in bulk |
@@ -677,10 +680,11 @@ project list, then switches, and stays on the current screen.
 
 | Store | Holds | Saved |
 |---|---|---|
-| `viewStore` | screen, open project, playhead, zoom, scroll, selection, active right-hand tab, audition, clip draft, crop being framed | show/skip cuts, collapsed preview and the Shorts terminal drawer, in localStorage `rc-view-prefs` |
+| `viewStore` | screen, open project, playhead, zoom, scroll, selection, active right-hand tab, audition, clip draft, crop being framed | show/skip cuts, collapsed preview, and the Shorts drawer's open state and tab, in localStorage `rc-view-prefs` |
 | `shortsStore` | per project: picks, ticks, scan / make / export progress and results | no |
 | `modelStore` | the chip's copy of `model_status` (numbered reads, so a stale reply can't win) | no |
 | `transcribeStore` | per project: the last transcription error, shown in the transcript panel and on the Shorts screen. An import transcribes after the app has switched to the new project, so `ingestFile` keeps its error here | no |
+| `chatStore` | per project: the chat conversation and the run in progress (the run and its `agent-step` stream live here, so switching screens mid-run loses nothing) | no |
 | `terminalStore` | whether the shell is running, or its exit code | no |
 
 The theme (`theme.ts`) is saved as `roughcut-theme`; dark is the default.
