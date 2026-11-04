@@ -245,7 +245,7 @@ the event's fields. Fields that don't apply are left out.
 Notes:
 
 *   **`ai_request.step`** is the call's existing label (`outline`,
-    `short_scores`, `flow review`, `story plan`, `transcript cleanup`,
+    `short_picks`, `flow review`, `story plan`, `transcript cleanup`,
     `chapters`, `title/description`, `chat`). Token counts are the `Usage`
     the Anthropic client already returns, summed over a call's repair retry;
     local replies have none. `served_by` is the `ServedBy` model that
@@ -281,7 +281,7 @@ partial result on the step first).
 | `step` | Where | Outcomes |
 | ------ | ----- | -------- |
 | `outline` | `story::outline_using` | cache hit → `ok`, method `cache`, the model that made it; model down → `fallback` `model_unreachable`; fewer than two beats → `fallback` `too_few_beats`, `beats`; a non-fatal error → `fallback` with its code; a fatal Hosted error → `failed`; else `ok`, method `llm`, `beats`, `models` |
-| `short_picks` | `clip_finder`, the `llm_rescore` decision | model down → `fallback`; an error (e.g. "model scored no clip candidates") → `fallback`, or `failed` if fatal; else `ok`; always `batches`, `batches_failed` (a failed batch keeps its rule scores) |
+| `short_picks` | `clip_finder::find_clips`, around `pick_all` (the model picks each topic's shorts) | model down → `fallback` `model_unreachable`; no topic gave a usable pick → `fallback` `no_usable_picks`; a fatal Hosted error → `failed`; else `ok`, method `llm`, `models`; always `topics`, `topics_failed` (a failed topic keeps its rule-scored windows) |
 | `flow_review` | `story::review_flow_using`, when the model pass is asked for | model down → `fallback`; unusable reply → `fallback`; fatal → `failed`; else `ok`, `boundaries` |
 | `story_plan` | `story::story_edit` (wrapped) | model down with a target length → `fallback` to the duration planner; model down without one → `failed`; the plan request failing, or either guard ("cut nearly every beat", "over 80% of the video") → `failed`; a failure after edits landed (`or_partial!`) → `failed` with `partial: true` and `actions`; else `ok`, `cut_beats`, `actions` |
 | `chat` | `agent::run_instruction` (wrapped) | model down → `fallback` to the offline editor; a first-turn non-Hosted error → `fallback` with its code; a Hosted error, or a later error → `failed` (with `actions` that had landed); out of steps → `ok` with `stopped: "max_steps"`; else `ok`; always `turns`, `actions` |
@@ -431,7 +431,7 @@ Two goldfish reviews (scope; technical accuracy), 2026-11-03. Changes made:
     `model_route` moved to `Editor::record_route`, which sees every branch
     and the return to Hosted.
 *   **Added:** step lines for chapters, title/description and transcript
-    clean-up (they fall back without making a request); `batches_failed` /
+    clean-up (they fall back without making a request); `topics_failed` /
     `chunks_failed` so a partial fallback doesn't read as a model run;
     `aborted` for steps that exit early; the 80% guard, `or_partial!` and
     the out-of-steps chat outcome; `app_start_failed`; the MCP server's
@@ -462,7 +462,7 @@ thread-local capture. Unit tests: rotation, scrubber.
 
 #### 4. Steps (`core/src/story.rs`, `core/src/clip_finder.rs`, `core/src/agent.rs`)
 
-`Step` at the eight step sites; `llm_rescore` returns its batch counts;
+`Step` at the eight step sites; `pick_all` returns its topic counts;
 `clean_transcript` its chunk counts.
 
 #### 5. ffmpeg (`core/src/adapters/video.rs`)
@@ -496,8 +496,11 @@ Built as designed, with these differences:
 
 *   **Counts are kept where they happen.** `clean_transcript` writes its
     own `transcript_cleanup` line (chunks, chunks_failed, changed) instead of
-    returning counts; `llm_rescore` fills a `Tally` (batches, failed batches,
-    the models that answered) that the `short_picks` line reads.
+    returning counts; `pick_all` fills a `Tally` (topics asked, failed
+    topics, the models that answered) that the `short_picks` line reads.
+    (Built first around the batch scorer, `llm_rescore`, with `batches` /
+    `batches_failed`; the sentence picker from `feat/shorts-sentences`
+    replaced it, and the counts became topics.)
 *   **`ai_step.models`** lists the models that answered, in order, so a run
     that moved from Claude to the local model part-way shows both.
 *   **`chapters`** falls back with reason `no_chapters` when the model

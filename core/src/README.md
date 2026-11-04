@@ -168,20 +168,42 @@ in `docs/tool-api.md`.
 - `clip_finder::find_clips` holds the project's one scan slot
   (`Editor::begin_clip_scan`; a second run errors), clamps `count` to 1–60
   (`MAX_COUNT`) and `min_s` to at least 3 s (`max_s` to at least `min_s` + 1).
-  It builds windows that start and end on a usable (kept, non-filler,
-  non-throwaway) segment within one beat, and falls back to windows that span
-  beats when none fit. It scores them heuristically, keeps a diverse pool of
-  `max(24, count)` (`POOL_MAX`), and has the model score it in batches of 6
-  (`BATCH`) by index. With `scan` (`build_pool`), the pool is up to 90
-  (`SCAN_POOL`) when a model will score it and uncapped when none is
-  reachable, filled round-robin across beats (every beat's best before any
-  beat's second; a round cut off by the cap keeps its best-scoring windows;
-  `diversify` when the windows span beats). A scan drops windows overlapping
-  a saved clip before scoring and again at the write
-  (`Editor::replace_clip_candidates`); when that leaves nothing, it writes an
-  empty list. It returns `Found { candidates, method }`.
+  It re-cuts the transcript into sentences (`sentences`: whisper's
+  segments split at sentence punctuation, timed from their word tokens or
+  by character position, and joined where a sentence runs on, but never
+  across a cut in the edit; a filler or throwaway segment, a pause of 1 s or
+  a run-on past 20 s also ends one).
+  It builds windows that start and end on a usable (kept, non-filler)
+  sentence within one beat, and falls back to windows that span beats when
+  none fit, and scores them heuristically (including "starts after its
+  setup" and "stops before the thought ends" from the neighboring
+  sentences). With a model (`pick_all`), it splits the video into regions
+  (`pick_regions`: a beat, beats shorter than `max_s` joined, parts of at
+  most `max(300 s, 2 × max_s)` overlapping by `max_s`, `region_bounds`),
+  keeps those with a usable window (`choose_regions`: all of them in a
+  scan, up to 40; otherwise the best `count/2` clamped to 4–12, skipping a
+  region whose best window a chosen one holds), and asks the model once per
+  region (`pick_shorts`, schema `short_picks`) for up to 3 shorts as
+  first/last line numbers with four 1–5 ratings (hook, standalone, payoff,
+  ending). Each pick is read on its own (`line_number`, `rating`), checked
+  by `check_pick` (line range, filler edges moved inward, length within
+  `min_s - 1`..`max_s`) and scored 0.8 × the rubric (`rubric_score`, 0–100)
+  + 0.2 × the heuristic; with a theme, a pick the search never hit is
+  dropped and the rest are ranked on theme first (`on_theme`). A region
+  keeps at most its best 3. A region whose request fails, or whose picks are
+  all unusable, keeps its heuristic windows, and so do regions a plain run
+  didn't ask about; they rank after the picks. `[]` is an answer, but when
+  the model picks nothing usable anywhere the run falls back to the
+  heuristic list. With no model, the heuristic pool is `max(24, count)`
+  (`POOL_MAX`) for a plain run and uncapped for a scan, filled round-robin
+  across beats. A scan drops windows overlapping a saved clip before
+  picking and again at the write (`Editor::replace_clip_candidates`); when
+  that leaves nothing, it writes an empty list. It returns
+  `Found { candidates, method }`.
   Two candidates sharing more than 30% of the shorter one's source seconds
-  (`MAX_OVERLAP`, `model::pieces_overlap`) are the same moment. With a theme
+  (`MAX_OVERLAP`, `model::pieces_overlap`) are the same moment, and so are
+  two heuristic windows in one beat less than 2 s apart (`ADJACENT_S`;
+  slices of one idea). With a theme
   and model scoring, judged candidates under 30 (`MIN_THEMED_SCORE`) are
   dropped, but only when at least one judged candidate scores 30 or more.
   `min_score` drops judged candidates under it.

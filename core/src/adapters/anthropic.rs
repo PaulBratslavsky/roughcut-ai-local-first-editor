@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn the_apps_four_schemas_are_accepted() {
         let cases = [
-            ("short_scores", crate::clip_finder::short_scores_schema(), true),
+            ("short_picks", crate::clip_finder::short_picks_schema(), true),
             ("beats", crate::story::beats_schema(), true),
             ("verdicts", crate::story::verdicts_schema(), true),
             ("story_plan", crate::story::story_plan_schema(), false),
@@ -670,7 +670,7 @@ mod tests {
         let mut r = req(vec![M::user("score")]);
         r.response_format = Some(json!({
             "type": "json_schema",
-            "json_schema": {"name": "short_scores", "schema": crate::clip_finder::short_scores_schema(), "strict": true}
+            "json_schema": {"name": "short_picks", "schema": crate::clip_finder::short_picks_schema(), "strict": true}
         }));
         let (body, wrapped) = build_body(&r);
         assert!(wrapped);

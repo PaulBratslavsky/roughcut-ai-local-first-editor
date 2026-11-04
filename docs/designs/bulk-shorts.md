@@ -168,9 +168,9 @@ None remain.
    ▼
  clip_finder.rs ─ single stretches ───────────┐
    outline → beats (cached)                    │
-   sentence windows inside beats               │
-   rule score; scan: round-robin pool by beat  │
-   model scores in batches of 6                │
+   transcript re-cut into sentences            │
+   model picks first/last sentence per topic   │
+   (no model: rule-scored windows by beat)     │
                                                ▼
  clip_compose.rs ─ multi-moment (Phase 3) ─► merge: diversify on pieces,
    best spans → model keeps 2–3 runs            drop saved moments,

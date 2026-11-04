@@ -506,12 +506,17 @@ seeked input, so long sources render quickly.
 the same thing done in bulk, on their own screen
 ([`designs/bulk-shorts.md`](designs/bulk-shorts.md)):
 
-1. **Scan.** `find_clips { scan: true }` (`clip_finder.rs`) uses the story
-   beats to make sentence-aligned windows of 15–60 s, scores them by rules,
-   optionally filters by a theme through hybrid search, then has the model
-   rescore them in batches of 6 (a pool of 90 when scanning, 24 otherwise).
-   Picks that overlap more than 30 % are dropped, and moments already saved as
-   clips are skipped. One scan per project at a time.
+1. **Scan.** `find_clips { scan: true }` (`clip_finder.rs`) re-cuts the
+   transcript into whole sentences (whisper's segments often stop
+   mid-sentence) and splits the video into topics along the story beats.
+   The model reads each topic as numbered sentences and picks up to three
+   shorts of 15–60 s in it, choosing each one's first and last sentence and
+   rating it on hook, stands alone, payoff and ending. Without a model,
+   sentence windows inside one beat are ranked by rules. A theme keeps only
+   moments the hybrid search finds. Picks that overlap more than 30 % are
+   dropped, and moments already saved as clips are skipped. One scan per
+   project at a time
+   ([review](reviews/2026-11-03-shorts-finder-review.md)).
 2. **Candidates** are saved on the project; `clips-changed` tells the Shorts
    screen to show them as cards, best first.
 3. **Review.** Clicking a card's picture plays its pieces with a centred 9:16

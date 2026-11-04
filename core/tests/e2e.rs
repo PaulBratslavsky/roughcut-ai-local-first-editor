@@ -922,18 +922,55 @@ mod hosted_fakes {
         req.response_format.as_ref().and_then(|f| f["json_schema"]["name"].as_str()).map(str::to_string)
     }
 
-    /// A score for every numbered candidate in a short_scores request.
-    fn scores(req: &ChatRequest, score: u32) -> String {
+    /// Picks for a short_picks request: runs of consecutive lines lasting
+    /// 20-45 s (by the times the prompt shows), from the top of the topic,
+    /// at most two, every rating `rating`.
+    fn picks(req: &ChatRequest, rating: u32) -> String {
         let user = req.messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.clone()).unwrap_or_default();
-        let items: Vec<serde_json::Value> = user
-            .split("\n\n")
-            .filter_map(|block| block.split('|').next()?.trim().parse::<usize>().ok())
-            .map(|i| serde_json::json!({"index": i, "score": score, "title": format!("T{i}"), "reason": "r"}))
-            .collect();
+        let clock = |t: &str| -> Option<f64> {
+            let (m, s) = t.split_once(':')?;
+            Some(m.parse::<f64>().ok()? * 60.0 + s.parse::<f64>().ok()?)
+        };
+        let mut lines: Vec<(usize, f64)> = vec![];
+        let mut end = 0.0;
+        for l in user.lines() {
+            if let Some((n, rest)) = l.split_once("| [") {
+                if let (Ok(n), Some(t)) = (n.trim().parse::<usize>(), rest.split(']').next().and_then(clock)) {
+                    lines.push((n, t));
+                }
+            } else if l.ends_with("end of topic") {
+                end = l.trim_start_matches('[').split(']').next().and_then(clock).unwrap_or(0.0);
+            }
+        }
+        let at = |i: usize| lines.get(i).map(|l| l.1).unwrap_or(end);
+        let mut items: Vec<serde_json::Value> = vec![];
+        let mut i = 0;
+        while i < lines.len() && items.len() < 2 {
+            let mut best = None;
+            for j in i..lines.len() {
+                let len = at(j + 1) - at(i);
+                if len > 45.0 {
+                    break;
+                }
+                if len >= 20.0 {
+                    best = Some(j);
+                }
+            }
+            match best {
+                Some(j) => {
+                    items.push(serde_json::json!({
+                        "first": lines[i].0, "last": lines[j].0, "hook": rating, "standalone": rating,
+                        "payoff": rating, "ending": rating, "title": format!("T{}", lines[i].0), "reason": "r"
+                    }));
+                    i = j + 1;
+                }
+                None => i += 1,
+            }
+        }
         serde_json::to_string(&items).unwrap()
     }
 
-    /// Claude: scores shorts until `fail_from` (1-based scoring call), then
+    /// Claude: picks shorts until `fail_from` (1-based pick request), then
     /// is unreachable; or rejects the key on every request.
     pub struct Claude {
         pub reject: bool,
@@ -950,13 +987,13 @@ mod hosted_fakes {
                     "Anthropic rejected the API key (401). Update it in Setup.",
                 )));
             }
-            let text = if schema_name(req).as_deref() == Some("short_scores") {
+            let text = if schema_name(req).as_deref() == Some("short_picks") {
                 let mut n = self.calls.lock().unwrap();
                 *n += 1;
                 if *n >= self.fail_from {
                     return Err(HostedFailure::Unreachable { reason: RouteReason::Offline, detail: "no network".into() });
                 }
-                scores(req, 85)
+                picks(req, 4)
             } else {
                 "not json".into() // the outline falls back to pause-based beats
             };
@@ -968,13 +1005,13 @@ mod hosted_fakes {
         }
     }
 
-    /// The local model: scores shorts too.
+    /// The local model: picks shorts too.
     pub struct Local;
 
     #[async_trait]
     impl InferenceClient for Local {
         async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
-            let text = if schema_name(&req).as_deref() == Some("short_scores") { scores(&req, 90) } else { "not json".into() };
+            let text = if schema_name(&req).as_deref() == Some("short_picks") { picks(&req, 5) } else { "not json".into() };
             Ok(ChatResponse::new(ChatMessage::assistant(&text)))
         }
         async fn healthy(&self) -> bool {

@@ -104,7 +104,7 @@ pub enum Event {
 
 #[derive(Debug, Serialize)]
 pub struct AiRequest {
-    /// The call's label: `outline`, `short_scores`, `chat`, …
+    /// The call's label: `outline`, `short_picks`, `chat`, …
     step: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     served_by: Option<String>,
@@ -171,7 +171,7 @@ pub enum StepOutcome {
     Aborted,
 }
 
-/// A step's counts (`beats`, `batches`, …): names are code, values numbers.
+/// A step's counts (`beats`, `topics`, …): names are code, values numbers.
 #[derive(Debug, Default)]
 struct Counts(Vec<(&'static str, u64)>);
 
@@ -1026,8 +1026,9 @@ mod tests {
         let (pid, _) = project_with_marked_transcript(&e).await;
         assert_eq!(crate::story::outline(&e, pid).await.unwrap().method, "heuristic");
 
-        // 2. A shorts scan: a good outline, then scores with the marker in
-        // the title and reason; the next batch gets "{}" and fails.
+        // 2. A shorts scan: a good outline, then picks with the marker in
+        // the title and reason (every line range, so some fit the length
+        // bounds); any later topic gets "{}" and fails.
         let outline_reply = |n: usize| {
             Ok(format!(
                 r#"[{{"title":"{MARK} one","summary":"{MARK}","role":"hook","cut_priority":1,"first":0,"last":{}}},
@@ -1037,11 +1038,20 @@ mod tests {
                 n - 1
             ))
         };
-        let scores = || Ok(format!(r#"[{{"index":0,"score":90,"title":"{MARK}!","reason":"says {MARK}"}}]"#));
+        let picks = || {
+            let all: Vec<serde_json::Value> = (1..=30)
+                .flat_map(|a| (a..=30).map(move |b| (a, b)))
+                .map(|(a, b)| {
+                    serde_json::json!({"first": a, "last": b, "hook": 4, "standalone": 4, "payoff": 4,
+                        "ending": 4, "title": format!("{MARK}!"), "reason": format!("says {MARK}")})
+                })
+                .collect();
+            Ok(serde_json::Value::Array(all).to_string())
+        };
         let (e2, hosted2, _) = hosted_editor(vec![], true);
         e2.set_hosted_key_for_tests(Some(KEY)).unwrap();
         let (pid2, n) = project_with_marked_transcript(&e2).await;
-        hosted2.script.lock().unwrap().extend([outline_reply(n), scores()]);
+        hosted2.script.lock().unwrap().extend([outline_reply(n), picks()]);
         crate::clip_finder::find_clips(&e2, pid2, Default::default()).await.unwrap();
 
         // 3. A chat turn: Anthropic is offline, so the local model answers.
@@ -1077,14 +1087,16 @@ mod tests {
         assert_eq!(outline[0]["reason"], "inference");
         assert_eq!(outline[0]["mode"], "hosted");
         assert!(outline[0]["error"].as_str().unwrap().contains("bad JSON in outline response"), "{text}");
-        // The scan: the outline on Claude, scoring with failed batches counted.
+        // The scan: the outline on Claude, then picks with failed topics counted.
         assert_eq!(outline[1]["outcome"], "ok", "{text}");
         assert_eq!(outline[1]["models"][0], "claude-opus-5-5");
         let picks = find("ai_step", "short_picks");
         assert_eq!(picks[0]["outcome"], "ok", "{text}");
-        assert!(picks[0]["batches"].as_u64().unwrap() >= 2, "{text}");
-        assert_eq!(picks[0]["batches_failed"], picks[0]["batches"].as_u64().unwrap() - 1);
-        assert!(!find("ai_request", "short_scores").is_empty());
+        let topics = picks[0]["topics"].as_u64().unwrap();
+        assert!(topics >= 1, "{text}");
+        assert_eq!(picks[0]["topics_failed"], topics - 1, "{text}");
+        assert_eq!(picks[0]["models"][0], "claude-opus-5-5");
+        assert_eq!(find("ai_request", "short_picks").len() as u64, topics);
         // The chat: Hosted went offline (one model_route line), local answered.
         let routes: Vec<_> = lines.iter().filter(|l| l["event"] == "model_route").collect();
         assert_eq!(routes.len(), 1, "{text}");
