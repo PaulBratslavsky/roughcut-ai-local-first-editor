@@ -4,7 +4,7 @@
 // ships lean; models arrive on demand.
 
 import { useEffect, useRef, useState } from "react";
-import { openExternal } from "../ipc/api";
+import { logPath, openExternal, revealPath } from "../ipc/api";
 import {
   checkHostedKey,
   setHostedKey,
@@ -250,6 +250,12 @@ export function SetupPanel({
   const [ggufUrl, setGgufUrl] = useState("");
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The app log's file; null in the browser build (the row is hidden).
+  const [logFile, setLogFile] = useState<string | null>(null);
+
+  useEffect(() => {
+    void logPath().then(setLogFile).catch(() => setLogFile(null));
+  }, []);
 
   const refresh = () => {
     void getSetupStatus().then(setStatus).catch(() => setStatus(null));
@@ -546,6 +552,23 @@ export function SetupPanel({
                 </div>
               )}
             </section>
+
+            {/* ---- app log ---- */}
+            {logFile && (
+              <section className="setup-row">
+                <div className="setup-row-head">
+                  <StatusDot ok />
+                  <strong>Logs</strong>
+                  <span className="setup-sub">AI steps, fallbacks and ffmpeg errors — stays on this Mac</span>
+                </div>
+                <p className="setup-detail">
+                  <code>{logFile}</code>
+                  <button className="primary-btn tier-btn" onClick={() => void revealPath(logFile)}>
+                    Reveal logs
+                  </button>
+                </p>
+              </section>
+            )}
 
             {error && <p className="setup-detail warn">{error}</p>}
             <p className="setup-footer">

@@ -2,6 +2,7 @@
 //! couple of conveniences), forwards core events to the webview, and starts
 //! the localhost MCP server.
 
+use roughcut_core::applog;
 use roughcut_core::events::EventSink;
 use roughcut_core::mcp::server::EndpointInfo;
 use roughcut_core::{tools, Editor};
@@ -46,6 +47,14 @@ fn mcp_endpoint_info(state: State<'_, AppState>) -> Option<EndpointInfo> {
 #[tauri::command]
 fn demo_mode(state: State<'_, AppState>) -> bool {
     state.editor.demo_mode()
+}
+
+/// The app log's file, for Setup's "Reveal logs" (None if it couldn't be
+/// opened). Outside the tool registry, like `reveal_path`: it reads a local
+/// file path, not the project.
+#[tauri::command]
+fn log_path() -> Option<String> {
+    applog::log_file().map(|p| p.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -256,8 +265,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The app log first, so a failed start is in it.
+            applog::init(&applog::log_dir());
             let sink = std::sync::Arc::new(TauriSink(app.handle().clone()));
-            let editor = Editor::bootstrap(sink)?;
+            let editor = match Editor::bootstrap(sink) {
+                Ok(editor) => editor,
+                Err(e) => {
+                    applog::write(applog::Level::Error, applog::Event::AppStartFailed { code: e.code(), error: (&e).into() });
+                    return Err(e.into());
+                }
+            };
+            applog::app_start(&editor, env!("CARGO_PKG_VERSION"));
             app.manage(AppState { editor: editor.clone(), mcp: Mutex::new(None) });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -267,7 +285,10 @@ pub fn run() {
                         *state.mcp.lock().unwrap() = Some(info.clone());
                         let _ = handle.emit("mcp-ready", serde_json::json!(info));
                     }
-                    Err(e) => eprintln!("failed to start MCP server: {e}"),
+                    Err(e) => applog::write(
+                        applog::Level::Error,
+                        applog::Event::McpFailed { error: applog::ErrText::new(&format!("failed to start MCP server: {e}")) },
+                    ),
                 }
             });
             Ok(())
@@ -279,6 +300,7 @@ pub fn run() {
             demo_mode,
             confirm_action,
             reveal_path,
+            log_path,
             open_external,
             setup_status,
             model_status,
@@ -303,6 +325,7 @@ pub fn run() {
         .expect("error while building RoughCut")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
+                applog::write(applog::Level::Info, applog::Event::AppExit {});
                 roughcut_core::llm_runtime::stop_managed();
                 roughcut_core::pty::kill_all();
             }

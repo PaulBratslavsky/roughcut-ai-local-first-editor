@@ -8,6 +8,7 @@
 //! embedded inside each step, strict JSON contracts, index-based references
 //! (small models mangle uuids), and non-LLM fallbacks everywhere.
 
+use crate::applog;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent};
@@ -85,6 +86,7 @@ pub(crate) async fn outline_using(
     let hash = transcript_hash(&speech);
     let cache_key = format!("outline:{project_id}");
     let prefs = editor.get_preferences()?;
+    let mut step = applog::Step::with_mode("outline", Some(project_id), prefs.model_mode);
     // A cached outline counts only if the model that would run now made it:
     // switching to Hosted must not keep the local model's beats.
     let expected_model = match prefs.model_mode {
@@ -99,6 +101,8 @@ pub(crate) async fn outline_using(
             });
             if let Some((cached_hash, outline, model)) = cached {
                 if cached_hash == hash && model == expected_model {
+                    step.method("cache").model(&model).count("beats", outline.beats.len());
+                    step.ok();
                     return Ok(outline);
                 }
             }
@@ -114,6 +118,8 @@ pub(crate) async fn outline_using(
         }
     };
     let mut made_by: Option<String> = None;
+    let heuristic = || Outline { beats: heuristic_beats(&speech), method: "heuristic".into() };
+    // Each fallback says why in the app log: the three used to look the same.
     let outline = if inference.healthy().await {
         match llm_outline(&speech, inference, &prefs.inference_model).await {
             Ok((beats, served)) if beats.len() >= 2 => {
@@ -123,13 +129,30 @@ pub(crate) async fn outline_using(
                 if served.iter().all(|s| s.as_ref().map(|s| &s.model) == first.as_ref().map(|s| &s.model)) {
                     made_by = first.map(|s| s.model);
                 }
+                step.method("llm").count("beats", beats.len());
+                for s in &served {
+                    step.served(s.as_ref());
+                }
+                step.ok();
                 Outline { beats, method: "llm".into() }
             }
-            Err(e) if e.is_fatal_model_error() => return Err(e),
-            _ => Outline { beats: heuristic_beats(&speech), method: "heuristic".into() },
+            Ok((beats, _)) => {
+                step.count("beats", beats.len());
+                step.fallback("too_few_beats", None);
+                heuristic()
+            }
+            Err(e) if e.is_fatal_model_error() => {
+                step.failed(&e);
+                return Err(e);
+            }
+            Err(e) => {
+                step.fallback(e.code(), Some(&e));
+                heuristic()
+            }
         }
     } else {
-        Outline { beats: heuristic_beats(&speech), method: "heuristic".into() }
+        step.fallback("model_unreachable", None);
+        heuristic()
     };
 
     // Only LLM outlines are worth caching; the heuristic is cheap and
@@ -481,12 +504,15 @@ pub(crate) async fn review_flow_using(
         None
     };
     if let Some(inference) = inference {
+        let prefs = editor.get_preferences()?;
+        let mut step = applog::Step::with_mode("flow_review", Some(project_id), prefs.model_mode);
+        step.count("boundaries", boundaries.len());
         if !inference.healthy().await {
+            step.fallback("model_unreachable", None);
             let coherent = !issues.iter().any(|i| i.severity == "high");
             return Ok(FlowReview { coherent, boundaries_checked: boundaries.len(), issues, method });
         }
         method = "llm".into();
-        let prefs = editor.get_preferences()?;
         let listed: String = boundaries
             .iter()
             .take(MAX_BOUNDARIES)
@@ -512,7 +538,7 @@ pub(crate) async fn review_flow_using(
             restore: bool,
         }
         let verdict_schema = verdicts_schema();
-        let verdicts: Result<Vec<Verdict>> = crate::llm::ask_json_schema(
+        let verdicts: Result<(Vec<Verdict>, _)> = crate::llm::ask_json_schema_served(
             inference,
             &prefs.inference_model,
             "flow review",
@@ -529,14 +555,21 @@ pub(crate) async fn review_flow_using(
             Some(&verdict_schema),
         )
         .await;
-        if let Err(e) = &verdicts {
-            if e.is_fatal_model_error() {
+        match &verdicts {
+            Ok((_, served)) => {
+                step.served(served.as_ref());
+                step.ok();
+            }
+            Err(e) if e.is_fatal_model_error() => {
+                step.failed(e);
                 return Err(verdicts.err().unwrap());
             }
+            // An unusable reply: the rule-based findings stand.
+            Err(e) => step.fallback(e.code(), Some(e)),
         }
         {
             {
-                if let Ok(verdicts) = verdicts {
+                if let Ok((verdicts, _)) = verdicts {
                     for v in verdicts {
                         if v.ok {
                             continue;
@@ -621,6 +654,24 @@ pub async fn story_edit(
     target_s: Option<f64>,
     source: ActionSource,
 ) -> Result<StoryEditOutcome> {
+    // One `story_plan` line in the app log for the whole edit.
+    let mut step = applog::Step::start(editor, "story_plan", Some(project_id));
+    let result = story_edit_logged(editor, project_id, instruction, target_s, source, &mut step).await;
+    if let Ok(outcome) = &result {
+        step.count("actions", outcome.actions.len());
+    }
+    step.finish(&result);
+    result
+}
+
+async fn story_edit_logged(
+    editor: &Editor,
+    project_id: Uuid,
+    instruction: &str,
+    target_s: Option<f64>,
+    source: ActionSource,
+    step: &mut applog::Step,
+) -> Result<StoryEditOutcome> {
     if let Some(t) = target_s {
         if t <= 0.0 {
             return Err(CoreError::InvalidArg("target_duration_s must be positive".into()));
@@ -640,6 +691,7 @@ pub async fn story_edit(
     if !inference.healthy().await {
         // Honest degradation: without a model there is no narrative judgment.
         if let Some(target) = target_s {
+            step.mark_fallback("model_unreachable", None);
             narrate(editor, project_id, 0, "no local model — falling back to the duration planner");
             let plan = editor.plan_duration_cut(project_id, target)?;
             let mut actions = vec![];
@@ -710,7 +762,7 @@ pub async fn story_edit(
         rationale: String,
     }
     let plan_schema = story_plan_schema();
-    let plan: Plan = crate::llm::ask_json_schema(
+    let (plan, served): (Plan, _) = crate::llm::ask_json_schema_served(
         inference.as_ref(),
         &prefs.inference_model,
         "story plan",
@@ -728,6 +780,7 @@ pub async fn story_edit(
         Some(&plan_schema),
     )
     .await?;
+    step.served(served.as_ref());
     // Guardrails: a "story edit" that deletes (almost) everything is a bug,
     // not a bold choice. Dedup first (weak models repeat indexes), refuse
     // cutting ALL beats at any outline size, and refuse on cut DURATION too
@@ -765,6 +818,7 @@ pub async fn story_edit(
             ),
         );
     }
+    step.count("cut_beats", valid.len());
     let cut_duration: f64 =
         valid.iter().map(|&n| outline.beats[n].end - outline.beats[n].start).sum();
     let justified = target_s.map(|t| before_s - cut_duration >= t * 0.5).unwrap_or(false);
@@ -818,6 +872,7 @@ pub async fn story_edit(
             match $expr {
                 Ok(v) => v,
                 Err(e) => {
+                    step.mark_failed(&e).mark_partial();
                     let after_s = editor
                         .get_timeline(project_id)
                         .map(|t| t.included_duration())

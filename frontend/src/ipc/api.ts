@@ -205,6 +205,13 @@ export async function revealPath(path: string): Promise<void> {
   return invoke("reveal_path", { path });
 }
 
+/** The app log's file on this machine: null in the browser, or if the app
+ *  couldn't open it. */
+export async function logPath(): Promise<string | null> {
+  if (!isTauri) return null;
+  return invoke<string | null>("log_path");
+}
+
 // ---- In-app terminal (desktop only) ----
 
 /** Open a PTY session bound to `id`. Output arrives via `terminal-output`

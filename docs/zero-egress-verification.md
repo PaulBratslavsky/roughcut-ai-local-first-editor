@@ -51,6 +51,10 @@ downloader in `core/src/setup.rs` and, in Hosted mode only (or when the user
 saves or tests a key in Setup), `core/src/adapters/anthropic.rs`
 (`https://api.anthropic.com`).
 
+The app log (`core/src/applog.rs`, `~/Library/Logs/RoughCut/`) is a local
+file: the module does file I/O only, and nothing in the app reads it over the
+network or sends it anywhere. Sharing it is the user copying the file.
+
 ## Hosted mode (2026-10-31, ADR-0007)
 
 Hosted mode is off by default and can only be turned on in the app (a Tauri

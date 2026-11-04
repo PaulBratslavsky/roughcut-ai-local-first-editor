@@ -11,6 +11,7 @@
 
 pub mod adapters;
 pub mod agent;
+pub mod applog;
 pub mod capabilities;
 pub mod clip_finder;
 pub mod demo;

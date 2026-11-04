@@ -172,6 +172,14 @@ Keep entries short. When a refactor names a new module, add the term here.
   what the chip shows: the chosen `mode`, the `effective` one, and a
   **RouteReason** (`offline` | `rate_limited` | `server_error` | `key_rejected` |
   `no_key`) when they differ.
+- **App log** (`applog.rs`; design: `docs/designs/logging.md`) — one JSON line
+  per event in `~/Library/Logs/RoughCut/roughcut.log` (`<data dir>/logs/`
+  off macOS), rotated at 5 MB × 3: each AI step (`ai_step`: the model that
+  answered, time, fallback and why), each model request (`ai_request`, with
+  Hosted tokens), Hosted ↔ Local switches (`model_route`), ffmpeg/ffprobe
+  failures with the end of stderr, transcription start/end/failure, app
+  start/exit. Typed events and one scrubber keep transcript text, prompts,
+  replies and keys out; it never leaves the Mac. Setup → Logs reveals it.
 - **HostedRouter** (`engine/route.rs`) — the per-run client `Editor::inference()`
   hands out in Hosted mode: one model per run; only "unreachable" falls back to
   the local model; no key / a rejected key or request is a visible

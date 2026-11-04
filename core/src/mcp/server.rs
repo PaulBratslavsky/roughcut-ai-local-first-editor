@@ -72,7 +72,10 @@ pub async fn start_with(editor: Editor, discovery_file: Option<&std::path::Path>
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("mcp server stopped: {e}");
+            crate::applog::write(
+                crate::applog::Level::Error,
+                crate::applog::Event::McpFailed { error: crate::applog::ErrText::new(&format!("mcp server stopped: {e}")) },
+            );
         }
     });
     Ok(info)

@@ -3,6 +3,7 @@
 //! loop until done. Every step is surfaced as an `agent-step` event and every
 //! mutation is an undoable EditAction tagged `local_ai`.
 
+use crate::applog;
 use crate::detect;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
@@ -186,20 +187,42 @@ pub async fn run_instruction(
     history: &[HistoryTurn],
     source: ActionSource,
 ) -> Result<InstructionOutcome> {
+    // One `chat` line in the app log: how the turn ended, its model turns
+    // and the edits that landed.
+    let mut step = applog::Step::start(editor, "chat", Some(project_id));
+    let result = run_instruction_logged(editor, project_id, instruction, history, source, &mut step).await;
+    if let Ok(outcome) = &result {
+        step.count("actions", outcome.actions.len());
+    }
+    step.finish(&result);
+    result
+}
+
+async fn run_instruction_logged(
+    editor: &Editor,
+    project_id: Uuid,
+    instruction: &str,
+    history: &[HistoryTurn],
+    source: ActionSource,
+    step: &mut applog::Step,
+) -> Result<InstructionOutcome> {
     // A conversation: once a step ran on Claude, the run never switches to
     // the local model half-way (see engine::route).
     let inference = editor.inference_conversation()?;
     if !inference.healthy().await {
         // Graceful degradation: no local model server. Try the deterministic path.
+        step.mark_fallback("model_unreachable", None);
         return run_instruction_offline(editor, project_id, instruction, source).await;
     }
     let prefs = editor.get_preferences()?;
-    run_instruction_with(editor, project_id, instruction, history, source, inference.as_ref(), &prefs.inference_model)
+    run_instruction_with(editor, project_id, instruction, history, source, inference.as_ref(), &prefs.inference_model, step)
         .await
 }
 
 /// The loop itself, parameterized over the model endpoint — the same code
-/// drives local Gemma and (opt-in) a frontier model.
+/// drives local Gemma and (opt-in) a frontier model. `step` is the turn's
+/// app-log line.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_instruction_with(
     editor: &Editor,
     project_id: Uuid,
@@ -208,6 +231,7 @@ pub async fn run_instruction_with(
     source: ActionSource,
     inference: &dyn crate::adapters::InferenceClient,
     model: &str,
+    log: &mut applog::Step,
 ) -> Result<InstructionOutcome> {
     let context = project_context(editor, project_id)?;
     // Narrate the phases — a long first model call otherwise reads as a hang.
@@ -282,6 +306,8 @@ pub async fn run_instruction_with(
                 format!("waiting on {} (step {}/{MAX_STEPS})", editor.model_label(), step + 1)
             },
         );
+        let asked = std::time::Instant::now();
+        log.count("turns", step + 1);
         let response = match inference
             .chat(ChatRequest {
                 model: model.to_string(),
@@ -292,20 +318,29 @@ pub async fn run_instruction_with(
             })
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                applog::request("chat", r.served_by.as_ref(), asked, 1, r.usage, applog::Requested::Ok);
+                log.served(r.served_by.as_ref());
+                r
+            }
             // Server up but model missing/broken before anything happened:
             // degrade to the deterministic offline editor instead of failing.
             // Never for a Hosted error (no key, rejected key or request): the
             // offline editor would cut the video under a wrong explanation.
             Err(e) if step == 0 && !matches!(e, CoreError::Hosted { .. }) => {
+                applog::request("chat", None, asked, 1, None, applog::Requested::Error(&e));
+                log.mark_fallback(e.code(), Some(&e));
                 step_text(editor, project_id, 0, "thinking", format!("{e} — falling back to offline editing"));
                 return run_instruction_offline(editor, project_id, instruction, source).await;
             }
             Err(e) => {
+                applog::request("chat", None, asked, 1, None, applog::Requested::Error(&e));
+                log.mark_failed(&e);
                 // Edits already landed this turn must never vanish behind
                 // "Something went wrong": report the partial outcome so the
                 // chat shows the real action count and its undo affordance.
                 if !actions.is_empty() {
+                    log.mark_partial();
                     let summary = format!(
                         "The model connection failed after {} change(s) were applied — \
                          review the timeline or undo. ({e})",
@@ -543,6 +578,7 @@ pub async fn run_instruction_with(
         }
     }
     if summary.is_empty() {
+        log.stopped("max_steps");
         summary = format!("Stopped after {MAX_STEPS} steps; {} change(s) applied.", actions.len());
         step_text(editor, project_id, MAX_STEPS, "final", summary.clone());
     }
@@ -746,9 +782,25 @@ fn truncate_json(v: &Value) -> Value {
 /// whisper transcript as-is.
 pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> {
     let inference = editor.inference()?;
+    let mut step = applog::Step::start(editor, "transcript_cleanup", Some(project_id));
     if !inference.healthy().await {
+        step.fallback("model_unreachable", None);
         return Ok(0);
     }
+    let result = clean_transcript_with(editor, project_id, inference.as_ref(), &mut step).await;
+    if let Ok(changed) = &result {
+        step.count("changed", *changed as usize);
+    }
+    step.finish(&result);
+    result
+}
+
+async fn clean_transcript_with(
+    editor: &Editor,
+    project_id: Uuid,
+    inference: &dyn crate::adapters::InferenceClient,
+    step: &mut applog::Step,
+) -> Result<u32> {
     let prefs = editor.get_preferences()?;
     let transcript = editor
         .get_transcript(project_id)?
@@ -763,7 +815,10 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
         return Ok(0);
     }
     let mut corrections: Vec<(Uuid, String)> = vec![];
+    let (mut chunks, mut chunks_failed) = (0, 0);
     for chunk in speech.chunks(40) {
+        chunks += 1;
+        step.count("chunks", chunks);
         let numbered: String = chunk
             .iter()
             .enumerate()
@@ -771,7 +826,7 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
             .collect::<Vec<_>>()
             .join("\n");
         let map = match crate::llm::ask_json_with::<std::collections::HashMap<String, String>>(
-            inference.as_ref(),
+            inference,
             &prefs.inference_model,
             "transcript cleanup",
             "You fix automatic speech-recognition output from a talking-head video. \
@@ -793,7 +848,12 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
             // A Hosted account problem ends the pass (the router has already
             // put it on the chip and in Setup); the transcript stays as is.
             Err(e) if e.is_fatal_model_error() => return Err(e),
-            Err(_) => continue,
+            // This chunk keeps whisper's text.
+            Err(_) => {
+                chunks_failed += 1;
+                step.count("chunks_failed", chunks_failed);
+                continue;
+            }
         };
         for (k, corrected) in map {
             let Ok(i) = k.trim().parse::<usize>() else { continue };
@@ -817,12 +877,22 @@ pub async fn clean_transcript(editor: &Editor, project_id: Uuid) -> Result<u32> 
 /// boundaries) otherwise.
 pub async fn generate_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>> {
     let inference = editor.inference()?;
+    let step = applog::Step::start(editor, "chapters", Some(project_id));
     if inference.healthy().await {
         match llm_chapters(editor, project_id).await {
-            Ok(chapters) if !chapters.is_empty() => return Ok(chapters),
-            Err(e) if e.is_fatal_model_error() => return Err(e),
-            _ => {}
+            Ok(chapters) if !chapters.is_empty() => {
+                step.ok();
+                return Ok(chapters);
+            }
+            Ok(_) => step.fallback("no_chapters", None),
+            Err(e) if e.is_fatal_model_error() => {
+                step.failed(&e);
+                return Err(e);
+            }
+            Err(e) => step.fallback(e.code(), Some(&e)),
         }
+    } else {
+        step.fallback("model_unreachable", None);
     }
     heuristic_chapters(editor, project_id)
 }
@@ -869,6 +939,7 @@ fn heuristic_chapters(editor: &Editor, project_id: Uuid) -> Result<Vec<Chapter>>
 pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Result<Value> {
     let inference = editor.inference()?;
     let prefs = editor.get_preferences()?;
+    let step = applog::Step::with_mode("title_description", Some(project_id), prefs.model_mode);
     if inference.healthy().await {
         let context = project_context(editor, project_id)?;
         match crate::llm::ask_json_with::<Value>(
@@ -882,10 +953,18 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
         )
         .await
         {
-            Ok(v) => return Ok(v),
-            Err(e) if e.is_fatal_model_error() => return Err(e),
-            Err(_) => {}
+            Ok(v) => {
+                step.ok();
+                return Ok(v);
+            }
+            Err(e) if e.is_fatal_model_error() => {
+                step.failed(&e);
+                return Err(e);
+            }
+            Err(e) => step.fallback(e.code(), Some(&e)),
         }
+    } else {
+        step.fallback("model_unreachable", None);
     }
     // Fallback: first strong sentence as title, opening lines as description.
     editor.with_project(project_id, |_, t| {

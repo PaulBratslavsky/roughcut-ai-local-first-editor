@@ -39,7 +39,7 @@ examples in [`core/examples/`](../examples/README.md).
 
 | Module | Role | Key public items |
 | --- | --- | --- |
-| `lib.rs` | Crate root | 25 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
+| `lib.rs` | Crate root | 26 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
 | `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `PlaySpan`, `ClipBatchError`, `ClipExportResult`, `pieces_overlap`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ModelMode`, `ModelStatus`, `RouteReason`, `KeyCheck`, `HostedKeyResult`, `HOSTED_MODELS`, `hosted_model_name`, `EPS` |
 | `tools.rs` | The tool registry: one `ToolSpec` row per tool, three callers | `ToolSpec`, `ToolDef`, `Caller`, `defs`, `dispatch`, `registry`, `is_mutating`, `Handler`, `HandlerFuture` |
 | `agent.rs` | The chat agent loop and LLM-with-fallback helpers | `run_instruction`, `run_instruction_with`, `InstructionOutcome`, `HistoryTurn`, `clean_transcript`, `generate_chapters`, `Chapter`, `generate_title_description` |
@@ -48,6 +48,7 @@ examples in [`core/examples/`](../examples/README.md).
 | `detect.rs` | Non-LLM analysis: silences, fillers, takes, rough cut, suggestions, BM25 | `detect_silences`, `silence_candidates`, `refine_silences`, `RefinedSilence`, `detect_fillers`, `detect_takes`, `annotate`, `apply_annotations`, `generate_rough_cut`, `RoughCutOutcome`, `suggest_cuts`, `bm25_rank`, `find_segments`, `DEFAULT_FILLERS`, `TimeRange`, `TakeGroup`, `FillerFindings` |
 | `llm.rs` | The strict-JSON LLM call contract | `ask_json`, `ask_json_with`, `ask_json_schema`, `ask_json_schema_served` (also says which model answered), `extract_json` |
 | `store.rs` | Persistence: documents in SQLite | `Store` (trait), `SqliteStore` (`open`, `open_in_memory`, `default_path`), `data_dir` |
+| `applog.rs` | The app log: one JSON line per AI step, request, route change, ffmpeg failure and transcription, rotated 5 MB × 3, local only (`docs/designs/logging.md`) | `init`, `log_dir`, `log_file`, `write`, `Event`, `Level`, `Step`, `request`, `Requested`, `ErrText`, `Tail`, `scrub`, `scrub_tail`, `app_start` |
 | `events.rs` | The core → UI event contract | `CoreEvent`, `ProgressTask`, `EventSink`, `SharedSink`, `NullSink`, `send` |
 | `error.rs` | The crate error type | `CoreError` (`code`, `to_json`, `hosted`, `is_fatal_model_error`), `HostedErrorKind`, `Result` |
 | `time.rs` | Frame-exact time and timecode | `RationalTime`, `snap_to_frame`, `to_frame`, `fps_tick_rate`, `timecode`, `timecode_frames` |

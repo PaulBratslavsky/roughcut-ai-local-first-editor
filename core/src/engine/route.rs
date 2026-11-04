@@ -368,6 +368,8 @@ impl Editor {
     /// shows changed.
     fn record_route(&self, effective: ModelMode, reason: Option<RouteReason>, error: Option<String>, ok: bool) {
         let mode = self.inner.store.load_preferences().map(|p| p.model_mode).unwrap_or(ModelMode::Local);
+        // The app log gets the same line the chip does: once per change.
+        let detail = error.as_deref().map(crate::applog::ErrText::new);
         let changed = {
             let mut s = self.inner.route.status.lock().unwrap();
             s.effective = Some(effective);
@@ -385,6 +387,12 @@ impl Editor {
             changed
         };
         if changed {
+            let level = if effective == ModelMode::Hosted && reason.is_none() {
+                crate::applog::Level::Info
+            } else {
+                crate::applog::Level::Warn
+            };
+            crate::applog::write(level, crate::applog::Event::ModelRoute { effective, reason, detail });
             crate::events::send(&self.sink(), CoreEvent::ModelRoute { mode, effective, reason });
         }
     }
@@ -537,11 +545,15 @@ pub(crate) mod tests {
     use crate::secrets::MemoryStore;
     use std::collections::VecDeque;
 
-    /// A scripted Anthropic: each request takes the next outcome.
+    /// A scripted Anthropic: each request takes the next outcome, and costs
+    /// [`FAKE_USAGE`] tokens.
     pub(crate) struct FakeHosted {
         pub script: Mutex<VecDeque<std::result::Result<String, HostedFailure>>>,
         pub models: Mutex<Vec<String>>,
     }
+
+    pub(crate) const FAKE_USAGE: crate::adapters::inference::Usage =
+        crate::adapters::inference::Usage { input_tokens: 1234, output_tokens: 56 };
 
     impl FakeHosted {
         pub(crate) fn new(script: Vec<std::result::Result<String, HostedFailure>>) -> Arc<Self> {
@@ -557,7 +569,7 @@ pub(crate) mod tests {
             next.map(|text| ChatResponse {
                 message: ChatMessage::assistant(&text),
                 served_by: Some(ServedBy { model: request.model.clone(), hosted: true }),
-                usage: None,
+                usage: Some(FAKE_USAGE),
             })
         }
     }

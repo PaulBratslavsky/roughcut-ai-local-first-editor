@@ -173,6 +173,9 @@ pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) ->
     }
     let pool = build_pool(windows, &beat_of, by_beat, &opts, healthy);
 
+    // The app log: whether the model scored them, and how many batches it
+    // couldn't (those keep their rule scores).
+    let step = crate::applog::Step::start(editor, "short_picks", Some(project_id));
     let (ranked, method) = if healthy {
         let model = editor.get_preferences()?.inference_model;
         let label = editor.model_label();
@@ -185,14 +188,32 @@ pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) ->
             )
         };
         let theme = opts.theme.as_deref();
-        match llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), theme, on_batch).await {
-            Ok(scored) => (scored, "llm"),
+        let mut tally = Tally::default();
+        let mut step = step;
+        let scored = llm_rescore(inference.as_ref(), &model, &speech, pool.clone(), theme, on_batch, &mut tally).await;
+        step.count("batches", tally.batches).count("batches_failed", tally.failed);
+        for m in &tally.models {
+            step.model(m);
+        }
+        match scored {
+            Ok(scored) => {
+                step.method("llm");
+                step.ok();
+                (scored, "llm")
+            }
             // A Hosted account problem (no key, rejected key) is shown, and
             // the stored candidates stay as they were.
-            Err(e) if e.is_fatal_model_error() => return Err(e),
-            Err(_) => (pool, "heuristic"),
+            Err(e) if e.is_fatal_model_error() => {
+                step.failed(&e);
+                return Err(e);
+            }
+            Err(e) => {
+                step.fallback(e.code(), Some(&e));
+                (pool, "heuristic")
+            }
         }
     } else {
+        step.fallback("model_unreachable", None);
         (pool, "heuristic")
     };
     let mut ranked = ranked;
@@ -562,6 +583,16 @@ fn window_text(speech: &[TranscriptSegment], w: &Window) -> String {
     speech[w.first..=w.last].iter().map(|s| s.text.trim()).collect::<Vec<_>>().join(" ")
 }
 
+/// What a scoring run did, for the app log.
+#[derive(Default)]
+struct Tally {
+    batches: usize,
+    /// Batches whose reply was unusable: they keep their rule scores.
+    failed: usize,
+    /// The models that answered.
+    models: Vec<String>,
+}
+
 /// Score the pool with the model, in batches. The model's 0-100 dominates;
 /// the heuristic breaks near-ties and covers anything the model skipped.
 async fn llm_rescore(
@@ -571,6 +602,7 @@ async fn llm_rescore(
     mut pool: Vec<Window>,
     theme: Option<&str>,
     on_batch: impl Fn(usize, usize),
+    tally: &mut Tally,
 ) -> Result<Vec<Window>> {
     #[derive(Deserialize)]
     struct Scored {
@@ -602,6 +634,7 @@ async fn llm_rescore(
     }
     let mut scored_any = false;
     let batches = pool.len().div_ceil(BATCH);
+    tally.batches = batches;
     on_batch(0, batches);
     for (batch_no, batch_start) in (0..pool.len()).step_by(BATCH).enumerate() {
         let batch_end = (batch_start + BATCH).min(pool.len());
@@ -635,10 +668,16 @@ async fn llm_rescore(
             // and the rest still count.
             Err(e) if e.is_fatal_model_error() => return Err(e),
             Err(_) => {
+                tally.failed += 1;
                 on_batch(batch_no + 1, batches);
                 continue;
             }
         };
+        if let Some(s) = &served {
+            if !tally.models.contains(&s.model) {
+                tally.models.push(s.model.clone());
+            }
+        }
         let scorer = served.map(|s| scorer_name(&s));
         for r in replies {
             if !(batch_start..batch_end).contains(&r.index) {
@@ -1021,7 +1060,7 @@ mod tests {
         let pool = diversify(candidate_windows(&speech, None, &main, &opts(10.0, 20.0)), 8);
         let n = pool.len();
         assert!(n >= 3);
-        let scored = llm_rescore(&Favors(n - 1), "m", &speech, pool, None, |_, _| {}).await.unwrap();
+        let scored = llm_rescore(&Favors(n - 1), "m", &speech, pool, None, |_, _| {}, &mut Tally::default()).await.unwrap();
         let best = diversify(scored, 1).remove(0);
         assert_eq!(best.title.as_deref(), Some(format!("Title {}", n - 1).as_str()));
         assert_eq!(best.reason.as_deref(), Some("ok"));

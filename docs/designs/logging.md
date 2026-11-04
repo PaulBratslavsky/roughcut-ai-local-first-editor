@@ -1,9 +1,11 @@
 # App log
 
 *   **Author:** Paul Bratslavsky
-*   **Status:** Draft, reviewed (scope + accuracy goldfish reviews folded in,
-    see "Review"). Waiting on the owner's decisions (see Open Questions).
-*   **Date:** 2026-11-03
+*   **Status:** Implemented on `feat/logging` (see "As built"); the manual
+    check in the desktop app is still to do. Reviewed (scope + accuracy
+    goldfish reviews, see "Review"); the owner chose the recommendation for
+    each open question.
+*   **Date:** 2026-11-03 (built 2026-11-04)
 
 --------------------------------------------------------------------------------
 
@@ -89,7 +91,8 @@ model replies, chat messages, API keys, tokens or audio, and stays under
 
 ## Open Questions
 
-Owner decisions needed before building:
+Decided by the owner on 2026-11-04: the recommendation in each case
+(`~/Library/Logs/RoughCut/`, JSON lines, "Reveal logs" only).
 
 *   **Q1, location.** Recommended: **`~/Library/Logs/RoughCut/`** on macOS
     (the macOS convention; Console.app lists it under Log Reports), and
@@ -486,6 +489,36 @@ command (Q3).
 #### 9. Docs
 
 As listed under "Docs".
+
+## As built
+
+Built as designed, with these differences:
+
+*   **Counts are kept where they happen.** `clean_transcript` writes its
+    own `transcript_cleanup` line (chunks, chunks_failed, changed) instead of
+    returning counts; `llm_rescore` fills a `Tally` (batches, failed batches,
+    the models that answered) that the `short_picks` line reads.
+*   **`ai_step.models`** lists the models that answered, in order, so a run
+    that moved from Claude to the local model part-way shows both.
+*   **`chapters`** falls back with reason `no_chapters` when the model
+    returns an empty list.
+*   **`bad_json`** reads `bad JSON: syntax error | wrong shape | cut short
+    at line L column C`, or `bad JSON: no JSON in the reply`.
+*   **ffmpeg:** `FfmpegCli::run` and `run_binary` share one `output()` that
+    logs; `render_mp4` uses the same `stderr_tail` helper for its
+    user-facing error. User-facing error text is unchanged.
+*   **The token rule** (40+ letters, digits or `_`) also blanks a file name
+    made of one 40+ character run with no space, `-` or `.`. That is the
+    safe side, so it stays.
+*   **Setup → Logs** shows the file's path and a "Reveal logs" button. The
+    row is hidden when the log isn't open (the browser build, or a folder
+    the app couldn't create).
+
+Tests: `applog::tests` covers rotation (cap, three files, oldest dropped,
+reopen), the scrubber (escaped quotes, braces in strings, keys, long tokens,
+UUIDs and paths kept, home, caps), the stderr tail, line shape, the `Step`
+outcomes, and the no-secrets run (outline, shorts scan, chat on the
+`route.rs` fakes, which now return `Usage`).
 
 ### Verification Plan
 

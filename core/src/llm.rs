@@ -5,6 +5,7 @@
 //! ONCE. Fallback POLICY stays at call sites — heuristics differ per feature.
 
 use crate::adapters::inference::{ChatMessage, ChatRequest, InferenceClient, ServedBy};
+use crate::applog::{self, Requested};
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use serde::de::DeserializeOwned;
@@ -81,7 +82,14 @@ pub async fn ask_json_schema_served<T: DeserializeOwned>(
         response_format: response_format.clone(),
     };
     let base = vec![ChatMessage::system(system), ChatMessage::user(user)];
+    // The app log gets one line for the whole call: who answered, how long,
+    // the tokens over every attempt, and how it ended.
+    let started = std::time::Instant::now();
+    let mut attempts = 0u32;
+    let mut usage = None;
+    let mut served = None;
     let mut last_err = String::new();
+    let mut last_at = String::new();
     for attempt in 0..2 {
         let messages = if attempt == 0 {
             base.clone()
@@ -95,6 +103,7 @@ pub async fn ask_json_schema_served<T: DeserializeOwned>(
             )));
             m
         };
+        attempts += 1;
         let response = match inference.chat(request(messages)).await {
             Ok(r) => r,
             // A LOCAL server that rejects response_format gets one
@@ -103,20 +112,41 @@ pub async fn ask_json_schema_served<T: DeserializeOwned>(
             Err(e) if attempt == 0 && response_format.is_some() && !matches!(e, CoreError::Hosted { .. }) => {
                 let mut req = request(base.clone());
                 req.response_format = None;
-                inference.chat(req).await?
+                attempts += 1;
+                match inference.chat(req).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        applog::request(label, served.as_ref(), started, attempts, usage, Requested::Error(&e));
+                        return Err(e);
+                    }
+                }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                applog::request(label, served.as_ref(), started, attempts, usage, Requested::Error(&e));
+                return Err(e);
+            }
         };
-        let served = response.served_by.clone();
+        served = response.served_by.clone();
+        usage = applog::add_usage(usage, response.usage);
         let text = response.message.content.unwrap_or_default();
-        match extract_json(&text)
-            .ok_or_else(|| format!("no JSON found in the reply"))
-            .and_then(|j| serde_json::from_str::<T>(j).map_err(|e| e.to_string()))
-        {
-            Ok(v) => return Ok((v, served)),
-            Err(e) => last_err = e,
+        let parsed = match extract_json(&text) {
+            None => Err(("no JSON found in the reply".to_string(), "bad JSON: no JSON in the reply".to_string())),
+            Some(j) => serde_json::from_str::<T>(j).map_err(|e| (e.to_string(), applog::json_error_at(&e))),
+        };
+        match parsed {
+            Ok(v) => {
+                applog::request(label, served.as_ref(), started, attempts, usage, Requested::Ok);
+                return Ok((v, served));
+            }
+            // The full message goes back to the model; the log gets only
+            // where it broke (serde's message quotes the reply).
+            Err((message, at)) => {
+                last_err = message;
+                last_at = at;
+            }
         }
     }
+    applog::request(label, served.as_ref(), started, attempts, usage, Requested::BadJson(last_at));
     Err(CoreError::Inference(format!("bad JSON in {label} response: {last_err}")))
 }
 

@@ -749,6 +749,29 @@ a channel in tests). There are 13:
 The change events carry only an id. The frontend re-fetches through tools, so
 it can never render a stale, half-applied state.
 
+### Logs (`core/src/applog.rs`)
+
+The app log is for diagnosing after the fact: one JSON line per event in
+`~/Library/Logs/RoughCut/roughcut.log` on macOS (`<data dir>/logs/`
+elsewhere), rotated at 5 MB into `roughcut.1.log` and `roughcut.2.log`. The
+shell calls `applog::init` at startup; until then (tests, the CLI) events go
+nowhere. Design: [`designs/logging.md`](designs/logging.md).
+
+| Event | Written by |
+|---|---|
+| `app_start`, `app_start_failed`, `app_exit`, `mcp_failed` | the shell; `mcp/server.rs` |
+| `ai_request` (step label, model, Hosted or not, ms, attempts, tokens, ok / bad_json / error) | `llm::ask_json_schema_served`; the chat loop, per model turn |
+| `ai_step` (ok / fallback / failed / aborted, reason, models, counts) | `applog::Step` in the outline, short picks, flow review, story plan, chat, transcript clean-up, chapters, title/description |
+| `model_route` | `Editor::record_route`, once per change of what the chip shows |
+| `ffmpeg_failed` (exit code, the end of stderr) | `FfmpegCli::output`, `render_mp4` |
+| `transcribe_start`, `transcribe_end`, `transcribe_failed` (stage) | `Editor::transcribe` |
+
+Events are typed, so there is no field for transcript text, prompts, replies
+or keys; the only free text is error text, which can only be built through
+`ErrText` / `Tail` and so always runs `applog::scrub` (quoted text, JSON
+bodies, keys, long tokens, the home folder). A JSON reply that won't parse is
+logged as where it broke, never serde's message. The log is file I/O only.
+
 ---
 
 ## 12. The Tauri shell (`app/src-tauri/src/lib.rs`)
@@ -760,17 +783,18 @@ the terminal):
 | Purpose | Commands |
 |---|---|
 | Core | `call_tool`, `list_tools`, `mcp_endpoint_info` (null until the server is up), `demo_mode`, `confirm_action` |
-| OS | `reveal_path`, `open_external` (three allowed sites) |
+| OS | `reveal_path`, `open_external` (three allowed sites), `log_path` (the app log, for Setup → Logs) |
 | Setup | `setup_status`, `download_whisper_model` (checked against a pinned sha256) |
 | LOCAL / HOSTED | `model_status`, `set_model_mode`, `set_hosted_model`, `set_hosted_key`, `check_hosted_key` |
 | Local model | `ollama_pull_model`, `install_llama_server`, `download_gguf`, `start_managed_llm` |
 | Terminal | `pty_spawn`, `pty_write`, `pty_resize`, `pty_kill` |
 | DaVinci Resolve | `install_resolve_plugin`, `resolve_status`, `send_to_resolve` |
 
-At startup the shell registers the single-instance plugin (a second launch
-focuses the first window), the dialog plugin, an `EventSink` that forwards core
-events to the WebView, and the Editor; then it starts the MCP server and emits
-`mcp-ready`. On exit it stops the managed model server and kills every
+At startup the shell opens the app log, registers the single-instance plugin
+(a second launch focuses the first window), the dialog plugin, an `EventSink`
+that forwards core events to the WebView, and the Editor (logging `app_start`,
+or `app_start_failed`); then it starts the MCP server and emits `mcp-ready`.
+On exit it logs `app_exit`, stops the managed model server and kills every
 terminal. The app builds the core with `whisper-native`.
 
 Config (`tauri.conf.json`): drag-and-drop on, the asset protocol enabled (the

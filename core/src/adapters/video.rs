@@ -135,36 +135,56 @@ pub struct FfmpegCli;
 
 impl FfmpegCli {
     async fn run_binary(cmd: &mut Command, what: &str) -> Result<Vec<u8>> {
-        let out = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| CoreError::Unavailable(format!("{what}: {e}")))?;
+        Self::output(cmd, what).await
+    }
+
+    async fn run(cmd: &mut Command, what: &str) -> Result<String> {
+        Self::output(cmd, what).await.map(|out| String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// stdout of a run that succeeded. A failure is logged with the end of
+    /// stderr, where ffmpeg says what went wrong.
+    async fn output(cmd: &mut Command, what: &str) -> Result<Vec<u8>> {
+        let started = std::time::Instant::now();
+        let out = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output().await {
+            Ok(out) => out,
+            Err(e) => {
+                let err = CoreError::Unavailable(format!("{what}: {e}"));
+                log_failure(what, started, None, "", Some(&err));
+                return Err(err);
+            }
+        };
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            log_failure(what, started, out.status.code(), &stderr, None);
             return Err(CoreError::Other(format!(
                 "{what} failed: {}",
-                String::from_utf8_lossy(&out.stderr).chars().take(800).collect::<String>()
+                stderr.chars().take(800).collect::<String>()
             )));
         }
         Ok(out.stdout)
     }
+}
 
-    async fn run(cmd: &mut Command, what: &str) -> Result<String> {
-        let out = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| CoreError::Unavailable(format!("{what}: {e}")))?;
-        if !out.status.success() {
-            return Err(CoreError::Other(format!(
-                "{what} failed: {}",
-                String::from_utf8_lossy(&out.stderr).chars().take(800).collect::<String>()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    }
+/// An `ffmpeg_failed` line in the app log. A warning: some callers expect
+/// failures and carry on; the step that gives up logs the error.
+fn log_failure(what: &str, started: std::time::Instant, exit_code: Option<i32>, stderr: &str, error: Option<&CoreError>) {
+    crate::applog::write(
+        crate::applog::Level::Warn,
+        crate::applog::Event::FfmpegFailed {
+            what: what.to_string(),
+            exit_code,
+            ms: started.elapsed().as_millis() as u64,
+            stderr_tail: crate::applog::Tail::new(stderr),
+            error: error.map(crate::applog::ErrText::from),
+        },
+    );
+}
+
+/// The last `n` characters of a tool's stderr (its cause comes last).
+fn stderr_tail(stderr: &str, n: usize) -> String {
+    let chars: Vec<char> = stderr.trim_end().chars().collect();
+    chars[chars.len().saturating_sub(n)..].iter().collect()
 }
 
 #[async_trait]
@@ -177,7 +197,7 @@ impl VideoEngine for FfmpegCli {
             .ok_or_else(|| CoreError::Unavailable("ffprobe not found (PATH, Homebrew, or FFPROBE_PATH)".into()))?;
         let mut cmd = Command::new(probe);
         cmd.args([
-            "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path,
+            "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file_path,
         ]);
         let stdout = Self::run(&mut cmd, "ffprobe").await?;
         let v: serde_json::Value = serde_json::from_str(&stdout)
@@ -227,12 +247,15 @@ impl VideoEngine for FfmpegCli {
         ]);
         // Stream ffmpeg's key=value progress lines into UI events. A render
         // whose caller went away (a dropped request) stops with it.
-        let mut child = cmd
-            .kill_on_drop(true)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| CoreError::Unavailable(format!("ffmpeg render: {e}")))?;
+        let started = std::time::Instant::now();
+        let mut child = match cmd.kill_on_drop(true).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let err = CoreError::Unavailable(format!("ffmpeg render: {e}"));
+                log_failure("ffmpeg render", started, None, "", Some(&err));
+                return Err(err);
+            }
+        };
         let progress_task = child.stdout.take().map(|stdout| {
             crate::progress::stream_progress(
                 stdout,
@@ -257,11 +280,8 @@ impl VideoEngine for FfmpegCli {
         if !out.status.success() {
             // ffmpeg reports the cause last: keep the tail, not the head.
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let tail: String = {
-                let chars: Vec<char> = stderr.trim_end().chars().collect();
-                chars[chars.len().saturating_sub(800)..].iter().collect()
-            };
-            return Err(CoreError::Other(format!("ffmpeg render failed: {tail}")));
+            log_failure("ffmpeg render", started, out.status.code(), &stderr, None);
+            return Err(CoreError::Other(format!("ffmpeg render failed: {}", stderr_tail(&stderr, 800))));
         }
         crate::events::send(
             sink,
@@ -483,7 +503,7 @@ async fn container_info(path: &str) -> Result<ContainerInfo> {
         .ok_or_else(|| CoreError::Unavailable("ffprobe not found".into()))?;
     let mut cmd = Command::new(probe);
     cmd.args([
-        "-v", "quiet",
+        "-v", "error",
         "-show_entries", "format=format_name:stream=codec_type,codec_name,channels",
         "-of", "json",
         path,
@@ -587,7 +607,7 @@ pub async fn concat_media(paths: &[String]) -> Result<String> {
         }
         let mut probe = Command::new(&ffprobe);
         probe.args([
-            "-v", "quiet",
+            "-v", "error",
             "-show_entries",
             "format=format_name:stream=codec_type,codec_name,width,height,channels,sample_rate",
             "-of", "json",

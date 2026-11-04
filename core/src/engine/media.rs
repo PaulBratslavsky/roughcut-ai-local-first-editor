@@ -2,6 +2,7 @@
 //! semantic-index pass that follows a real transcription.
 
 use super::Editor;
+use crate::applog;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent, ProgressTask};
 use crate::model::*;
@@ -58,8 +59,41 @@ impl Editor {
         let demo = self.demo_mode();
         send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.0, "starting"));
 
+        // The app log: start, then end or the stage that failed. A start
+        // with neither after it was cut off (quit or crash).
+        let started = std::time::Instant::now();
+        let (engine, whisper_model) = if demo {
+            ("mock", None)
+        } else {
+            let engine = if crate::adapters::transcribe::whisper_native_enabled() { "whisper-rs" } else { "whisper-cli" };
+            let model = crate::adapters::transcribe::resolve_whisper_model()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            (engine, model)
+        };
+        applog::write(
+            applog::Level::Info,
+            applog::Event::TranscribeStart { project: project_id, media_s: media.duration, language: lang.clone(), engine, whisper_model },
+        );
+        let failed = |stage: &'static str, e: CoreError| {
+            applog::write(
+                applog::Level::Error,
+                applog::Event::TranscribeFailed {
+                    project: project_id,
+                    stage,
+                    ms: started.elapsed().as_millis() as u64,
+                    code: e.code(),
+                    error: applog::ErrText::from(&e),
+                },
+            );
+            e
+        };
+
         let transcript = if demo {
-            self.inner.transcriber.transcribe(&media, "", &lang, Some(project_id), &self.inner.sink).await?
+            self.inner
+                .transcriber
+                .transcribe(&media, "", &lang, Some(project_id), &self.inner.sink)
+                .await
+                .map_err(|e| failed("whisper", e))?
         } else {
             let wav = std::env::temp_dir().join(format!("roughcut-{}.wav", media.id));
             let wav_str = wav.to_string_lossy().to_string();
@@ -67,20 +101,21 @@ impl Editor {
                 &self.inner.sink,
                 CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.1, "extracting audio"),
             );
-            self.inner.video.extract_audio_wav(&media, &wav_str).await?;
+            self.inner.video.extract_audio_wav(&media, &wav_str).await.map_err(|e| failed("audio", e))?;
             send(
                 &self.inner.sink,
                 CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.25, "transcribing on-device"),
             );
             let t = self.inner.transcriber.transcribe(&media, &wav_str, &lang, Some(project_id), &self.inner.sink).await;
             let _ = std::fs::remove_file(&wav);
-            t?
+            t.map_err(|e| failed("whisper", e))?
         };
 
         {
             let mut state = self.inner.state.lock().unwrap();
-            let entry =
-                state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            let entry = state
+                .get_mut(&project_id)
+                .ok_or_else(|| failed("save", CoreError::NotFound("project".into())))?;
             entry.transcript = Some(transcript.clone());
             // Rough-cut suggestions reference the OLD segment ids — a fresh
             // transcribe replaces every id, so the old flags are stale.
@@ -91,7 +126,16 @@ impl Editor {
                 }
             }
         }
-        self.inner.store.save_transcript(project_id, &transcript)?;
+        self.inner.store.save_transcript(project_id, &transcript).map_err(|e| failed("save", e))?;
+        applog::write(
+            applog::Level::Info,
+            applog::Event::TranscribeEnd {
+                project: project_id,
+                ms: started.elapsed().as_millis() as u64,
+                segments: transcript.segments.len(),
+                model: transcript.model_used.clone(),
+            },
+        );
         send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 1.0, "done"));
         send(&self.inner.sink, CoreEvent::TranscriptChanged { project_id });
 
