@@ -1,7 +1,7 @@
 //! FCP7 "xmeml" XML — the interchange dialect Premiere Pro and DaVinci
 //! Resolve import ("Final Cut Pro XML").
 
-use super::xml_escape;
+use super::{file_url, xml_escape};
 use crate::model::{Media, Project};
 use crate::time::to_frame;
 
@@ -14,7 +14,7 @@ pub fn write(project: &Project, media: &Media) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| media.file_path.clone());
-    let file_url = format!("file://{}", media.file_path.replace(' ', "%20"));
+    let media_url = file_url(&media.file_path);
     let total_frames: i64 = project
         .timeline
         .included_clips()
@@ -39,7 +39,7 @@ pub fn write(project: &Project, media: &Media) -> String {
                  <width>{w}</width><height>{h}</height>\
                  </samplecharacteristics></video><audio><channelcount>2</channelcount></audio></media></file>",
                 fname = xml_escape(&file_name),
-                url = xml_escape(&file_url),
+                url = xml_escape(&media_url),
                 media_dur = to_frame(media.duration, fps),
                 w = media.width,
                 h = media.height,
@@ -77,7 +77,7 @@ pub fn write(project: &Project, media: &Media) -> String {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| scr.file_path.clone());
-            let s_url = format!("file://{}", scr.file_path.replace(' ', "%20"));
+            let s_url = file_url(&scr.file_path);
             let s_file = if i == 0 {
                 format!(
                     "<file id=\"file-2\"><name>{fname}</name><pathurl>{url}</pathurl>\

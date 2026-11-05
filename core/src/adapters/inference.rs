@@ -162,12 +162,48 @@ impl InferenceClient for OpenAiCompatClient {
 
     async fn healthy(&self) -> bool {
         let url = format!("{}/models", self.endpoint);
-        self.http
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
+        // The same key chat sends: a server that wants one answers 401 without it.
+        let mut req = self.http.get(&url).timeout(std::time::Duration::from_secs(2));
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        req.send()
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::HeaderMap, http::StatusCode, routing::get, Router};
+
+    /// A server that, like a keyed llama-server or a gateway, lists its
+    /// models only for the right key.
+    async fn keyed_server(key: &'static str) -> String {
+        let app = Router::new().route(
+            "/v1/models",
+            get(move |headers: HeaderMap| async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
+                if auth == Some(&format!("Bearer {key}")) {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    #[tokio::test]
+    async fn health_check_sends_the_same_key_chat_does() {
+        let endpoint = keyed_server("sekrit").await;
+        assert!(OpenAiCompatClient::new(&endpoint, Some("sekrit".into())).healthy().await);
+        assert!(!OpenAiCompatClient::new(&endpoint, None).healthy().await);
+        assert!(!OpenAiCompatClient::new(&endpoint, Some("wrong".into())).healthy().await);
     }
 }

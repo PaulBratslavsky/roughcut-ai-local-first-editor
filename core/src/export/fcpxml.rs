@@ -1,7 +1,7 @@
 //! FCPXML 1.9 writer for Final Cut Pro. Times are rational seconds with a
 //! denominator derived from the frame rate so every value is frame-aligned.
 
-use super::xml_escape;
+use super::{file_url, xml_escape};
 use crate::model::{Media, Project};
 use crate::time::to_frame;
 
@@ -20,7 +20,8 @@ pub fn write(project: &Project, media: &Media) -> String {
     };
     let frame_dur = format!("{den}/{num}s");
     let name = xml_escape(&project.name);
-    let src = format!("file://{}", media.file_path.replace(' ', "%20"));
+    // Percent-encoded, so nothing in it needs escaping for XML.
+    let src = file_url(&media.file_path);
     let media_frames = to_frame(media.duration, fps);
 
     let mut clips = String::new();
@@ -52,4 +53,30 @@ pub fn write(project: &Project, media: &Media) -> String {
         w = media.width,
         h = media.height,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{Media, Project, Timeline};
+
+    #[test]
+    fn a_media_path_with_xml_characters_stays_well_formed() {
+        let media = Media {
+            id: uuid::Uuid::new_v4(),
+            file_path: "/Users/me/Tom & Jerry \"take\" <2>.mov".into(),
+            duration: 10.0,
+            frame_rate: 30.0,
+            width: 1920,
+            height: 1080,
+            audio_sample_rate: 48_000,
+            codec: "h264".into(),
+            imported_at: chrono::Utc::now(),
+        };
+        let mut project = Project::new("Q&A");
+        project.timeline = Timeline::new(media.duration);
+        let xml = super::write(&project, &media);
+        assert!(xml.contains("src=\"file:///Users/me/Tom%20%26%20Jerry%20%22take%22%20%3C2%3E.mov\""), "{xml}");
+        assert!(!xml.contains("Tom &"), "no raw ampersand from the path: {xml}");
+        assert!(xml.contains("name=\"Q&amp;A\""));
+    }
 }

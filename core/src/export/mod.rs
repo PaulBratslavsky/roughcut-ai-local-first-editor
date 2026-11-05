@@ -25,6 +25,21 @@ pub fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// A `file://` URL for a local path, percent-encoded so any file name
+/// survives: spaces, `&`, `#`, `%`, quotes and non-ASCII letters included.
+/// Only unreserved characters and `/` stay as they are.
+pub fn file_url(path: &str) -> String {
+    let mut url = String::from("file://");
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            url.push(b as char);
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    url
+}
+
 fn require_media(project: &Project) -> Result<&crate::model::Media> {
     project
         .media
@@ -330,6 +345,17 @@ impl EventSink for BatchSink {
 mod batch_tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn file_urls_encode_every_character_a_path_can_hold() {
+        assert_eq!(file_url("/Users/me/clip.mp4"), "file:///Users/me/clip.mp4");
+        assert_eq!(
+            file_url("/Users/me/Tom & Jerry #2 100%.mov"),
+            "file:///Users/me/Tom%20%26%20Jerry%20%232%20100%25.mov"
+        );
+        assert_eq!(file_url("/v/\"a\"'b'<c>.mp4"), "file:///v/%22a%22%27b%27%3Cc%3E.mp4");
+        assert_eq!(file_url("/v/café.mp4"), "file:///v/caf%C3%A9.mp4");
+    }
 
     #[test]
     fn batch_names_pad_slug_and_never_collide() {

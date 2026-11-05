@@ -1044,8 +1044,7 @@ fn pick_prompt(sents: &[Sentence], main: &Timeline, r: &Region) -> (Vec<usize>, 
     let origin = sents[r.first].start;
     let mut lines = vec![];
     let mut cut_marked = false;
-    for i in r.first..=r.last {
-        let s = &sents[i];
+    for (i, s) in sents.iter().enumerate().take(r.last + 1).skip(r.first) {
         if !kept(main, s) {
             if !s.filler && !cut_marked {
                 text.push_str("   — cut in the edit —\n");
