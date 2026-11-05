@@ -784,11 +784,6 @@ function progress(task: ProgressEvent["task"], projectId: string, fraction: numb
   emit("progress", { task, project_id: projectId, fraction, message } satisfies ProgressEvent);
 }
 
-/** The core scores a scan's pool in model calls of this many windows... */
-const MOCK_BATCH = 6;
-/** ...and caps a scan's pool at this many (SCAN_POOL) — only to bound model
- *  calls: without a model nothing is cut off. */
-const MOCK_SCAN_POOL = 90;
 /** Story beats the mock pretends the outline found: equal stretches. */
 const MOCK_BEATS = 6;
 
@@ -893,14 +888,12 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
     pool = diversify(windows, Math.max(24, count));
   } else {
     // round_robin_pool: one window per beat per round — a beat's next one
-    // that isn't a moment already taken — and when a round doesn't fit under
-    // the cap, its best windows get in, wherever they are.
-    const cap = model ? MOCK_SCAN_POOL : Infinity;
+    // that isn't a moment already taken.
     const lanes = Array.from({ length: MOCK_BEATS }, (_, b) => diversify(windows.filter((w) => w.beat === b), Infinity))
       .filter((ws) => ws.length > 0)
       .map((ws) => ({ ws, next: 0 }));
     pool = [];
-    while (pool.length < cap) {
+    for (;;) {
       const round: W[] = [];
       for (const lane of lanes) {
         while (lane.next < lane.ws.length) {
@@ -913,29 +906,41 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
       }
       if (round.length === 0) break;
       round.sort((a, b) => b.score - a.score);
-      pool.push(...round.slice(0, cap - pool.length));
+      pool.push(...round);
     }
   }
 
-  // Scored in batches, one route per batch like the core's HostedRouter: a
-  // Hosted run pins Local once Anthropic is unreachable or the user switches
-  // to Local, and never goes back within the run; a rejected key stops it.
+  // Picked topic by topic, like the core's pick_all: a scan asks about every
+  // topic (here, a beat), a plain run only the best few (choose_regions). One
+  // route per request like the core's HostedRouter: a Hosted run pins Local
+  // once Anthropic is unreachable or the user switches to Local, and never
+  // goes back within the run; a rejected key stops it. A topic whose request
+  // fails keeps its rule scores.
   const localName = state.preferences.inference_model;
   if (model) {
-    const batches = Math.max(1, Math.ceil(pool.length / MOCK_BATCH));
-    const run = new MockRun("batch", batches > 1);
-    for (let b = 1; b <= batches; b++) {
-      const by = run.next();
-      const label = by === "hosted" ? hostedName(state.preferences.hosted_model) : "the on-device model";
-      await sleep((scan ? 2400 : 500) / batches);
+    const best = (beat: number) => Math.max(...pool.filter((w) => w.beat === beat).map((w) => w.rule));
+    let topics = [...new Set(pool.map((w) => w.beat))].sort((a, b) => a - b);
+    const cap = scan ? Infinity : Math.min(12, Math.max(4, Math.ceil(count / 2)));
+    if (topics.length > cap) {
+      topics = [...topics].sort((a, b) => best(b) - best(a)).slice(0, cap).sort((a, b) => a - b);
+    }
+    // The core's model_label, read once before the first topic.
+    const label =
+      state.preferences.model_mode === "hosted" && route.effective !== "local"
+        ? hostedName(state.preferences.hosted_model)
+        : "the on-device model";
+    const run = new MockRun("batch", topics.length > 1);
+    for (const [n, beat] of topics.entries()) {
       progress(
         "find_clips",
         p.id,
-        0.3 + (0.65 * b) / batches,
-        by ? `scoring candidates with ${label} — ${b}/${batches}` : `keeping rule scores — ${b}/${batches}`,
+        0.3 + (0.65 * n) / topics.length,
+        `picking shorts with ${label} — topic ${n + 1}/${topics.length}`,
       );
+      const by = run.next();
+      await sleep((scan ? 2400 : 500) / topics.length);
       if (!by) continue;
-      for (const w of pool.slice((b - 1) * MOCK_BATCH, b * MOCK_BATCH)) {
+      for (const w of pool.filter((w) => w.beat === beat)) {
         const r = mulberry32(w.first * 7919 + w.last * 104729 + 17)();
         const judge = Math.min(98, Math.max(5, w.rule + (r - 0.5) * 80));
         w.score = 0.8 * judge + 0.2 * w.rule;

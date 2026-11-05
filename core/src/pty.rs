@@ -29,6 +29,9 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The shell's pid. While nothing runs in it, the shell's own process
+    /// group has the terminal's foreground (`at_prompt`).
+    shell_pid: Option<u32>,
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, Session>> {
@@ -71,19 +74,24 @@ pub fn spawn(
         cmd.env("ROUGHCUT_MCP_URL", url);
         cmd.env("ROUGHCUT_MCP_TOKEN", token);
     }
+    start(sink, id, pair, cmd)
+}
 
+/// Run `cmd` on the PTY's slave side and stream its output.
+fn start(sink: SharedSink, id: String, pair: portable_pty::PtyPair, cmd: CommandBuilder) -> Result<()> {
     let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
     // The parent must drop its handle to the slave or the reader never sees EOF.
     drop(pair.slave);
 
     let killer = child.clone_killer();
+    let shell_pid = child.process_id();
     let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
     let writer = pair.master.take_writer().map_err(pty_err)?;
 
     sessions()
         .lock()
         .unwrap()
-        .insert(id.clone(), Session { master: pair.master, writer, killer });
+        .insert(id.clone(), Session { master: pair.master, writer, killer, shell_pid });
 
     // Blocking reader. portable-pty's reader is synchronous, so this is a
     // dedicated OS thread rather than a tokio task.
@@ -113,6 +121,18 @@ pub fn write(id: &str, bytes: &[u8]) -> Result<()> {
     session.writer.flush().map_err(pty_err)
 }
 
+/// Whether the shell is waiting at its prompt: no program (such as `claude`)
+/// runs in the foreground, so typed text reaches the shell itself. True when
+/// it can't tell.
+pub fn at_prompt(id: &str) -> Result<bool> {
+    let map = sessions().lock().unwrap();
+    let session = map.get(id).ok_or_else(|| pty_err("no such session"))?;
+    Ok(match (session.master.process_group_leader(), session.shell_pid) {
+        (Some(fg), Some(shell)) => fg as i64 == shell as i64,
+        _ => true,
+    })
+}
+
 /// Resize the PTY to match the xterm grid (cols/rows, not pixels).
 pub fn resize(id: &str, cols: u16, rows: u16) -> Result<()> {
     let map = sessions().lock().unwrap();
@@ -138,5 +158,49 @@ pub fn kill_all() {
     let mut map = sessions().lock().unwrap();
     for (_, mut session) in map.drain() {
         let _ = session.killer.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::NullSink;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Poll `f` for up to 5 s.
+    fn eventually(mut f: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn at_prompt_is_false_while_a_program_runs_in_the_shell() {
+        // A plain `sh -i` (job control on, so a command gets its own process
+        // group, as in the user's login shell), not the user's own shell.
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-i");
+        cmd.env("PS1", "$ ");
+        start(Arc::new(NullSink), id.clone(), pair, cmd).unwrap();
+
+        assert!(eventually(|| at_prompt(&id).unwrap()), "an idle shell is at its prompt");
+        write(&id, b"sleep 30\n").unwrap();
+        assert!(eventually(|| !at_prompt(&id).unwrap()), "a running program has the foreground");
+        // Ctrl-C ends it and the shell has the foreground again.
+        write(&id, b"\x03").unwrap();
+        assert!(eventually(|| at_prompt(&id).unwrap()), "back at the prompt");
+
+        kill(&id).unwrap();
+        assert!(at_prompt(&id).is_err(), "a killed session is gone");
     }
 }

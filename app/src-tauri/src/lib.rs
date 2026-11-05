@@ -233,6 +233,13 @@ fn pty_write(id: String, data: String) -> Result<(), Value> {
     roughcut_core::pty::write(&id, data.as_bytes()).map_err(|e| e.to_json())
 }
 
+/// Whether the shell is at its prompt (no program such as `claude` running
+/// in it), so typed text reaches the shell.
+#[tauri::command]
+fn pty_at_prompt(id: String) -> Result<bool, Value> {
+    roughcut_core::pty::at_prompt(&id).map_err(|e| e.to_json())
+}
+
 #[tauri::command]
 fn pty_resize(id: String, cols: u16, rows: u16) -> Result<(), Value> {
     roughcut_core::pty::resize(&id, cols, rows).map_err(|e| e.to_json())
@@ -315,6 +322,7 @@ pub fn run() {
             download_whisper_model,
             pty_spawn,
             pty_write,
+            pty_at_prompt,
             pty_resize,
             pty_kill,
             install_resolve_plugin,

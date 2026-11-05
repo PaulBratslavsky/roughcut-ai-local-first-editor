@@ -44,7 +44,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
   const elapsed = useElapsed(finding);
   const [progress, setProgress] = useState<string | null>(null);
 
-  // The core narrates a find (outline → scoring batches); a long local-model
+  // The core narrates a find (outline → picks, topic by topic); a long local-model
   // run should say where it is, not just spin.
   useEffect(
     () =>

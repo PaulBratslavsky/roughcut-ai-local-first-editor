@@ -228,6 +228,13 @@ export async function ptyWrite(id: string, data: string): Promise<void> {
   return invoke("pty_write", { id, data });
 }
 
+/** Whether the shell is at its prompt: no program (such as `claude`) is
+ *  running in it, so typed text reaches the shell. */
+export async function ptyAtPrompt(id: string): Promise<boolean> {
+  if (!isTauri) return false;
+  return invoke<boolean>("pty_at_prompt", { id });
+}
+
 /** Tell the PTY the new grid size (cols/rows, not pixels). */
 export async function ptyResize(id: string, cols: number, rows: number): Promise<void> {
   if (!isTauri) return;

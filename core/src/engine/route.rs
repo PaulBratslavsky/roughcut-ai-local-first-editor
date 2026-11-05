@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 /// How a run reacts to Anthropic going away after it has used it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunPolicy {
-    /// Independent requests (scoring batches, outline chunks, cleanup): the
+    /// Independent requests (shorts picks per topic, outline chunks, cleanup): the
     /// rest of the run finishes on the local model.
     Batch,
     /// A conversation (chat, story edit) whose later steps build on earlier

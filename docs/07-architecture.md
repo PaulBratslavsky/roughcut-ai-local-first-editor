@@ -570,7 +570,7 @@ Two MCP-only behaviours:
 
 | Route | For | How |
 |---|---|---|
-| Direct HTTP | Claude Code in the in-app terminal | The terminal's shell has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its environment. **Connect Claude Code** types `claude mcp remove roughcut -s local` and then `claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" --header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"` with its output hidden, so a repeat click refreshes the registration and the token never appears on screen. It is typed at the shell prompt, so click it before starting `claude`. |
+| Direct HTTP | Claude Code in the in-app terminal | The terminal's shell has `ROUGHCUT_MCP_URL` and `ROUGHCUT_MCP_TOKEN` in its environment. **Connect Claude Code** types `claude mcp remove roughcut -s local` and then `claude mcp add --transport http roughcut "$ROUGHCUT_MCP_URL" --header "Authorization: Bearer $ROUGHCUT_MCP_TOKEN"` with its output hidden, so a repeat click refreshes the registration and the token never appears on screen. It types only at the shell prompt: while a program such as `claude` runs in the shell (`pty::at_prompt`: the terminal's foreground process group isn't the shell's), it types nothing and says to quit that program first. |
 | The shim | Claude Desktop, or Claude Code outside the app | `roughcut-mcp-shim` finds the endpoint (arguments → `ROUGHCUT_MCP_ENDPOINT` / `ROUGHCUT_MCP_TOKEN` → `mcp.json`) and forwards each stdio line over HTTP with the token, retrying while the app starts. |
 
 ### The in-app terminal (`core/src/pty.rs`, `frontend/src/state/terminalSession.ts`)

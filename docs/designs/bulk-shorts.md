@@ -110,8 +110,8 @@ None remain.
     model reachable.
 *   **When**: the user clicks "Shorts" in the top bar, then "Scan for
     shorts".
-*   **Then**: progress shows "outlining the video…", then "scoring candidates
-    on-device — 3/15". When it finishes, up to 40 cards appear in a grid,
+*   **Then**: progress shows "outlining the video…", then "picking shorts
+    with the on-device model — topic 3/15". When it finishes, up to 40 cards appear in a grid,
     best first, from all parts of the video. Clicking a card plays it in the
     player beside the grid with a centred 9:16 guide. The user ticks six and
     clicks "Make 6 shorts". Progress shows "framing 2/6". Six vertical saved

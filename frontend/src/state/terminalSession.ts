@@ -11,7 +11,7 @@ import { Store } from "@tanstack/react-store";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { isTauri, onAppEvent, ptyKill, ptyResize, ptySpawn, ptyWrite } from "../ipc/api";
+import { isTauri, onAppEvent, ptyAtPrompt, ptyKill, ptyResize, ptySpawn, ptyWrite } from "../ipc/api";
 import type { TerminalExitEvent, TerminalOutputEvent } from "../ipc/types";
 
 /** "running", or the shell's exit code (null when it gave none). */
@@ -147,9 +147,14 @@ export function restartTerminal(): void {
   if (h) show(h);
 }
 
-/** Type into the shell (e.g. the "Connect Claude Code" command). */
-export function writeToTerminal(data: string): void {
-  if (!session) return;
-  void ptyWrite(session.id, data);
-  session.term.focus();
+/** Type a command at the shell prompt. Types nothing, and resolves false,
+ *  while a program (such as `claude`) runs in the shell: the text would land
+ *  in that program instead. */
+export async function typeAtPrompt(command: string): Promise<boolean> {
+  const s = session;
+  if (!s) return false;
+  s.term.focus();
+  if (!(await ptyAtPrompt(s.id).catch(() => false))) return false;
+  await ptyWrite(s.id, command);
+  return true;
 }
