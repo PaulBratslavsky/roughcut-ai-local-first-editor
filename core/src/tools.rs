@@ -446,6 +446,52 @@ handler!(h_cut_range, |e, a, s| {
     edit(e, pid, EditOp::CutRange { start, end }, s)
 });
 
+handler!(h_cut_passage, |e, a, s| {
+    let pid = arg_uuid(a, "project_id")?;
+    // From/to segments (the passage's first and last), or raw seconds.
+    let (start, end) = match (a["from_segment_id"].as_str(), a["to_segment_id"].as_str()) {
+        (Some(_), Some(_)) => {
+            let from = arg_uuid(a, "from_segment_id")?;
+            let to = arg_uuid(a, "to_segment_id")?;
+            e.with_project(pid, |_, t| {
+                let t = t.ok_or_else(|| CoreError::InvalidArg("no transcript yet".into()))?;
+                let f = t.segment(from).ok_or_else(|| CoreError::InvalidArg("from_segment_id not found".into()))?;
+                let l = t.segment(to).ok_or_else(|| CoreError::InvalidArg("to_segment_id not found".into()))?;
+                Ok((f.start.min(l.start), f.end.max(l.end)))
+            })?
+        }
+        _ => (arg_f64(a, "start")?, arg_f64(a, "end")?),
+    };
+    if end - start > 1800.0 {
+        return Err(CoreError::InvalidArg(format!(
+            "that passage is {:.0} minutes — cut_passage is for one part of the video; \
+             for a length target use plan_duration_cut",
+            (end - start) / 60.0
+        )));
+    }
+    let (cs, ce) = crate::story::snap_passage(e, pid, start, end)?;
+    // Show the edges so the caller can check it got the right passage.
+    let (first, last) = e.with_project(pid, |_, t| {
+        let words: Vec<&str> = t
+            .map(|t| {
+                t.segments
+                    .iter()
+                    .flat_map(|s| s.words.iter())
+                    .filter(|w| w.start >= cs - 0.01 && w.end <= ce + 0.01)
+                    .map(|w| w.text.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let n = words.len();
+        Ok((words.iter().take(10).cloned().collect::<Vec<_>>().join(" "),
+            words[n.saturating_sub(10)..].join(" ")))
+    })?;
+    let mut out = edit(e, pid, EditOp::CutRange { start: cs, end: ce }, s)?;
+    out["cut"] = json!({ "start": cs, "end": ce, "seconds": ((ce - cs) * 10.0).round() / 10.0,
+                         "starts_with": first, "ends_with": last });
+    Ok(out)
+});
+
 handler!(h_restore_range, |e, a, s| {
     edit(
         e,
@@ -649,7 +695,39 @@ handler!(h_plan_duration_cut, |e, a, s| {
             EditOp::CutSegments { segment_ids: plan.segment_ids.clone() },
             s,
         )?;
+        // Say WHAT went, not just how many segments: the cut stretches,
+        // longest first, with their opening words. The chat reply names
+        // them, so a one-step cut doesn't read as "nothing happened".
+        let passages = e.with_project(project_id, |_, t| {
+            let chosen: std::collections::HashSet<Uuid> = plan.segment_ids.iter().copied().collect();
+            let mut runs: Vec<(f64, f64, Vec<String>)> = vec![];
+            if let Some(t) = t {
+                for seg in t.segments.iter().filter(|s| chosen.contains(&s.id)) {
+                    match runs.last_mut() {
+                        Some(r) if seg.start - r.1 < 2.0 => {
+                            r.1 = seg.end;
+                            if r.2.len() < 12 {
+                                r.2.extend(seg.text.split_whitespace().map(String::from));
+                            }
+                        }
+                        _ => runs.push((seg.start, seg.end, seg.text.split_whitespace().map(String::from).collect())),
+                    }
+                }
+            }
+            runs.sort_by(|a, b| (b.1 - b.0).total_cmp(&(a.1 - a.0)));
+            Ok(runs
+                .into_iter()
+                .take(15)
+                .map(|(s, en, w)| json!({
+                    "start": (s * 10.0).round() / 10.0,
+                    "end": (en * 10.0).round() / 10.0,
+                    "seconds": ((en - s) * 10.0).round() / 10.0,
+                    "starts_with": w.into_iter().take(12).collect::<Vec<_>>().join(" "),
+                }))
+                .collect::<Vec<_>>())
+        })?;
         return Ok(json!({
+            "passages": passages,
             "applied": plan.segment_ids.len(),
             "action": outcome.action,
             "before_s": plan.before_s,
@@ -1195,6 +1273,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive. Pass snap=\"word\" or \"sentence\" to land the cut on clean word/sentence boundaries using the transcript's word timings, so it never clips mid-word — use this instead of parsing word timestamps yourself.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap the cut to clean boundaries (default none)"}}), &["project_id", "start", "end"]),
         agent: true, meta: false, mutating: true, h_cut_range),
+    tool!("cut_passage", "Cut ONE whole passage — 'the part where I demo the app', 'the tangent about my weekend' — in one call: pass the passage's first and last segment (from_segment_id, to_segment_id) or its start/end seconds. Everything between is cut, and both edges snap to the nearest sentence end or clear pause (within ~10 s) so the speech around the cut reads cleanly. Returns the cut range with its first and last words, so you can check it is the right passage. Use this instead of cutting scattered search hits.",
+        || obj(json!({"project_id": pid_schema(), "from_segment_id": {"type": "string", "description": "first segment of the passage"}, "to_segment_id": {"type": "string", "description": "last segment of the passage"}, "start": {"type": "number", "description": "seconds, if not using segment ids"}, "end": {"type": "number"}}), &["project_id"]),
+        agent: true, meta: false, mutating: true, h_cut_passage),
     tool!("restore_range", "Re-include a previously cut source time range.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
         agent: true, meta: false, mutating: true, h_restore_range),
@@ -1234,7 +1315,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
         agent: true, meta: false, mutating: true, h_story_edit),
-    tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: groups still-included segments into whole sentences, ranks them by how central they are to the video, and cuts the least-central ones first, gathered into runs so cut points land between sentences (intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
+    tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: groups still-included segments into whole sentences, ranks them by how central they are to the video, and cuts the least-central ones first, gathered into runs so cut points land between sentences (intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s and the passages it cut (times + opening words) — name the main ones in your reply. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
         || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),
         agent: true, meta: false, mutating: true, h_plan_duration_cut),
     tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",

@@ -43,6 +43,11 @@ fn system_prompt(project_id: Uuid) -> String {
          start or end mid-sentence. When you cut by segment, cut a run that \
          starts at the beginning of a sentence and ends at the end of one (or \
          use cut_range with snap=\"sentence\"), never every other segment. \
+         CUTTING A PART: when the user asks to cut 'the part where…' or 'the \
+         section about…', work out where that passage STARTS and ENDS (read it \
+         — search hits are single segments, not the passage), then call \
+         cut_passage ONCE with from_segment_id and to_segment_id. Never cut \
+         just the search hits. \
          EDIT IN ONE BATCH: collect every segment id you want to remove, then make \
          a single cut_by_transcript call with ALL the ids (its segment_ids field is \
          an array), or one apply_edits call for mixed operations. Never cut one \
@@ -71,7 +76,9 @@ fn system_prompt(project_id: Uuid) -> String {
          DURATION TARGETS: when the user names a length ('make it 20 minutes', \
          'cut it in half'), make ONE call: plan_duration_cut with \
          target_duration_s and apply=true — it ranks, cuts, and reports the new \
-         included_duration_s in a single undoable step. When that report is at \
+         included_duration_s in a single undoable step. Its receipt lists the \
+         passages it cut: in your reply, say in plain words what the main ones \
+         were about (with times) so the user knows what went. When that report is at \
          or below the target, the job is DONE: reply with your summary. Do not \
          ferry segment ids yourself, do not run generate_rough_cut before or \
          after (it only removes fillers and cannot hit a duration), and do not \
@@ -640,6 +647,21 @@ pub async fn run_instruction_with(
                                 }
                             }
                         }
+                        // Search hits are single ~6 s segments. Small models
+                        // cut exactly the hits and leave the rest of the
+                        // passage in, so say what to do with them.
+                        if name == "find_segments" {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "note".into(),
+                                    json!("These are search HITS, not whole passages. To cut a part of \
+                                           the video, read around the hits (read_transcript with offset \
+                                           = a hit's s-number minus 10, limit 20) to see where the passage \
+                                           starts and ends, then call cut_passage once with its first and \
+                                           last segment ids."),
+                                );
+                            }
+                        }
                         // Only successes advance the act/read accounting and
                         // enter the repeat cache as plain results.
                         round_mutated |= is_mutating(&name);
@@ -649,7 +671,7 @@ pub async fn run_instruction_with(
                         }
                         if matches!(
                             name.as_str(),
-                            "cut_by_transcript" | "cut_range" | "apply_edits" | "plan_duration_cut"
+                            "cut_by_transcript" | "cut_range" | "apply_edits" | "plan_duration_cut" | "cut_passage"
                         )
                         {
                             narrative_cut_this_turn = true;

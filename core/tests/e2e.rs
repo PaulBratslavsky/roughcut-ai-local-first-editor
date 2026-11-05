@@ -1617,3 +1617,44 @@ async fn import_into_a_project_relinks_the_same_video_and_keeps_the_edit() {
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
     assert!(undone["action"].is_object(), "and so does the undo history");
 }
+
+#[tokio::test]
+async fn cut_passage_cuts_the_whole_span_with_clean_edges() {
+    let editor = Editor::test_instance();
+    let project =
+        call(&editor, "create_project", json!({ "name": "passage", "file_path": "/demo/a.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let t = call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let speech: Vec<&Value> = t["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["is_silence"] != true)
+        .collect();
+    let (first, last) = (speech[3], speech[6]);
+    let before: f64 = speech.iter().map(|s| s["end"].as_f64().unwrap() - s["start"].as_f64().unwrap()).sum();
+    let r = call(
+        &editor,
+        "cut_passage",
+        json!({ "project_id": pid, "from_segment_id": first["id"], "to_segment_id": last["id"] }),
+    )
+    .await;
+    let (cs, ce) = (r["cut"]["start"].as_f64().unwrap(), r["cut"]["end"].as_f64().unwrap());
+    let (fs, le) = (first["start"].as_f64().unwrap(), last["end"].as_f64().unwrap());
+    // The cut covers the passage, give or take the edge snap.
+    assert!((cs - fs).abs() <= 10.0 && (ce - le).abs() <= 10.0, "edges moved too far: {r}");
+    assert!(ce - cs >= (le - fs) * 0.5, "most of the passage is cut: {r}");
+    assert!(r["cut"]["starts_with"].as_str().unwrap().len() > 0, "{r}");
+    assert_eq!(r["timeline"]["cut_count"], 1, "one cut, not one per segment: {r}");
+    let _ = before;
+
+    // A whole-video "passage" is refused: that's a length request.
+    let refused = tools::dispatch(
+        &editor,
+        "cut_passage",
+        &json!({ "project_id": pid, "start": 0.0, "end": 4000.0 }),
+        Caller::Ui,
+    )
+    .await;
+    assert!(refused.is_err() || refused.unwrap()["cut"]["seconds"].as_f64().unwrap() < 1800.0);
+}

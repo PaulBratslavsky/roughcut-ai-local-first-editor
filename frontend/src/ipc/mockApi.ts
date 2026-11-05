@@ -1438,6 +1438,20 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return { action, timeline: clone(p.timeline) };
   },
 
+  cut_passage(args) {
+    // The mock skips the sentence snap: first segment's start to last's end.
+    const p = requireProject(args.project_id);
+    const segs = state.transcript.segments;
+    const from = segs.find((s) => s.id === args.from_segment_id);
+    const to = segs.find((s) => s.id === args.to_segment_id);
+    const start = from ? from.start : Number(args.start);
+    const end = to ? to.end : Number(args.end);
+    const action = recordEdit(p, "cut_range", `Cut ${start.toFixed(2)}s–${end.toFixed(2)}s`);
+    setRangeIncluded(p, start, end, false);
+    refreshTimeline(p);
+    return { action, timeline: clone(p.timeline), cut: { start, end, seconds: end - start, starts_with: "", ends_with: "" } };
+  },
+
   restore_range(args) {
     const p = requireProject(args.project_id);
     const start = Number(args.start), end = Number(args.end);

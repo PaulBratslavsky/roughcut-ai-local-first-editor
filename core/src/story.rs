@@ -390,6 +390,56 @@ pub fn snap_cut_range(
     Ok((s, e))
 }
 
+/// How far `snap_passage` may move an edge to find a clean one.
+const PASSAGE_SNAP_S: f64 = 10.0;
+
+/// Snap the edges of a PASSAGE cut so both sides of it read cleanly: the
+/// kept speech before ends at a sentence end (or a clear pause), and the kept
+/// speech after starts a sentence. Unlike `snap_cut_range`'s sentence mode,
+/// an edge moves at most PASSAGE_SNAP_S seconds: in a long unpunctuated
+/// stretch the nearest "sentence" can be minutes away, so a pause, then a
+/// plain word edge, is the fallback. Returns the snapped `(start, end)`.
+pub fn snap_passage(editor: &Editor, project_id: Uuid, start: f64, end: f64) -> Result<(f64, f64)> {
+    let speech = speech_segments(editor, project_id)?;
+    let words: Vec<&crate::model::Word> = speech.iter().flat_map(|s| s.words.iter()).collect();
+    if words.is_empty() || end <= start {
+        return Ok((start, end));
+    }
+    let ends_sentence = |t: &str| t.trim_end().ends_with(['.', '!', '?', '…']);
+    // Cost of an edge: distance moved plus a penalty for how clean it is.
+    let pick = |target: f64, cands: &mut dyn Iterator<Item = (f64, f64)>| -> f64 {
+        cands
+            .filter(|(t, _)| (t - target).abs() <= PASSAGE_SNAP_S)
+            .min_by(|a, b| ((a.0 - target).abs() + a.1).total_cmp(&((b.0 - target).abs() + b.1)))
+            .map(|(t, _)| t)
+            .unwrap_or(target)
+    };
+    // Cut start = the END of the last kept word before the passage.
+    let s = pick(
+        start,
+        &mut words.iter().enumerate().map(|(i, w)| {
+            let pause = words.get(i + 1).map(|n| n.start - w.end).unwrap_or(9.0);
+            let penalty = if ends_sentence(&w.text) { 0.0 } else if pause >= 0.5 { 2.0 } else { 6.0 };
+            (w.end, penalty)
+        }),
+    );
+    // Cut end = the START of the first kept word after the passage.
+    let e = pick(
+        end,
+        &mut words.iter().enumerate().map(|(i, w)| {
+            let prev = if i > 0 { Some(words[i - 1]) } else { None };
+            let pause = prev.map(|p| w.start - p.end).unwrap_or(9.0);
+            let starts = prev.map(|p| ends_sentence(&p.text)).unwrap_or(true);
+            let penalty = if starts { 0.0 } else if pause >= 0.5 { 2.0 } else { 6.0 };
+            (w.start, penalty)
+        }),
+    );
+    if s >= e {
+        return Ok((start, end));
+    }
+    Ok((s, e))
+}
+
 pub async fn review_flow(editor: &Editor, project_id: Uuid) -> Result<FlowReview> {
     review_flow_mode(editor, project_id, true).await
 }
