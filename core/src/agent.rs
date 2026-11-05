@@ -32,10 +32,17 @@ fn system_prompt(project_id: Uuid) -> String {
     format!(
         "You are the editing orchestrator inside a local-first video editor. \
          You edit by calling tools against the project with id {project_id}. \
-         The transcript is ALREADY in your context below, with each segment's id, \
-         times, and text — for most requests you can pick segment ids straight from \
-         it without searching. Use find_segments at most ONCE, and only when the \
-         context was truncated or you cannot find the content by reading. \
+         The transcript is ALREADY in your context below, with each segment's short \
+         id (s0, s1, …), times, and text — for most requests you can pick segment \
+         ids straight from it without searching; pass those short ids to any tool. \
+         Segments flagged CUT are already out of the edit: build on the current \
+         cut, don't re-cut them. If the context says it was truncated, read the \
+         part you need with read_transcript before editing it. Use find_segments \
+         at most ONCE, and only when you cannot find the content by reading. \
+         CUT WHOLE THOUGHTS: segments are speech-recognition chunks that often \
+         start or end mid-sentence. When you cut by segment, cut a run that \
+         starts at the beginning of a sentence and ends at the end of one (or \
+         use cut_range with snap=\"sentence\"), never every other segment. \
          EDIT IN ONE BATCH: collect every segment id you want to remove, then make \
          a single cut_by_transcript call with ALL the ids (its segment_ids field is \
          an array), or one apply_edits call for mixed operations. Never cut one \
@@ -98,40 +105,157 @@ fn is_mutating(tool: &str) -> bool {
     tools::is_mutating(tool)
 }
 
-/// Compact transcript + timeline context the model can ground on.
+/// Transcript context budget, in characters. A local model gets the small
+/// one; Claude gets enough for a few hours of footage.
+const CONTEXT_LOCAL: usize = 24_000;
+const CONTEXT_HOSTED: usize = 300_000;
+/// Extra room, past the budget, for the map of segments that didn't fit.
+const CONTEXT_MAP: usize = 6_000;
+
+/// Short segment ids for the model: `s<index in the transcript>` (the same
+/// index read_transcript pages by). A UUID costs ~40 characters a line and
+/// pushed most of a long video out of the context.
+pub(crate) struct SegIds {
+    by_uuid: std::collections::HashMap<String, usize>,
+    by_index: Vec<Uuid>,
+}
+
+impl SegIds {
+    pub(crate) fn load(editor: &Editor, project_id: Uuid) -> Result<Self> {
+        editor.with_project(project_id, |_, t| {
+            let by_index: Vec<Uuid> = t.map(|t| t.segments.iter().map(|s| s.id).collect()).unwrap_or_default();
+            let by_uuid = by_index.iter().enumerate().map(|(i, id)| (id.to_string(), i)).collect();
+            Ok(SegIds { by_uuid, by_index })
+        })
+    }
+
+    fn short(i: usize) -> String {
+        format!("s{i}")
+    }
+
+    /// Model → tools: `"s12"` under any key with "segment" in it becomes the
+    /// segment's UUID. Full UUIDs pass through untouched.
+    pub(crate) fn expand(&self, v: &Value) -> Value {
+        self.expand_in(v, false)
+    }
+
+    fn expand_in(&self, v: &Value, under_segment_key: bool) -> Value {
+        match v {
+            Value::Object(m) => Value::Object(
+                m.iter()
+                    .map(|(k, v)| (k.clone(), self.expand_in(v, under_segment_key || k.contains("segment"))))
+                    .collect(),
+            ),
+            Value::Array(a) => Value::Array(a.iter().map(|v| self.expand_in(v, under_segment_key)).collect()),
+            Value::String(s) if under_segment_key => {
+                let idx = s.strip_prefix('s').and_then(|n| n.parse::<usize>().ok());
+                match idx.and_then(|i| self.by_index.get(i)) {
+                    Some(id) => Value::String(id.to_string()),
+                    None => v.clone(),
+                }
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Tools → model: every segment UUID in a result becomes its short id.
+    pub(crate) fn shorten(&self, v: &Value) -> Value {
+        match v {
+            Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), self.shorten(v))).collect()),
+            Value::Array(a) => Value::Array(a.iter().map(|v| self.shorten(v)).collect()),
+            Value::String(s) => match self.by_uuid.get(s) {
+                Some(&i) => Value::String(Self::short(i)),
+                None => v.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+fn mmss(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Compact transcript + timeline context the model can ground on: one line
+/// per segment with its short id, its time, whether it is already cut, and
+/// its text. When the transcript doesn't fit, the rest is listed as a map
+/// (time ranges with their opening words) so the model knows it exists and
+/// can page it in with read_transcript.
 fn project_context(editor: &Editor, project_id: Uuid) -> Result<String> {
+    let budget = if editor.hosted_likely() { CONTEXT_HOSTED } else { CONTEXT_LOCAL };
+    project_context_with(editor, project_id, budget)
+}
+
+fn project_context_with(editor: &Editor, project_id: Uuid, budget: usize) -> Result<String> {
     editor.with_project(project_id, |p, t| {
+        let tl = &p.timeline;
         let mut out = format!(
-            "Project: {} — source duration {:.1}s, {} cuts currently, included {:.1}s.\n",
+            "Project: {} — source duration {:.1}s ({}), {} cuts currently, included {:.1}s ({}).\n",
             p.name,
-            p.timeline.duration,
-            p.timeline.cut_count,
-            p.timeline.included_duration()
+            tl.duration,
+            mmss(tl.duration),
+            tl.cut_count,
+            tl.included_duration(),
+            mmss(tl.included_duration()),
         );
-        if let Some(t) = t {
-            out.push_str("Transcript segments (id | start-end | flags | text):\n");
-            for s in &t.segments {
-                if s.is_silence {
-                    continue;
-                }
-                let mut flags = vec![];
-                if s.is_filler {
-                    flags.push("filler");
-                }
-                if s.take_group_id.is_some() {
-                    flags.push(if s.is_best_take { "best-take" } else { "alt-take" });
-                }
-                let flags_s = if flags.is_empty() { "-".to_string() } else { flags.join(",") };
-                let line =
-                    format!("{} | {:.1}-{:.1} | {} | {}\n", s.id, s.start, s.end, flags_s, s.text);
-                if out.len() + line.len() > 24_000 {
-                    out.push_str("… (transcript truncated)\n");
+        let Some(t) = t else {
+            out.push_str("No transcript yet — call transcribe-like tools via the UI first.\n");
+            return Ok(out);
+        };
+        out.push_str(
+            "Transcript segments (id | start-end seconds | flags | text). Flags: CUT = already \
+             removed from the edit, PART = partly removed, filler, best-take / alt-take. \
+             Segments are speech-recognition chunks that often start or end mid-sentence.\n",
+        );
+        let speech: Vec<(usize, &crate::model::TranscriptSegment)> =
+            t.segments.iter().enumerate().filter(|(_, s)| !s.is_silence).collect();
+        let mut shown = 0;
+        for (i, s) in &speech {
+            let mut flags = vec![];
+            let len = (s.end - s.start).max(0.01);
+            let kept = tl.included_within(s.start, s.end) / len;
+            if kept < 0.2 {
+                flags.push("CUT");
+            } else if kept < 0.8 {
+                flags.push("PART");
+            }
+            if s.is_filler {
+                flags.push("filler");
+            }
+            if s.take_group_id.is_some() {
+                flags.push(if s.is_best_take { "best-take" } else { "alt-take" });
+            }
+            let flags_s = if flags.is_empty() { "-".to_string() } else { flags.join(",") };
+            let line = format!("s{i} | {:.1}-{:.1} | {flags_s} | {}\n", s.start, s.end, s.text);
+            if out.len() + line.len() > budget {
+                break;
+            }
+            out.push_str(&line);
+            shown += 1;
+        }
+        let rest = &speech[shown..];
+        if let (Some((first, fs)), Some((last, ls))) = (rest.first(), rest.last()) {
+            out.push_str(&format!(
+                "… (transcript truncated) {} more segments, s{first}–s{last} ({}–{}), are NOT shown. \
+                 Map of what they cover; read any part with read_transcript offset=<the s number>:\n",
+                rest.len(),
+                mmss(fs.start),
+                mmss(ls.end),
+            ));
+            let map_budget = out.len() + CONTEXT_MAP;
+            // About 30 map lines whatever the length.
+            let step = (rest.len() / 30).max(1);
+            for chunk in rest.chunks(step) {
+                let (ci, cs) = chunk[0];
+                let (_, ce) = chunk[chunk.len() - 1];
+                let opening: String = cs.text.split_whitespace().take(12).collect::<Vec<_>>().join(" ");
+                let line = format!("s{ci}… | {}–{} | {opening}…\n", mmss(cs.start), mmss(ce.end));
+                if out.len() + line.len() > map_budget {
                     break;
                 }
                 out.push_str(&line);
             }
-        } else {
-            out.push_str("No transcript yet — call transcribe-like tools via the UI first.\n");
         }
         Ok(out)
     })
@@ -148,6 +272,15 @@ fn emit_step(
     result: Option<Value>,
     text: Option<String>,
 ) {
+    crate::chatlog::record(
+        project_id,
+        step,
+        kind,
+        tool.as_deref(),
+        args.as_ref(),
+        result.as_ref(),
+        text.as_deref(),
+    );
     send(
         &editor.sink(),
         CoreEvent::AgentStep { project_id, step, kind: kind.into(), tool, args, result, text },
@@ -190,10 +323,26 @@ pub async fn run_instruction(
     // One `chat` line in the app log: how the turn ended, its model turns
     // and the edits that landed.
     let mut step = applog::Step::start(editor, "chat", Some(project_id));
+    // Chat history for troubleshooting (local file, see chatlog.rs).
+    crate::chatlog::begin(project_id, instruction, history.len());
+    if let Ok(tl) = editor.get_timeline(project_id) {
+        crate::chatlog::note(project_id, "included_before_s", json!((tl.included_duration() * 10.0).round() / 10.0));
+        crate::chatlog::note(project_id, "source_duration_s", json!(tl.duration));
+    }
     let result = run_instruction_logged(editor, project_id, instruction, history, source, &mut step).await;
     if let Ok(outcome) = &result {
         step.count("actions", outcome.actions.len());
     }
+    if let Ok(tl) = editor.get_timeline(project_id) {
+        crate::chatlog::note(project_id, "included_after_s", json!((tl.included_duration() * 10.0).round() / 10.0));
+    }
+    crate::chatlog::finish(
+        project_id,
+        match &result {
+            Ok(o) => Ok((o.summary.as_str(), o.actions.len())),
+            Err(e) => Err(e.to_string()),
+        },
+    );
     step.finish(&result);
     result
 }
@@ -234,6 +383,10 @@ pub async fn run_instruction_with(
     log: &mut applog::Step,
 ) -> Result<InstructionOutcome> {
     let context = project_context(editor, project_id)?;
+    let seg_ids = SegIds::load(editor, project_id)?;
+    crate::chatlog::note(project_id, "model", json!(model));
+    crate::chatlog::note(project_id, "context_chars", json!(context.len()));
+    crate::chatlog::note(project_id, "context_truncated", json!(context.contains("(transcript truncated)")));
     // Narrate the phases — a long first model call otherwise reads as a hang.
     let (seg_count, dur_min) = editor.with_project(project_id, |p, t| {
         Ok((t.map(|t| t.segments.len()).unwrap_or(0), p.timeline.duration / 60.0))
@@ -451,6 +604,8 @@ pub async fn run_instruction_with(
             if args.get("project_id").and_then(|v| v.as_str()).is_none() {
                 args["project_id"] = json!(project_id.to_string());
             }
+            // Short ids (s12) from the context → the segments' real ids.
+            let args = seg_ids.expand(&args);
             emit_step(editor, project_id, step, "tool_call", Some(name.clone()), Some(args.clone()), None, None);
             let call_key = format!("{name}:{args}");
             let result = if let Some(cached) = seen_calls.get(&call_key) {
@@ -492,7 +647,10 @@ pub async fn run_instruction_with(
                             round_produced = true;
                             clips_this_turn = true;
                         }
-                        if matches!(name.as_str(), "cut_by_transcript" | "cut_range" | "apply_edits")
+                        if matches!(
+                            name.as_str(),
+                            "cut_by_transcript" | "cut_range" | "apply_edits" | "plan_duration_cut"
+                        )
                         {
                             narrative_cut_this_turn = true;
                         }
@@ -534,9 +692,10 @@ pub async fn run_instruction_with(
                 Some(truncate_json(&result)),
                 None,
             );
+            // The model sees short ids, the same ones its context uses.
             messages.push(ChatMessage::tool_result(
                 &call.id,
-                serde_json::to_string(&truncate_json(&result))?,
+                serde_json::to_string(&seg_ids.shorten(&truncate_json(&result)))?,
             ));
         }
         if let Some(e) = last_error {
@@ -985,7 +1144,54 @@ pub async fn generate_title_description(editor: &Editor, project_id: Uuid) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{shorts_theme, wants_shorts};
+    use super::{project_context_with, shorts_theme, wants_shorts, SegIds};
+    use crate::engine::Editor;
+    use serde_json::json;
+
+    async fn transcribed() -> (Editor, uuid::Uuid) {
+        let editor = Editor::test_instance();
+        let p = crate::tools::dispatch(
+            &editor,
+            "create_project",
+            &json!({ "name": "ctx", "file_path": "/demo/a.mp4" }),
+            crate::tools::Caller::Ui,
+        )
+        .await
+        .unwrap();
+        let pid = uuid::Uuid::parse_str(p["id"].as_str().unwrap()).unwrap();
+        crate::tools::dispatch(&editor, "transcribe", &json!({ "project_id": pid }), crate::tools::Caller::Ui)
+            .await
+            .unwrap();
+        (editor, pid)
+    }
+
+    #[tokio::test]
+    async fn short_ids_round_trip() {
+        let (editor, pid) = transcribed().await;
+        let ids = SegIds::load(&editor, pid).unwrap();
+        let real = ids.by_index[3].to_string();
+        // Model → tool, nested (apply_edits) and top level.
+        let args = json!({ "segment_ids": ["s3"], "edits": [{ "type": "cut_segments", "segment_ids": ["s3", "s9999"] }], "query": "s3" });
+        let out = ids.expand(&args);
+        assert_eq!(out["segment_ids"][0], json!(real));
+        assert_eq!(out["edits"][0]["segment_ids"][0], json!(real));
+        assert_eq!(out["edits"][0]["segment_ids"][1], json!("s9999"), "unknown ids pass through");
+        assert_eq!(out["query"], json!("s3"), "only segment fields are translated");
+        // Tool → model.
+        assert_eq!(ids.shorten(&json!({ "issues": [{ "at_segment": real }] }))["issues"][0]["at_segment"], json!("s3"));
+    }
+
+    #[tokio::test]
+    async fn truncated_context_maps_the_rest() {
+        let (editor, pid) = transcribed().await;
+        let full = project_context_with(&editor, pid, 1_000_000).unwrap();
+        assert!(!full.contains("truncated"), "a big budget fits the demo transcript");
+        assert!(full.contains("\ns0 | ") || full.contains("\ns1 | "), "short ids in the context:\n{full}");
+        let small = project_context_with(&editor, pid, 900).unwrap();
+        assert!(small.contains("(transcript truncated)"), "{small}");
+        assert!(small.contains("read_transcript offset="), "{small}");
+        assert!(small.lines().any(|l| l.contains("… | ")), "a map line for the rest:\n{small}");
+    }
 
     #[test]
     fn shorts_intent_is_whole_words_and_not_a_length_request() {

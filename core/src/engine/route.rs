@@ -204,14 +204,17 @@ impl Editor {
     /// 5.5" or "the on-device model".
     pub fn model_label(&self) -> String {
         match self.inner.store.load_preferences() {
-            // Hosted, unless the last request had to fall back.
-            Ok(p) if p.model_mode == ModelMode::Hosted
-                && self.inner.route.status.lock().unwrap().effective != Some(ModelMode::Local) =>
-            {
-                hosted_model_name(&p.hosted_model)
-            }
+            Ok(p) if self.hosted_likely() => hosted_model_name(&p.hosted_model),
             _ => "the on-device model".into(),
         }
+    }
+
+    /// Whether the next AI step will most likely run on Claude: Hosted mode,
+    /// unless the last request had to fall back. Sizes the chat's transcript
+    /// context (a small local model gets a smaller one).
+    pub fn hosted_likely(&self) -> bool {
+        matches!(self.inner.store.load_preferences(), Ok(p) if p.model_mode == ModelMode::Hosted)
+            && self.inner.route.status.lock().unwrap().effective != Some(ModelMode::Local)
     }
 
     /// The switch as the app shows it. No network, no key-store read after

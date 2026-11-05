@@ -143,16 +143,12 @@ impl Editor {
                 mean
             });
 
-            let mut candidates: Vec<(Uuid, f64, f64)> = vec![]; // (id, score asc = cut first, seconds saved)
+            // Score every speech segment (low = cut first), then cut whole
+            // SENTENCE GROUPS, never lone segments: whisper segments start and
+            // end mid-sentence, so ranking them one by one cut every other
+            // segment and left a cut point mid-sentence every few seconds.
+            let mut pieces: Vec<Piece> = Vec::with_capacity(speech.len());
             for (i, s) in speech.iter().enumerate() {
-                // Protect the opening and closing of the video.
-                if i < 2 || i + 2 >= speech.len() {
-                    continue;
-                }
-                let saved = included_overlap(s.start, s.end);
-                if saved < 0.2 {
-                    continue; // already cut
-                }
                 let score = match (&vectors, &mean) {
                     (Some(m), Some(mean)) => match m.get(&s.id) {
                         Some(v) => crate::adapters::embed::cosine(v, mean) as f64,
@@ -170,19 +166,21 @@ impl Editor {
                         }
                     }
                 };
-                candidates.push((s.id, score, saved));
+                let next_start = speech.get(i + 1).map(|n| first_word_start(n));
+                pieces.push(Piece {
+                    id: s.id,
+                    start: s.start,
+                    end: s.end,
+                    score,
+                    included: included_overlap(s.start, s.end),
+                    // Protect the opening and closing of the video.
+                    protected: i < 2 || i + 2 >= speech.len(),
+                    ends_sentence: ends_sentence(&s.text)
+                        || next_start.map(|n| n - last_word_end(s) >= PAUSE_BREAK_S).unwrap_or(true),
+                    gap_after: next_start.map(|n| n - last_word_end(s)).unwrap_or(f64::MAX),
+                });
             }
-            candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut plan = vec![];
-            let mut projected = before_s;
-            for (id, _, saved) in &candidates {
-                if projected <= target_s {
-                    break;
-                }
-                plan.push(*id);
-                projected -= saved;
-            }
+            let (plan, projected) = plan_by_sentences(&pieces, before_s, target_s);
             let method = if vectors.is_some() { "centrality" } else { "heuristic" };
             let notes = if projected > target_s {
                 format!(
@@ -190,7 +188,7 @@ impl Editor {
                      protection or already-cut footage caps how much can go"
                 )
             } else {
-                format!("least-central material first ({method} ranking)")
+                format!("least-central whole sentences first ({method} ranking)")
             };
             Ok(DurationCutPlan {
                 segment_ids: plan,
@@ -262,5 +260,226 @@ impl Editor {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         Ok(Some(scored))
+    }
+}
+
+/// A pause this long between two segments counts as a sentence break even
+/// without punctuation (long unpunctuated stretches are common in live
+/// streams).
+const PAUSE_BREAK_S: f64 = 0.6;
+/// A sentence group is closed at this length even with no break, so one
+/// run-on stretch can't become an all-or-nothing block.
+const MAX_GROUP_S: f64 = 40.0;
+/// A kept stretch shorter than this, with cuts on both sides, is cut too
+/// when there's room under the target: a two-second island reads as a glitch.
+const ISLAND_S: f64 = 4.0;
+/// How much touching an existing cut lowers a group's score, as a share of
+/// the score spread. Small: enough to gather cuts into runs, not enough to
+/// override what the content scores say (tuned on a 62-minute stream).
+const RUN_BONUS: f64 = 0.05;
+
+/// One transcript segment as the duration planner sees it.
+#[derive(Debug, Clone)]
+pub(crate) struct Piece {
+    pub id: Uuid,
+    pub start: f64,
+    pub end: f64,
+    /// Lower = less central = cut first.
+    pub score: f64,
+    /// Seconds of it still on the timeline.
+    pub included: f64,
+    pub protected: bool,
+    /// The segment ends a sentence (punctuation or a pause after it).
+    pub ends_sentence: bool,
+    /// Silence between this segment's last word and the next one's first.
+    pub gap_after: f64,
+}
+
+fn ends_sentence(text: &str) -> bool {
+    matches!(text.trim_end().chars().last(), Some('.' | '!' | '?'))
+}
+
+fn first_word_start(s: &crate::model::TranscriptSegment) -> f64 {
+    s.words.first().map(|w| w.start).unwrap_or(s.start)
+}
+
+fn last_word_end(s: &crate::model::TranscriptSegment) -> f64 {
+    s.words.last().map(|w| w.end).unwrap_or(s.end)
+}
+
+/// Group pieces into sentences, then cut the least-central groups until the
+/// projected duration reaches `target_s`. Groups next to an existing cut get
+/// a small bonus so cuts gather into runs instead of scattering. Returns the
+/// segment ids to cut and the projected duration.
+pub(crate) fn plan_by_sentences(pieces: &[Piece], before_s: f64, target_s: f64) -> (Vec<Uuid>, f64) {
+    // 1. Sentence groups (index ranges into `pieces`).
+    let mut groups: Vec<std::ops::Range<usize>> = vec![];
+    let mut open = 0;
+    for (i, p) in pieces.iter().enumerate() {
+        if p.ends_sentence || i + 1 == pieces.len() {
+            groups.push(open..i + 1);
+            open = i + 1;
+        } else if p.end - pieces[open].start >= MAX_GROUP_S {
+            // A run-on stretch: close it at its longest pause, not here.
+            let at = (open..=i)
+                .max_by(|&a, &b| pieces[a].gap_after.partial_cmp(&pieces[b].gap_after).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(i);
+            groups.push(open..at + 1);
+            open = at + 1;
+        }
+    }
+    struct G {
+        range: std::ops::Range<usize>,
+        score: f64,
+        saved: f64,
+        cuttable: bool,
+    }
+    let mut gs: Vec<G> = groups
+        .into_iter()
+        .map(|r| {
+            let ps = &pieces[r.clone()];
+            let dur: f64 = ps.iter().map(|p| (p.end - p.start).max(0.01)).sum();
+            let score = ps.iter().map(|p| p.score * (p.end - p.start).max(0.01)).sum::<f64>() / dur;
+            let saved: f64 = ps.iter().map(|p| p.included).sum();
+            let cuttable = !ps.iter().any(|p| p.protected) && saved >= 0.2;
+            G { range: r, score, saved, cuttable }
+        })
+        .collect();
+    // Smooth with the neighbours: a sentence inside a weak passage goes
+    // before an equally weak sentence inside a strong one.
+    let raw: Vec<f64> = gs.iter().map(|g| g.score).collect();
+    for (i, g) in gs.iter_mut().enumerate() {
+        let prev = if i > 0 { raw[i - 1] } else { raw[i] };
+        let next = raw.get(i + 1).copied().unwrap_or(raw[i]);
+        g.score = 0.5 * raw[i] + 0.25 * (prev + next);
+    }
+    // A group counts as "already gone" when nothing of it is on the timeline.
+    let mut cut: Vec<bool> = gs.iter().map(|g| g.saved < 0.2).collect();
+    let mut chosen: Vec<bool> = vec![false; gs.len()];
+    let spread = {
+        let (lo, hi) = raw.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        if hi > lo { hi - lo } else { 1.0 }
+    };
+    let mut projected = before_s;
+
+    // 2. Greedy: cheapest group first, with a bonus for touching a cut.
+    while projected > target_s {
+        let best = (0..gs.len())
+            .filter(|&i| gs[i].cuttable && !chosen[i])
+            .map(|i| {
+                let touching = (i > 0 && cut[i - 1]) as u8 + (i + 1 < gs.len() && cut[i + 1]) as u8;
+                (i, gs[i].score - RUN_BONUS * spread * touching as f64)
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((i, _)) = best else { break };
+        chosen[i] = true;
+        cut[i] = true;
+        projected -= gs[i].saved;
+    }
+
+    // 3. Islands: a short kept stretch between two cuts goes too, while the
+    // result stays within 3% of the target.
+    for i in 1..gs.len().saturating_sub(1) {
+        if !chosen[i] && gs[i].cuttable && cut[i - 1] && cut[i + 1] && gs[i].saved < ISLAND_S
+            && projected - gs[i].saved >= target_s * 0.97
+        {
+            chosen[i] = true;
+            cut[i] = true;
+            projected -= gs[i].saved;
+        }
+    }
+
+    // 4. Overshoot: the last pick can be a long group. Put back the most
+    // central cut groups that still fit above the target.
+    let mut back: Vec<usize> = (0..gs.len()).filter(|&i| chosen[i]).collect();
+    back.sort_by(|&a, &b| gs[b].score.partial_cmp(&gs[a].score).unwrap_or(std::cmp::Ordering::Equal));
+    for i in back {
+        if projected + gs[i].saved <= target_s {
+            chosen[i] = false;
+            projected += gs[i].saved;
+        }
+    }
+
+    let ids = gs
+        .iter()
+        .zip(&chosen)
+        .filter(|(_, &c)| c)
+        .flat_map(|(g, _)| pieces[g.range.clone()].iter().filter(|p| p.included > 0.0).map(|p| p.id))
+        .collect();
+    (ids, projected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn piece(i: usize, text: &str, score: f64) -> (Piece, String) {
+        let p = Piece {
+            id: Uuid::new_v4(),
+            start: i as f64 * 5.0,
+            end: i as f64 * 5.0 + 5.0,
+            score,
+            included: 5.0,
+            protected: false,
+            ends_sentence: ends_sentence(text),
+            gap_after: 0.1,
+        };
+        (p, text.to_string())
+    }
+
+    /// Sentences split across segments the way whisper splits them, with
+    /// alternating scores: the old planner cut every other segment.
+    #[test]
+    fn cuts_whole_sentences_not_alternate_segments() {
+        let texts = [
+            "So the first thing", "is the setup.", "And then we", "talk about cats.",
+            "Cats are", "very nice animals.", "Dogs are also", "pretty good.",
+            "Finally the", "wrap up.",
+        ];
+        let scores = [0.9, 0.1, 0.8, 0.2, 0.7, 0.3, 0.85, 0.15, 0.9, 0.2];
+        let built: Vec<(Piece, String)> =
+            texts.iter().zip(scores).enumerate().map(|(i, (t, s))| piece(i, t, s)).collect();
+        let pieces: Vec<Piece> = built.iter().map(|(p, _)| p.clone()).collect();
+        let (ids, projected) = plan_by_sentences(&pieces, 50.0, 30.0);
+        assert!(projected <= 30.0);
+        // Every cut sentence is cut whole: both halves or neither.
+        for pair in pieces.chunks(2) {
+            let a = ids.contains(&pair[0].id);
+            let b = ids.contains(&pair[1].id);
+            assert_eq!(a, b, "a sentence was split by the cut");
+        }
+    }
+
+    #[test]
+    fn protected_and_already_cut_pieces_stay_out() {
+        let mut pieces: Vec<Piece> =
+            (0..6).map(|i| piece(i, "One sentence.", 0.1 * i as f64).0).collect();
+        pieces[0].protected = true;
+        pieces[1].included = 0.0;
+        let (ids, _) = plan_by_sentences(&pieces, 25.0, 10.0);
+        assert!(!ids.contains(&pieces[0].id));
+        assert!(!ids.contains(&pieces[1].id));
+    }
+
+    #[test]
+    fn run_on_stretches_break_at_the_longest_pause() {
+        // 12 unpunctuated 5 s segments; the longest pause is after #4.
+        let mut pieces: Vec<Piece> = (0..12).map(|i| piece(i, "and so on", 0.5).0).collect();
+        pieces[4].gap_after = 0.5;
+        pieces[4].score = 0.0; // make the first group the cheapest
+        let (ids, _) = plan_by_sentences(&pieces, 60.0, 35.0);
+        assert!(ids.contains(&pieces[4].id));
+        assert!(!ids.contains(&pieces[5].id), "the group should end at the pause");
+    }
+
+    #[test]
+    fn cuts_gather_into_runs() {
+        // Flat scores: the adjacency bonus should keep the cuts together.
+        let pieces: Vec<Piece> = (0..12).map(|i| piece(i, "A sentence.", 0.5).0).collect();
+        let (ids, _) = plan_by_sentences(&pieces, 60.0, 40.0);
+        let idx: Vec<usize> =
+            pieces.iter().enumerate().filter(|(_, p)| ids.contains(&p.id)).map(|(i, _)| i).collect();
+        assert_eq!(idx.len(), 4);
+        assert_eq!(idx.last().unwrap() - idx[0], 3, "cuts should be one run: {idx:?}");
     }
 }

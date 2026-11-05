@@ -68,6 +68,14 @@ model replies, chat messages, API keys, tokens or audio, and stays under
     scrubber for error text, and a test proves it. **File paths are logged**
     (the home folder shown as `~`), and a media file's name is often the
     project's name (`frontend/src/newProject.ts:20`); see D2.
+*   **Chat history is a separate file.** To debug why the chat agent cut
+    what it cut, `core/src/chatlog.rs` writes one JSON line per chat turn
+    to `chats/<project id>.jsonl` next to the app log: the instruction, the
+    model, whether the transcript context was truncated, every step with
+    tool arguments and results (long id lists shortened), the reply, and the
+    included duration before and after. That file holds private text by
+    design; `roughcut.log` still holds none. Local only, written only once
+    the app log is on, and a file stops growing past 20 MB.
 *   **Local only.** The log is a file on this Mac. Nothing sends it anywhere;
     the app makes no network call for it.
 *   **Bounded.** Size-based rotation: at most three files of 5 MB.

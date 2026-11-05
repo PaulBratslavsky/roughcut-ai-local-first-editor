@@ -621,6 +621,8 @@ pub struct StoryEditOutcome {
 }
 
 fn narrate(editor: &Editor, project_id: Uuid, step: usize, text: impl Into<String>) {
+    let text = text.into();
+    crate::chatlog::record(project_id, step, "thinking", None, None, None, Some(&text));
     send(
         &editor.sink(),
         CoreEvent::AgentStep {
@@ -630,7 +632,7 @@ fn narrate(editor: &Editor, project_id: Uuid, step: usize, text: impl Into<Strin
             tool: None,
             args: None,
             result: None,
-            text: Some(text.into()),
+            text: Some(text),
         },
     );
 }
