@@ -1,8 +1,9 @@
 // Clips tab: suggested moments that stand alone as Shorts / Reels / TikToks,
-// and the clips you saved — from a suggestion or from pieces picked in the
-// transcript ("Add to clip"). Each clip is 16:9 or 9:16, is its own timeline
-// over the same source (the current cut inside its pieces), and survives
-// later main-cut edits. Reviewing many at once happens on the Shorts screen.
+// saved from here or from pieces picked in the transcript ("Add to clip").
+// Each clip is 16:9 or 9:16, is its own timeline over the same source (the
+// current cut inside its pieces), and survives later main-cut edits. The
+// saved clips themselves live on the Clips screen (play, crop, export); a
+// scan for many at once on the Shorts screen.
 
 import { useEffect, useState } from "react";
 import { useIsMutating } from "@tanstack/react-query";
@@ -13,14 +14,12 @@ import {
   useClips,
   useCreateClip,
   useFindClips,
-  useProject,
   useTranscript,
 } from "../ipc/queries";
 import type { ClipCandidate, ClipFormat, ProgressEvent } from "../ipc/types";
 import { previewRanges, seekTo, setScreen } from "../state/viewStore";
 import { clock, errText, scoredBy, useElapsed } from "./clipUtil";
 import { modelLabel, useModelStatus } from "../state/modelStore";
-import { SavedClipRow } from "./SavedClipRow";
 
 const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
   { label: "15–30s", min_s: 15, max_s: 30 },
@@ -30,7 +29,6 @@ const LENGTHS: { label: string; min_s: number; max_s: number }[] = [
 
 export function ClipsPanel({ projectId }: { projectId: string }) {
   const { data: transcript } = useTranscript(projectId);
-  const { data: project } = useProject(projectId);
   const { data: candidates = [] } = useClipCandidates(projectId);
   const { data: clips = [] } = useClips(projectId);
   const find = useFindClips(projectId);
@@ -83,6 +81,20 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
     );
   };
 
+  // Saved clips are listed, played, cropped and exported on the Clips screen.
+  const savedLink = (
+    <div className="clips-find">
+      <span className="clips-note">
+        {clips.length === 0
+          ? "No saved clips yet."
+          : `${clips.length} saved ${clips.length === 1 ? "clip" : "clips"}: play, crop and export them on the Clips screen.`}
+      </span>
+      <button className="ghost-btn" onClick={() => setScreen("clips")} title="Open the Clips screen">
+        ▸ open clips
+      </button>
+    </div>
+  );
+
   // Always reachable: the Shorts screen says "transcribe first" itself.
   const openReview = (
     <div className="clips-find">
@@ -98,6 +110,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
       <div className="clips-panel">
         <p className="clips-note">Transcribe the video first — clips are found from what you say.</p>
         {openReview}
+        {savedLink}
       </div>
     );
   }
@@ -151,16 +164,7 @@ export function ClipsPanel({ projectId }: { projectId: string }) {
       )}
       {error && <p className="empty-error">{error}</p>}
 
-      {clips.length > 0 && (
-        <>
-          <div className="clips-label">saved clips ({clips.length})</div>
-          <div className="clips-list">
-            {clips.map((c) => (
-              <SavedClipRow key={c.id} projectId={projectId} projectName={project?.name ?? "project"} clip={c} />
-            ))}
-          </div>
-        </>
-      )}
+      {savedLink}
 
       {candidates.length > 0 && (
         <>

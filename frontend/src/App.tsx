@@ -12,6 +12,7 @@ import { setActiveTab, setProjectId, viewStore } from "./state/viewStore";
 import { useShortsProgressListener } from "./state/shortsStore";
 import { useModelStatusSync } from "./state/modelStore";
 import { EmptyState } from "./EmptyState";
+import { ClipsScreen } from "./panels/ClipsScreen";
 import { ShortsScreen } from "./panels/ShortsScreen";
 import { TopBar } from "./panels/TopBar";
 import { TranscriptPanel } from "./panels/TranscriptPanel";
@@ -247,11 +248,12 @@ export default function App() {
     );
   }
 
-  if (screen === "shorts") {
+  if (screen === "shorts" || screen === "clips") {
+    const Screen = screen === "shorts" ? ShortsScreen : ClipsScreen;
     return (
       <>
         <DemoBanner />
-        {projectId ? <ShortsScreen key={projectId} projectId={projectId} /> : <EmptyState />}
+        {projectId ? <Screen key={projectId} projectId={projectId} /> : <EmptyState />}
       </>
     );
   }

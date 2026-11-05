@@ -24,7 +24,7 @@ Start with [`CONTEXT.md`](../../CONTEXT.md) (the domain glossary) and
 
 | Link | Date | Author | Components | Description |
 | ---- | ---- | ------ | ---------- | ----------- |
-| [CONTEXT.md](../../CONTEXT.md) | 2026-06-16 | Paul Bratslavsky | all | Domain glossary: Project, Timeline/Clip, EditOp, SavedClip, ClipCandidate, Shorts screen, Beat, Caller, adapters, ModelMode. The shared vocabulary for designs and reviews. |
+| [CONTEXT.md](../../CONTEXT.md) | 2026-06-16 | Paul Bratslavsky | all | Domain glossary: Project, Timeline/Clip, EditOp, SavedClip, ClipCandidate, Shorts screen, Clips screen, Beat, Caller, adapters, ModelMode. The shared vocabulary for designs and reviews. |
 | [07-architecture.md](../07-architecture.md) | 2026-11-03 | Paul Bratslavsky | core, app, frontend, mcp-shim | Architecture and implementation guide: one tool registry with three callers, adapters, AI layer, MCP, persistence, the Tauri shell, the frontend. Rewritten to match `feat/shorts` (bulk shorts, Local / Hosted, OBS import, the in-app terminal). |
 | [tool-api.md](../tool-api.md) | 2026-06-10 | Paul Bratslavsky | core/tools, frontend/ipc | The tool contract every caller (UI, local agent, MCP clients) uses. Kept in sync with the registry by `core/tests/doc_parity.rs`. |
 | [01-product.md](../01-product.md) | 2026-06-10 | Paul Bratslavsky | product | Mission and product: a local-first, zero-egress AI video editor. |

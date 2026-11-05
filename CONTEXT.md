@@ -102,11 +102,16 @@ Keep entries short. When a refactor names a new module, add the term here.
   from every Beat and skips moments already saved as clips; one run per project
   at a time. The latest run is persisted on the Project until the next run.
 - **Shorts screen** (`frontend/src/panels/ShortsScreen.tsx`) — the app screen
-  for reviewing a scan: the player beside a grid of candidate cards and the
-  saved clips, with "Scan for shorts", "Make N shorts" and "Export N". A
-  drawer under the player has two tabs: **chat** (the app's chat assistant,
-  the same conversation as the editor's Chat tab; the default) and
+  for reviewing a scan: the player beside a grid of candidate cards, with
+  "Scan for shorts" and "Make N shorts". The shorts it makes land on the Clips
+  screen. A drawer under the player has two tabs: **chat** (the app's chat
+  assistant, the same conversation as the editor's Chat tab; the default) and
   **terminal** (the app's one Terminal session).
+- **Clips screen** (`frontend/src/panels/ClipsScreen.tsx`) — the app screen
+  for every SavedClip of the project, wherever it was made (the editor's
+  "Add to clip" or Clips tab, or "Make N shorts"): the player and the same
+  drawer beside the list, where a clip is played, cropped, renamed or
+  exported, and ticked clips are exported together ("Export N").
 - **Footage tab** (`frontend/src/panels/FootagePanel.tsx`) — adds another video
   file to the end of the current project's source (`append_media`).
 - **Outline** (`story.rs`) — the narrative map: `{ beats, method: "llm"|"heuristic" }`.

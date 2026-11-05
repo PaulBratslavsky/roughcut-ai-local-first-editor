@@ -1,10 +1,10 @@
-// Shorts screen state that must outlive the screen (TanStack Store, like
-// viewStore). A scan, a batch make or a batch export runs for minutes, and the
-// user may switch to the editor or another project meanwhile; what they
+// Shorts and Clips screen state that must outlive the screens (TanStack
+// Store, like viewStore). A scan, a batch make or a batch export runs for
+// minutes, and the user may switch screens or projects meanwhile; what they
 // ticked and how the last run went must still be there when they come back.
 // Per project, ephemeral (not persisted). Written by the run hooks' own
-// callbacks, which fire even after the screen unmounts (ShortsScreen), and by
-// one always-on progress listener mounted in App.
+// callbacks, which fire even after a screen unmounts (ShortsScreen,
+// ClipsScreen), and by one always-on progress listener mounted in App.
 
 import { useEffect } from "react";
 import { Store } from "@tanstack/react-store";
@@ -17,7 +17,7 @@ const TASKS: readonly string[] = ["find_clips", "make_clips", "export_clips"];
 export interface ShortsState {
   /** Candidate ids ticked to make. */
   picked: string[];
-  /** Saved clip ids ticked to export. */
+  /** Saved clip ids ticked to export (Clips screen). */
   ticked: string[];
   /** The latest progress line of each run (null once it reports done). */
   progress: Partial<Record<ShortsTask, ProgressEvent | null>>;
@@ -25,7 +25,10 @@ export interface ShortsState {
   scanStartedAt: number | null;
   /** How many candidates the last scan from this screen found. */
   lastScanFound: number | null;
+  /** The last scan or make failure (Shorts screen). */
   error: string | null;
+  /** The last batch export failure (Clips screen). */
+  exportError: string | null;
   /** Titles of the candidates being made, for naming the ones that fail. */
   makeTitles: Record<string, string>;
   made: { count: number; failed: { title: string; message: string }[] } | null;
@@ -41,6 +44,7 @@ export const EMPTY_SHORTS: ShortsState = {
   scanStartedAt: null,
   lastScanFound: null,
   error: null,
+  exportError: null,
   makeTitles: {},
   made: null,
   exportJob: null,

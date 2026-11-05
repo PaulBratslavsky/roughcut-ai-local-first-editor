@@ -1,13 +1,13 @@
 // The clip being assembled in the transcript: pieces added with right-click
 // → "Add to clip" (highlighted in the text), shown here with their playable
 // length. Audition them back to back, pick 16:9 or 9:16, save — the clip
-// lands in the Clips tab and the draft clears.
+// lands on the Clips screen and the draft clears.
 
 import { useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { useCreateClip, useTimeline } from "../ipc/queries";
 import type { ClipFormat } from "../ipc/types";
-import { clearClipDraft, previewRanges, setActiveTab, viewStore } from "../state/viewStore";
+import { clearClipDraft, previewRanges, setScreen, viewStore } from "../state/viewStore";
 import { errText, FORMAT_LABEL } from "./clipUtil";
 
 export function ClipDraftBar({ projectId }: { projectId: string }) {
@@ -24,7 +24,7 @@ export function ClipDraftBar({ projectId }: { projectId: string }) {
     return (
       <div className="clip-draft">
         <span className="clip-draft-summary">saved “{saved}”</span>
-        <button className="ghost-btn" onClick={() => setActiveTab("clips")}>
+        <button className="ghost-btn" onClick={() => setScreen("clips")} title="Open the Clips screen">
           open clips
         </button>
         <button className="ghost-btn" onClick={() => setSaved(null)} title="Dismiss">

@@ -412,7 +412,7 @@ export interface FindClipsResult {
 
 /** Mutation keys of the per-project clip runs (scan, batch make, batch
  *  export): `useIsMutating({ mutationKey })` says one is running wherever it
- *  was started (Clips tab, Shorts screen) and after a remount. */
+ *  was started (Clips tab, Shorts or Clips screen) and after a remount. */
 export const clipRunKeys = {
   find: (projectId: string) => ["find_clips", projectId] as const,
   make: (projectId: string) => ["create_clips", projectId] as const,

@@ -1,6 +1,6 @@
 // One saved clip (a 16:9 cut-down or a 9:16 short): rename, switch format,
-// frame the crop over the preview, export, delete. Shown in the Clips tab and
-// on the Shorts screen, where it also gets a checkbox for batch export.
+// frame the crop over the preview, export, delete. Shown on the Clips screen,
+// with a checkbox each for batch export.
 
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
@@ -24,7 +24,7 @@ export function SavedClipRow({
   projectId: string;
   projectName: string;
   clip: SavedClipSummary;
-  /** With `onCheck`: the row shows a checkbox (Shorts screen batch export). */
+  /** With `onCheck`: the row shows a checkbox (Clips screen batch export). */
   checked?: boolean;
   onCheck?: (checked: boolean) => void;
 }) {

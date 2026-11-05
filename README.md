@@ -25,7 +25,8 @@ the local agent loop and the UI. One tool set, three callers.
 - **"Make this 20 minutes"** — semantic duration planner ranks segments by importance (local embeddings) and batches the cut, via chat or one tool call
 - **Hybrid transcript search** — BM25 + local embeddings; "find the part about…" works on meaning, not keywords
 - **NLE hand-off** — Premiere/Resolve XML, FCPXML, EDL, OTIO, SRT, or a rendered MP4
-- **Shorts** — scan the whole video for shorts, review the candidates as cards, make and export them in a batch; vertical 9:16 crops are framed on the speaker's face
+- **Shorts** — scan the whole video for shorts, review the candidates as cards, make them in a batch; vertical 9:16 crops are framed on the speaker's face
+- **Clips** — every clip you saved, from the transcript or as a short, on one screen: play, crop, and export one or a ticked batch into a folder
 - **Claude can drive it** — 64 MCP tools with batch editing; every external edit is tagged and undoable
 - **In-app terminal** — run Claude Code inside the app; ask it to open a project and the app switches to it
 - **Zero egress** — the only network use is user-triggered downloads (models, runtimes) and, only when you turn it on, Hosted mode (text to Anthropic's API); everything is verifiable with a network monitor

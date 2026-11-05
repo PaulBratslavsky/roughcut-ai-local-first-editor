@@ -491,6 +491,13 @@ fresh-eyes code reviews of the core and the frontend:
     live. It shows the app's one shell (`state/terminalSession.ts`), the same
     session as the editor's Terminal tab; switching tabs or screens no longer
     kills it, only "Restart" does.
+*   **Clips screen** (added 2026-11-04, at the owner's request): saved clips
+    come from the editor as well as from "Make N shorts", so they moved off
+    the Shorts screen onto their own screen (`ClipsScreen.tsx`; the top bar
+    switches Editor | Shorts | Clips). It lists every saved clip with the
+    player and the same drawer, and owns "Export N"; the Shorts screen scans
+    and makes, and links there when a make finishes. The editor's Clips tab
+    keeps its finder and links to the screen instead of listing the clips.
 *   **Not measured yet** (needs a real video and the on-device model): scan
     time on a 45-minute video, make time, and peak memory on a 4K render.
 

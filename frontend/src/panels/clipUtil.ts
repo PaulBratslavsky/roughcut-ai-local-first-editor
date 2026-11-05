@@ -1,4 +1,5 @@
-// Small helpers shared by the Clips tab, the Shorts screen and the clip rows.
+// Small helpers shared by the Clips tab, the Shorts and Clips screens, and the
+// clip rows.
 
 import { useEffect, useState } from "react";
 import type { ClipFormat } from "../ipc/types";

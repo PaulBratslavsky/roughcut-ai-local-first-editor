@@ -61,15 +61,16 @@ function savePrefs(s: PersistedPrefs): void {
   }
 }
 
-/** The Shorts screen's drawer under the player: the chat or the terminal. */
+/** The drawer under the player on the Shorts and Clips screens: the chat or
+ *  the terminal. */
 export type ShortsDrawerTab = "chat" | "terminal";
 
 export type ActiveTab = "tools" | "chat" | "footage" | "clips" | "history" | "terminal";
-/** The editor (default) or the Shorts review. */
-export type AppScreen = "editor" | "shorts";
+/** The editor (default), the Shorts review, or every saved clip. */
+export type AppScreen = "editor" | "shorts" | "clips";
 
 export interface ViewState {
-  /** App-level screen: the editor (default) or Shorts. */
+  /** App-level screen: the editor (default), Shorts or Clips. */
   screen: AppScreen;
   projectId: string | null;
   playhead: number; // seconds, source time

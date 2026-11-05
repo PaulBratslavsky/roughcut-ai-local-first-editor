@@ -501,10 +501,12 @@ seeked input, so long sources render quickly.
 
 ## 8. Clips and shorts
 
-**Clips** (the Clips tab) are standalone excerpts saved from the transcript
-(select text → "Add to clip") or from `find_clips` candidates. **Shorts** are
-the same thing done in bulk, on their own screen
-([`designs/bulk-shorts.md`](designs/bulk-shorts.md)):
+**Clips** are standalone excerpts saved from the transcript (select text →
+"Add to clip") or from `find_clips` candidates (the editor's Clips tab).
+**Shorts** are the same thing done in bulk, on their own screen
+([`designs/bulk-shorts.md`](designs/bulk-shorts.md)). Every saved clip,
+wherever it was made, is listed on the **Clips** screen, which plays, crops
+and exports them:
 
 1. **Scan.** `find_clips { scan: true }` (`clip_finder.rs`) re-cuts the
    transcript into whole sentences (whisper's segments often stop
@@ -531,8 +533,9 @@ the same thing done in bulk, on their own screen
    `NN-<title>.<ext>` (MP4 by default, 1080×1920 for vertical), never
    overwriting. One failure doesn't stop the rest.
 
-Progress for scan, make and export is kept per project in the frontend's
-`shortsStore`, so the user can leave the Shorts screen and come back.
+Steps 1–4 run on the Shorts screen and step 5 on the Clips screen. Progress
+for scan, make and export is kept per project in the frontend's
+`shortsStore`, so the user can switch screens and come back.
 
 ---
 
@@ -598,12 +601,12 @@ list).
 
 ### Screens and layout
 
-`viewStore.screen` is `"editor"` or `"shorts"`. With no projects,
+`viewStore.screen` is `"editor"`, `"shorts"` or `"clips"`. With no projects,
 `EmptyState` asks for a file.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ TopBar: project picker · trash · LOCAL/HOSTED chip · Editor/Shorts · undo/redo · export · setup  │
+│ TopBar: project picker · trash · LOCAL/HOSTED · Editor|Shorts|Clips · undo/redo · export · setup │
 ├──────────────────────────────────────┬───────────────────────────────────────────────────────────┤
 │ TranscriptPanel                      │ PreviewPanel (video, skip cuts, 9:16 crop guide)          │
 │ click a word to seek; select text    ├───────────────────────────────────────────────────────────┤
@@ -616,7 +619,10 @@ list).
 ```
 
 The **Shorts** screen has the player, a note and a drawer on the left, and
-the candidate cards and saved shorts on the right. The drawer has two tabs:
+the candidate cards on the right. The **Clips** screen has the same left side
+and, on the right, every saved clip of the project, wherever it was made (the
+editor or Shorts), with batch export. Both screens use `PlayerDrawer`, which
+has two tabs:
 **chat** (the default; the same conversation as the editor's Chat tab, on the
 app's Local or Hosted model) and **terminal** (the same shell as the editor's
 Terminal tab, for Claude Code). Its open state and tab are saved.
@@ -626,8 +632,10 @@ Terminal tab, for Claude Code). Its open state and tab are saved.
 | `TranscriptPanel` | The main editing surface: segments, silences, cuts (struck through), suggestions with accept/dismiss, a menu with Cut / Restore / Add to clip / Play from here, search, the Rough cut button |
 | `ChatPanel` | Shows the project's conversation from `chatStore` (the editor's Chat tab and the Shorts drawer show the same one); sends `apply_instruction` with the last 8 turns; streams `agent-step`; "Undo all N edits" calls `undo_actions` |
 | `InspectorPanel`, `MetadataPanel` | The Tools tab: padding, aggressiveness, filler words, target length, audio sync, layout; chapters, title, captions |
-| `ClipsPanel`, `SavedClipRow`, `CandidateCard` | Find and save clips; rename, format, crop, export |
-| `ShortsScreen` | Scan, review cards, make and export shorts in bulk |
+| `ClipsPanel` | The editor's Clips tab: find and save clips; links to the Shorts and Clips screens |
+| `ShortsScreen`, `CandidateCard` | Scan, review cards, make shorts in bulk |
+| `ClipsScreen`, `SavedClipRow` | Every saved clip: play, rename, format, crop, export one or a ticked batch |
+| `PlayerDrawer`, `TaskLine` | The chat / terminal drawer and the run progress lines shared by the Shorts and Clips screens |
 | `FootagePanel` | `append_media` + transcribe |
 | `HistoryPanel` | `get_history` / `jump_to` |
 | `TerminalPanel` | The shared terminal session and **Connect Claude Code** |
@@ -834,13 +842,13 @@ calls `find_segments("hiking")`, then `cut_by_transcript` → `agent-step` event
 stream into the chat → a summary with "Undo all N edits".
 
 **Bulk shorts.** Shorts screen → Scan (`find_clips { scan: true }`) → cards →
-tick → Make (`create_clips`, face framing) → Export (`export_clips` to a
-folder).
+tick → Make (`create_clips`, face framing) → Clips screen, the new shorts
+ticked → Export (`export_clips` to a folder).
 
 **Claude Code session.** Terminal tab → Connect Claude Code → `claude` → "open
 my AI doom video and make three shorts" → `open_project` (the app switches) →
-`find_clips` / `create_clips` → the Shorts screen fills in live through
-`clips-changed`; exports ask the user first.
+`find_clips` / `create_clips` → the Shorts and Clips screens fill in live
+through `clips-changed`; exports ask the user first.
 
 **Export.** Export menu → `export { target, out_path }` → the matching writer
 in `core/src/export/`: `premiere_xml` / `resolve_xml` (FCP7 XMEML), `fcp_xml`

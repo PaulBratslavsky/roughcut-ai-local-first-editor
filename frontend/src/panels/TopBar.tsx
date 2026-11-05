@@ -7,13 +7,20 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
 import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
-import { setProjectId, setScreen, viewStore } from "../state/viewStore";
+import { setProjectId, setScreen, viewStore, type AppScreen } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { errText } from "./clipUtil";
 import { ExportMenu } from "./ExportMenu";
 import { ModelChip } from "./ModelChip";
 import { currentTheme, toggleTheme } from "../theme";
 import { SetupPanel } from "./SetupPanel";
+
+/** The app's screens, in the top bar's switch: id, label, tooltip. */
+const SCREENS: [AppScreen, string, string][] = [
+  ["editor", "Editor", "Edit the cut: transcript, timeline and tools"],
+  ["shorts", "Shorts", "Scan the video for shorts and make them in bulk"],
+  ["clips", "Clips", "Every saved clip: play, crop and export them"],
+];
 
 export function TopBar({
   projectId,
@@ -29,7 +36,7 @@ export function TopBar({
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
-  const onShorts = useStore(viewStore, (s) => s.screen === "shorts");
+  const screen = useStore(viewStore, (s) => s.screen);
 
   const onNewVideo = async () => {
     let id: string | null;
@@ -126,13 +133,20 @@ export function TopBar({
       </div>
       <div className="topbar-right">
         <ModelChip />
-        <button
-          className="screen-btn"
-          title={onShorts ? "Back to the editor" : "Scan the video for shorts and make them in bulk"}
-          onClick={() => setScreen(onShorts ? "editor" : "shorts")}
-        >
-          {onShorts ? "Editor" : "Shorts"}
-        </button>
+        <div className="screen-switch" role="tablist" aria-label="Screen">
+          {SCREENS.map(([id, label, title]) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={screen === id}
+              className={`screen-btn${screen === id ? " active" : ""}`}
+              title={title}
+              onClick={() => setScreen(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <button
           className="icon-btn"
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
