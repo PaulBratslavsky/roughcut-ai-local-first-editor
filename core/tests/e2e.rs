@@ -1386,9 +1386,10 @@ async fn bulk_shorts_scan_make_export() {
     let results = out["results"].as_array().unwrap();
     assert_eq!(results.len(), 3);
     assert!(results[1]["error"].is_string() && results[1]["path"].is_null());
+    let file_name = |path: &str| std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
     let first = results[0]["path"].as_str().unwrap();
-    assert!(first.ends_with(".srt") && first.contains("/01-"), "{first}");
-    assert!(results[2]["path"].as_str().unwrap().contains("/03-"));
+    assert!(first.ends_with(".srt") && file_name(first).starts_with("01-"), "{first}");
+    assert!(file_name(results[2]["path"].as_str().unwrap()).starts_with("03-"));
     assert!(std::path::Path::new(first).exists());
 
     // Again into the same folder: nothing is overwritten.

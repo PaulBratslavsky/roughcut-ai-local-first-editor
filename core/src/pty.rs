@@ -123,14 +123,21 @@ pub fn write(id: &str, bytes: &[u8]) -> Result<()> {
 
 /// Whether the shell is waiting at its prompt: no program (such as `claude`)
 /// runs in the foreground, so typed text reaches the shell itself. True when
-/// it can't tell.
+/// it can't tell, which is always on Windows (no process groups on a PTY).
 pub fn at_prompt(id: &str) -> Result<bool> {
     let map = sessions().lock().unwrap();
     let session = map.get(id).ok_or_else(|| pty_err("no such session"))?;
-    Ok(match (session.master.process_group_leader(), session.shell_pid) {
+    #[cfg(unix)]
+    let at = match (session.master.process_group_leader(), session.shell_pid) {
         (Some(fg), Some(shell)) => fg as i64 == shell as i64,
         _ => true,
-    })
+    };
+    #[cfg(not(unix))]
+    let at = {
+        let _ = session.shell_pid;
+        true
+    };
+    Ok(at)
 }
 
 /// Resize the PTY to match the xterm grid (cols/rows, not pixels).
@@ -161,7 +168,8 @@ pub fn kill_all() {
     }
 }
 
-#[cfg(test)]
+// Runs /bin/sh and reads process groups: Unix only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::events::NullSink;
