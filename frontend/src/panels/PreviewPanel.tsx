@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
-import { isTauri, mediaSrc } from "../ipc/api";
+import { isTauri, playbackSrc } from "../ipc/api";
 import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
 import { registerAudibleElement } from "../playback/meter";
 import { usePlaybackEngine } from "../playback/engine";
@@ -63,7 +63,7 @@ export function PreviewPanel({
     if (!project?.media) return null;
     const path = assets?.playback_path ?? project.media.file_path;
     if (!isTauri && !path.startsWith("http")) return null;
-    return mediaSrc(path);
+    return playbackSrc(path);
   }, [project?.media, assets?.playback_path]);
   const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
 
@@ -90,7 +90,7 @@ export function PreviewPanel({
   // PiP. All CSS — sources untouched, layout switchable any time.
   const layout = project?.layout ?? { mode: "pip", shape: "rounded", corner: "br", size: 0.25 };
   const screenSrc = useMemo(
-    () => (project?.screen_media && isTauri ? mediaSrc(project.screen_media.file_path) : null),
+    () => (project?.screen_media && isTauri ? playbackSrc(project.screen_media.file_path) : null),
     [project?.screen_media],
   );
   const compositing = !!screenSrc && layout.mode !== "camera";

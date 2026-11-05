@@ -808,15 +808,30 @@ the terminal):
 | DaVinci Resolve | `install_resolve_plugin`, `resolve_status`, `send_to_resolve` |
 
 At startup the shell opens the app log, registers the single-instance plugin
-(a second launch focuses the first window), the dialog plugin, an `EventSink`
+(a second launch focuses the first window), the dialog plugin, the `rcmedia`
+protocol (below), an `EventSink`
 that forwards core events to the WebView, and the Editor (logging `app_start`,
 or `app_start_failed`); then it starts the MCP server and emits `mcp-ready`.
 On exit it logs `app_exit`, stops the managed model server and kills every
 terminal. The app builds the core with `whisper-native`.
 
-Config (`tauri.conf.json`): drag-and-drop on, the asset protocol enabled (the
-`<video>` element plays local files through `convertFileSrc`), minimum window
-1100×700, Vite dev server on port 1420.
+Config (`tauri.conf.json`): drag-and-drop on, the asset protocol enabled
+(thumbnails and waveform peaks load through `convertFileSrc`; its scope also
+decides what `rcmedia` may read), minimum window 1100×700, Vite dev server on
+port 1420.
+
+**Media playback (`media.rs`, `rcmedia://`).** The preview's `<video>` and
+`<audio>` load local files through `playbackSrc` (`convertFileSrc(path,
+"rcmedia")`), not the asset protocol. The asset protocol answers every byte
+range with at most 1000 KiB, on the main thread. WebKit reads an MP4 one exact
+range per box or sample and treats a shorter answer as a failed read, and a
+long recording's sample tables don't fit (a 60 fps video over ~35 minutes has
+a frame-timing table over 1000 KiB): WebKit then drops the video track and
+plays only the sound. `rcmedia` answers a range with an end in full
+(up to 64 MiB), an open-ended range in 8 MiB pieces, and a request without a
+range whole (small files) or as its first 8 MiB, on the blocking thread pool.
+Paths are percent-decoded, must be absolute without `..`, and must pass the
+asset protocol's scope.
 
 ---
 

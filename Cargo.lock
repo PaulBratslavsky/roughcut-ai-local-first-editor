@@ -3320,6 +3320,7 @@ dependencies = [
 name = "roughcut-app"
 version = "0.2.0"
 dependencies = [
+ "percent-encoding",
  "roughcut-core",
  "serde",
  "serde_json",
@@ -3327,6 +3328,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
  "uuid",
 ]

@@ -1,6 +1,9 @@
 //! Tauri shell: registers the IPC commands (one generic `call_tool` plus a
-//! couple of conveniences), forwards core events to the webview, and starts
-//! the localhost MCP server.
+//! couple of conveniences), forwards core events to the webview, serves the
+//! preview's media files (`media`, the `rcmedia://` protocol), and starts the
+//! localhost MCP server.
+
+mod media;
 
 use roughcut_core::applog;
 use roughcut_core::events::EventSink;
@@ -271,6 +274,10 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // The preview's <video>/<audio>: full byte ranges, off the main thread.
+        .register_asynchronous_uri_scheme_protocol(media::SCHEME, |ctx, request, responder| {
+            media::handle(ctx, request, responder)
+        })
         .setup(|app| {
             // The app log first, so a failed start is in it.
             applog::init(&applog::log_dir());

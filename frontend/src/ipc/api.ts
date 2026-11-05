@@ -247,14 +247,27 @@ export async function ptyKill(id: string): Promise<void> {
   return invoke("pty_kill", { id });
 }
 
-/** Resolve a local media file path to something a <video> tag can play. */
+/** A URL for a small local file read whole: thumbnails, waveform peaks.
+ *  Served by Tauri's asset protocol. */
 export function mediaSrc(filePath: string): string | null {
+  return localFileUrl(filePath, "asset");
+}
+
+/** A URL for a video or audio file the preview's <video>/<audio> plays.
+ *  Served by the shell's `rcmedia` protocol, which answers each byte range
+ *  in full: the asset protocol stops at 1000 KiB per read, and WebKit then
+ *  drops the picture of a long recording (its frame tables are bigger). */
+export function playbackSrc(filePath: string): string | null {
+  return localFileUrl(filePath, "rcmedia");
+}
+
+function localFileUrl(filePath: string, protocol: "asset" | "rcmedia"): string | null {
   // Browser harness: http sources play directly (lets Playwright exercise
   // the REAL <video> engine paths the mock clock can't).
   if (filePath.startsWith("http")) return filePath;
   if (!isTauri) return null;
-  // A bare file name (no directory) can't be resolved by the asset protocol —
+  // A bare file name (no directory) can't be resolved by either protocol —
   // happens for projects imported in demo/browser flows. Show the placeholder.
   if (!filePath.includes("/") && !filePath.includes("\\")) return null;
-  return convertFileSrc(filePath);
+  return convertFileSrc(filePath, protocol);
 }
