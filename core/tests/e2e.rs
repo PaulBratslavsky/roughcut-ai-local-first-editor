@@ -1755,3 +1755,21 @@ async fn a_big_story_edit_is_proposed_and_only_the_confirmed_beats_are_cut() {
     let out = call(&editor, "story_edit", json!({ "project_id": pid2, "instruction": "tighten it", "target_duration_s": 120 })).await;
     assert!(out["proposal"].is_null(), "{out}");
 }
+
+#[tokio::test]
+async fn retime_words_needs_the_audio_and_changes_nothing_without_it() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "retime", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let before = call(&editor, "get_transcript", json!({ "project_id": pid })).await;
+    assert_eq!(before["words_trimmed"], false, "the demo transcript isn't trimmed");
+    // The fixture video has no audio to read: a clear error, nothing changed.
+    let err = tools::dispatch(&editor, "retime_words", &json!({ "project_id": pid }), Caller::Mcp).await.unwrap_err();
+    assert_eq!(err.code(), "unavailable", "{err}");
+    let after = call(&editor, "get_transcript", json!({ "project_id": pid })).await;
+    assert_eq!(before, after);
+    // The in-app agent isn't offered it.
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    assert!(!tools::defs(agent).iter().any(|d| d.name == "retime_words"));
+}

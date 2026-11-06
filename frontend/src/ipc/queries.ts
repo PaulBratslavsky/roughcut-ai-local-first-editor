@@ -364,6 +364,14 @@ export function useTranscribe() {
   ]);
 }
 
+/** Fix word timings on an existing transcript (trim words to the audio). */
+export function useRetimeWords() {
+  return useEditMutation<{ project_id: string }, { words: number; trimmed: number; seconds_removed: number }>(
+    "retime_words",
+    ["transcript"],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Saved clips (16:9 cut-downs and 9:16 shorts)
 // ---------------------------------------------------------------------------

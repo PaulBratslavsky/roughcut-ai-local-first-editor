@@ -735,6 +735,7 @@ mod hybrid_tests {
                 is_best_take: false,
             }],
             model_used: "test".into(),
+            words_trimmed: false,
         }
     }
 

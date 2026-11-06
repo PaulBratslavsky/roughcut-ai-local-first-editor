@@ -481,6 +481,7 @@ function buildFixture(): Fixture {
     language: "en",
     segments,
     model_used: "whisper-small.en (mock)",
+    words_trimmed: false,
   };
 
   return { transcript, clips, duration };
@@ -1317,6 +1318,17 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     };
     p.updated_at = new Date().toISOString();
     return clone(p.media!);
+  },
+
+  // After the core's retime_words: words trimmed to the audio. The mock has
+  // no audio, so it only flips the flag and reports a plausible count.
+  retime_words(args): { words: number; trimmed: number; seconds_removed: number } {
+    requireProject(args.project_id);
+    if (!state.transcript) throw { code: "invalid_argument", message: "project has no transcript; transcribe first" };
+    state.transcript.words_trimmed = true;
+    const words = state.transcript.segments.reduce((n, s) => n + s.words.length, 0);
+    emit("transcript-changed", { project_id: state.project!.id });
+    return { words, trimmed: Math.round(words * 0.35), seconds_removed: 12.4 };
   },
 
   async transcribe(args): Promise<Transcript> {

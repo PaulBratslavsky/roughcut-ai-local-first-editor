@@ -330,6 +330,10 @@ macro_rules! handler {
     };
 }
 
+handler!(h_retime_words, |e, a, _s| {
+    Ok(serde_json::to_value(e.retime_words(arg_uuid(a, "project_id")?).await?)?)
+});
+
 handler!(h_import_media, |e, a, _s| {
     let media = e.import_media(arg_uuid_opt(a, "project_id")?, arg_str(a, "file_path")?).await?;
     Ok(serde_json::to_value(media)?)
@@ -1259,6 +1263,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("import_media", "Probe a local video file and return its metadata. With project_id, attach it to that project: a project with no media gets it (and a fresh timeline); a project whose video was moved can be relinked to the same video at a new path (same duration, size, frame rate — cuts, history, and transcript are kept). A different video is refused: create a new project, or use append_media.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["file_path"]),
         agent: false, meta: false, h_import_media),
+    tool!("retime_words", "Fix word timings on an existing transcript: trims every word's start and end to where the audio actually has sound (older transcripts have words that swallow the pauses around them, so word-level cuts and snaps land in the wrong place). Changes no text and no cuts; safe to repeat. New transcriptions already do this. Returns { words, trimmed, seconds_removed }.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: false, meta: false, h_retime_words),
     tool!("transcribe", "Transcribe the project's media on-device into time-aligned text. Afterwards the app polishes punctuation with its model in the background (on-device, or on Claude when the user has switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),

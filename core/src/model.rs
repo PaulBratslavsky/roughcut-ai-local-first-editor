@@ -61,6 +61,10 @@ pub struct Transcript {
     pub language: String,
     pub segments: Vec<TranscriptSegment>,
     pub model_used: String,
+    /// Word edges were trimmed to the audio (`detect::trim_words_to_audio`):
+    /// on for transcripts made since, or fixed with `retime_words`.
+    #[serde(default)]
+    pub words_trimmed: bool,
 }
 
 impl Transcript {

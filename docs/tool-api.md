@@ -93,6 +93,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `append_media { project_id, file_path } -> { media, note }` — lossless concat to the END of the source (new file; originals untouched; cuts keep timestamps; undo history and checkpoints are extended to cover the new footage; the append itself is not undoable; re-run `transcribe` after)
 - `import_media { file_path, project_id? } -> Media` — probes the file. With `project_id`: a project with no media gets it and a fresh timeline; a project whose video moved is relinked to the same video at a new path (matching duration, size, and frame rate keeps cuts, history, transcript, and clips); a different video is refused (`invalid_argument` — create a new project or use `append_media`)
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
+- `retime_words { project_id } -> { words, trimmed, seconds_removed }` — trims every word in the existing transcript to where the audio has sound (`Transcript.words_trimmed` becomes true). No text, segment or cut changes; idempotent. New transcriptions are trimmed already. UI and MCP only
 
 ### Analysis
 - `remove_silences { project_id, min_duration_s? } -> { applied, actions, note, cut_count, included_duration_s, source_duration_s }` — remove ONLY waveform-confirmed dead air, one undoable batch; never touches words, fillers, takes, or order

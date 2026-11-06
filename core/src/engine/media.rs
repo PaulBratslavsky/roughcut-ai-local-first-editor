@@ -119,6 +119,7 @@ impl Editor {
                     &peaks,
                     crate::adapters::video::PEAKS_PER_SECOND,
                 );
+                transcript.words_trimmed = true;
             }
         }
 
@@ -216,6 +217,34 @@ impl Editor {
 }
 
 impl super::Editor {
+    /// Fix word timings on an existing transcript: trim every word to the
+    /// audio (`detect::trim_words_to_audio`), as transcription now does.
+    /// Changes no text, segment or cut; safe to run again (a trimmed word
+    /// has nothing left to trim).
+    pub async fn retime_words(&self, project_id: Uuid) -> Result<crate::detect::TrimStats> {
+        self.ensure_loaded(project_id)?;
+        let media = self
+            .with_project(project_id, |p, _| Ok(p.media.clone()))?
+            .ok_or_else(|| CoreError::InvalidArg("project has no media".into()))?;
+        if self.get_transcript(project_id)?.is_none() {
+            return Err(CoreError::InvalidArg("project has no transcript; transcribe first".into()));
+        }
+        let peaks = crate::adapters::video::load_raw_peaks(&media).await.ok_or_else(|| {
+            CoreError::Unavailable("fixing word timings reads the audio, which needs ffmpeg".into())
+        })?;
+        let stats = {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry = state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
+            let t = entry.transcript.as_mut().ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
+            let stats = crate::detect::trim_words_to_audio(t, &peaks, crate::adapters::video::PEAKS_PER_SECOND);
+            t.words_trimmed = true;
+            self.inner.store.save_transcript(project_id, t)?;
+            stats
+        };
+        send(&self.inner.sink, CoreEvent::TranscriptChanged { project_id });
+        Ok(stats)
+    }
+
     /// Append another video to the END of this project's source: lossless
     /// concat into a new file in `<data dir>/media/` (originals untouched),
     /// media swapped, timeline extended with an included clip over the new

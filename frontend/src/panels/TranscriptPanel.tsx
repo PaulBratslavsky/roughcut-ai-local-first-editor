@@ -15,6 +15,7 @@ import {
   usePreferences,
   useRestoreByTranscript,
   useRestoreRange,
+  useRetimeWords,
   useSuggestions,
   useTimeline,
   useTranscript,
@@ -209,6 +210,7 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
   const cutByTranscript = useCutByTranscript();
   const restoreByTranscript = useRestoreByTranscript();
   const roughCut = useGenerateRoughCut();
+  const retime = useRetimeWords();
   const { data: suggestions } = useSuggestions(projectId);
   const acceptSuggestion = useAcceptSuggestion();
   const acceptAll = useAcceptAllSuggestions();
@@ -511,6 +513,18 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     );
   };
 
+  const onRetime = () => {
+    setRoughCutResult(null);
+    retime.mutate(
+      { project_id: projectId },
+      {
+        onSuccess: (res) =>
+          setRoughCutResult(`word timings fixed: ${res.trimmed} of ${res.words} words trimmed`),
+        onError: (err) => setRoughCutResult(`couldn't fix word timings: ${errText(err)}`),
+      },
+    );
+  };
+
   return (
     <div className="transcript-panel">
       <div className="transcript-toolbar">
@@ -529,6 +543,16 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
         <button className="primary-btn" onClick={onRoughCut} disabled={roughCut.isPending}>
           {roughCut.isPending ? "Cutting…" : "Rough cut"}
         </button>
+        {transcript && !transcript.words_trimmed && (
+          <button
+            className="ghost-btn"
+            onClick={onRetime}
+            disabled={retime.isPending}
+            title="This transcript's words include the pauses around them, so cuts aimed at words land in the wrong place. Fixing trims each word to its sound; no text or cuts change."
+          >
+            {retime.isPending ? "Fixing…" : "Fix word timings"}
+          </button>
+        )}
         {roughCutResult !== null && (
           <span className="rough-cut-result">{roughCutResult}</span>
         )}
