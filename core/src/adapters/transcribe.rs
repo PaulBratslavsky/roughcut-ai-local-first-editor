@@ -151,10 +151,6 @@ fn parse_whisper_json(json: &str, media_id: Uuid) -> Result<Transcript> {
     Ok(Transcript { id: Uuid::new_v4(), media_id, language, segments, model_used })
 }
 
-/// Primes whisper to write fillers down instead of tidying them away.
-pub const FILLER_PROMPT: &str =
-    "Umm, let me think, like, hmm... Okay, so, uh, here's what I was, you know, thinking.";
-
 /// whisper.cpp's alignment-heads preset for a model file, by name: DTW word
 /// alignment needs to know which attention heads track time. None = an
 /// unknown model; DTW stays off and raw token times are used.
@@ -297,12 +293,6 @@ impl Transcriber for WhisperRs {
                 params.set_language(Some(&lang)); // "auto" triggers detection
             }
             params.set_token_timestamps(true);
-            // Whisper learned from cleaned-up captions and drops "um" / "uh".
-            // A disfluent prompt keeps them, so filler cuts can find them.
-            // English only: an English prompt would pull other languages.
-            if lang == "en" || lang.starts_with("en-") {
-                params.set_initial_prompt(FILLER_PROMPT);
-            }
             params.set_print_special(false);
             params.set_print_progress(false);
             params.set_print_realtime(false);

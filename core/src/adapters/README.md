@@ -370,8 +370,9 @@ There are no child directories with contracts.
   starts a word, others (word pieces, contractions, punctuation) join it.
   A word starts at its first token's DTW time (raw `t0` without DTW) and ends
   where the next word starts; `Editor::transcribe` then trims words to the
-  audio (`detect::trim_words_to_audio`). For English it sets
-  `FILLER_PROMPT` as the initial prompt so whisper writes fillers down.
+  audio (`detect::trim_words_to_audio`). No initial prompt: a disfluent
+  "um, uh" prompt was measured on a 62-minute stream and halved the fillers
+  whisper wrote (197 → 90), the opposite of its purpose.
 - `MockTranscriber` emits progress 0.25, 0.5, 0.75, 1.0, sleeping 120 ms after each.
 
 ### Inference and embeddings
