@@ -109,6 +109,7 @@ export async function getSetupStatus(): Promise<SetupStatus> {
       plugin_outdated: false,
       scripts_dir: "(browser mock)",
     },
+    aligner: { available: true, downloaded: !mockSwitch("noaligner"), approx_mb: 377 },
     demo: true,
     demo_reason: "browser mock",
   };
@@ -157,6 +158,12 @@ export async function checkHostedKey(): Promise<KeyCheck> {
 export async function downloadWhisperModel(tier: WhisperTier): Promise<string> {
   if (!isTauri) throw new Error("model download is only available in the desktop app");
   return invoke<string>("download_whisper_model", { tier });
+}
+
+/** Download the word alignment model (Setup; desktop only). */
+export async function downloadAlignerModel(): Promise<string> {
+  if (!isTauri) return "(browser mock)";
+  return invoke<string>("download_aligner_model");
 }
 
 /** Install/refresh the DaVinci Resolve script (desktop only). */

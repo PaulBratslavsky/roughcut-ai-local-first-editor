@@ -102,7 +102,7 @@ This package depends on the following crate modules but does not own them:
 | Method                                                                    | Notes                                                                                                              |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `async import_media(project_id: Option<Uuid>, file_path) -> Result<Media>` | Probes the file. Given a project: no media yet → sets it with `Timeline::new(media.duration)`; same video moved → relinks; a different video → `InvalidArg`. |
-| `async retime_words(project_id) -> Result<TrimStats>` | Trims every word of the existing transcript to the audio (`detect::trim_words_to_audio`), sets `Transcript.words_trimmed`, saves, sends `TranscriptChanged`. No text, segment or cut changes; idempotent. `Unavailable` when the audio can't be read (no ffmpeg). |
+| `async retime_words(project_id) -> Result<WordPlacement>` | Fixes the existing transcript's word times as transcription does (`place_words`): forced alignment (`adapters::align`, when compiled, downloaded and English), then the audio trim. Copies word times back by position (the text may have changed), sets `words_aligned` / `words_trimmed`, saves, sends `TranscriptChanged`. `Unavailable` when the audio can't be read. |
 | `async transcribe(id, language: Option<&str>) -> Result<Transcript>`      | On-device transcription, then a background LLM cleanup and semantic-index pass.                                    |
 | `update_segment_texts(id, &[(Uuid, String)]) -> Result<u32>`              | Replaces segment text and keeps every timestamp. Used by the LLM cleanup pass.                                     |
 | `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source (a new file in `<data dir>/media/`), swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
@@ -228,8 +228,8 @@ This package depends on the following crate modules but does not own them:
   `ClipOrigin::AiCut`, on top. Its cuts carry their own margins, so padding
   them would shrink each into the word it removes; cuts shorter than
   `detect::MIN_CUT_S` (0.1 s) are dropped.
-- `transcribe` trims every word to the audio (`detect::trim_words_to_audio`)
-  when raw peaks load, before saving.
+- `transcribe` places words before saving (`place_words`): forced alignment
+  when it can, then the audio trim. Best effort: what can't run is skipped.
 - `rough_cut_peaks` belongs to the whole Editor, not to one project. Any
   `apply_edit` takes it, whatever the op. Journal replays pass `None`.
 - `cut_confirmed_silences` returns `Ok(vec![])` when there is no transcript,

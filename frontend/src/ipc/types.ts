@@ -110,6 +110,7 @@ export type ExportTarget =
 // Shell-command status shapes are GENERATED (same regime as the model
 // types — ADR-0003 extended to the provisioning surface).
 export type { ResolveStatus } from "./generated/ResolveStatus";
+export type { AlignerStatus } from "./generated/AlignerStatus";
 export type { RuntimeStatus } from "./generated/RuntimeStatus";
 export type { SetupStatus } from "./generated/SetupStatus";
 export type { TierStatus } from "./generated/TierStatus";

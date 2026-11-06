@@ -366,7 +366,10 @@ export function useTranscribe() {
 
 /** Fix word timings on an existing transcript (trim words to the audio). */
 export function useRetimeWords() {
-  return useEditMutation<{ project_id: string }, { words: number; trimmed: number; seconds_removed: number }>(
+  return useEditMutation<
+    { project_id: string },
+    { aligned: boolean; chunks: number; chunks_kept: number; words: number; trimmed: number; seconds_removed: number; note?: string }
+  >(
     "retime_words",
     ["transcript"],
   );

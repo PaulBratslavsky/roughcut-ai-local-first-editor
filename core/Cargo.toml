@@ -34,14 +34,22 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 # (one source of truth for the model). Dev-time only.
 ts-rs = { version = "10", features = ["uuid-impl", "chrono-impl"], optional = true }
 
+# word-align: forced alignment of the transcript's words against the audio
+# with a local wav2vec2 model (Candle, pure Rust). Off by default so core
+# builds/tests stay light; the app crate turns it on. Pinned: a 0.1 crate.
+wav2vec2-rs = { version = "=0.1.0", optional = true }
+
 [features]
 whisper-native = ["dep:whisper-rs", "dep:hound"]
+word-align = ["dep:wav2vec2-rs", "dep:candle-core"]
 ts-bindings = ["dep:ts-rs"]
 
 # whisper.cpp on the Apple GPU — CPU-only decode of a 26-min video takes
 # ~10x longer and reads as a hang. Target-gated: metal exists only on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
+# Apple's Accelerate BLAS for the word aligner's model (macOS only).
+candle-core = { version = "0.9.1", optional = true, features = ["accelerate"] }
 # Face finding for 9:16 reframing: Apple's Vision framework, on-device. Same
 # objc2 generation Tauri already pulls in.
 objc2 = "0.6"

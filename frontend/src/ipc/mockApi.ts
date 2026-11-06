@@ -81,10 +81,12 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               runs stop with hosted_key_rejected (hosted CUJ 4). Read on
 //               every call, so localStorage.setItem("rc-mock-badkey", "1")
 //               revokes the key of an already-Hosted session without reload.
+//   noaligner   the word alignment model isn't downloaded: Setup offers it,
+//               and Fix word timings only trims (with a note saying why).
 // ---------------------------------------------------------------------------
 
 export function mockSwitch(
-  name: "nomodel" | "failexport" | "failtranscribe" | "failimport" | "nohosted" | "badkey",
+  name: "nomodel" | "failexport" | "failtranscribe" | "failimport" | "nohosted" | "badkey" | "noaligner",
 ): boolean {
   try {
     if (new URLSearchParams(window.location.search).has(name)) return true;
@@ -482,6 +484,7 @@ function buildFixture(): Fixture {
     segments,
     model_used: "whisper-small.en (mock)",
     words_trimmed: false,
+    words_aligned: false,
   };
 
   return { transcript, clips, duration };
@@ -1322,13 +1325,33 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   // After the core's retime_words: words trimmed to the audio. The mock has
   // no audio, so it only flips the flag and reports a plausible count.
-  retime_words(args): { words: number; trimmed: number; seconds_removed: number } {
+  retime_words(args): {
+    aligned: boolean;
+    chunks: number;
+    chunks_kept: number;
+    words: number;
+    trimmed: number;
+    seconds_removed: number;
+    relocated: number;
+    note?: string;
+  } {
     requireProject(args.project_id);
     if (!state.transcript) throw { code: "invalid_argument", message: "project has no transcript; transcribe first" };
+    const aligned = !mockSwitch("noaligner");
     state.transcript.words_trimmed = true;
+    state.transcript.words_aligned = aligned;
     const words = state.transcript.segments.reduce((n, s) => n + s.words.length, 0);
     emit("transcript-changed", { project_id: state.project!.id });
-    return { words, trimmed: Math.round(words * 0.35), seconds_removed: 12.4 };
+    return {
+      aligned,
+      chunks: aligned ? 10 : 0,
+      chunks_kept: 0,
+      words,
+      trimmed: Math.round(words * 0.35),
+      seconds_removed: 12.4,
+      relocated: 0,
+      ...(aligned ? {} : { note: "download the word alignment model in Setup for measured word times" }),
+    };
   },
 
   async transcribe(args): Promise<Transcript> {

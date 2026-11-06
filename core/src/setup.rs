@@ -78,6 +78,8 @@ pub struct SetupStatus {
     pub runtime: RuntimeStatus,
     /// DaVinci Resolve hand-off (app detected / plugin installed).
     pub resolve: crate::resolve::ResolveStatus,
+    /// Word alignment (measured word times): the local wav2vec2 model.
+    pub aligner: AlignerStatus,
     pub demo: bool,
     /// Why demo mode is active (None when it isn't).
     pub demo_reason: Option<String>,
@@ -134,6 +136,7 @@ pub async fn status(editor: &Editor) -> SetupStatus {
         embedding_model: prefs.embedding_model,
         runtime,
         resolve: crate::resolve::status(),
+        aligner: aligner_status(),
         demo,
         demo_reason: if demo {
             caps.demo_reason().or_else(|| Some("fixture adapters forced (test instance)".into()))
@@ -260,4 +263,54 @@ pub async fn download_whisper_model(sink: &SharedSink, tier: &str) -> Result<Str
         ),
     );
     Ok(dest.to_string_lossy().into_owned())
+}
+
+// ------------------------------------------------------------ word alignment
+
+/// The word aligner (`adapters::align`): measured word times instead of
+/// whisper's estimates, so cuts land on the words.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct AlignerStatus {
+    /// This build can run it.
+    pub available: bool,
+    pub downloaded: bool,
+    #[cfg_attr(feature = "ts-bindings", ts(type = "number"))]
+    pub approx_mb: u64,
+}
+
+pub fn aligner_status() -> AlignerStatus {
+    use crate::adapters::align;
+    AlignerStatus {
+        available: align::aligner_compiled(),
+        downloaded: align::aligner_downloaded(),
+        approx_mb: align::ALIGNER_FILES.iter().map(|f| f.2).sum::<u64>() / 1_000_000,
+    }
+}
+
+/// Download the word alignment model (English, ~380 MB) from Hugging Face,
+/// pinned to one revision, every file checked against its SHA-256.
+/// User-triggered from Setup (ADR-0004).
+pub async fn download_aligner_model(sink: &SharedSink) -> Result<String> {
+    use crate::adapters::align::{aligner_dir, ALIGNER_FILES, ALIGNER_REPO, ALIGNER_REVISION};
+    use crate::events::{send, CoreEvent, ProgressTask};
+    let dir = aligner_dir();
+    std::fs::create_dir_all(&dir)?;
+    for (file, sha, size) in ALIGNER_FILES {
+        let dest = dir.join(file);
+        if dest.is_file() {
+            continue;
+        }
+        send(sink, CoreEvent::progress(ProgressTask::ModelDownload, None, 0.0, format!("downloading {file}")));
+        crate::download::download_to(
+            sink,
+            &format!("https://huggingface.co/{ALIGNER_REPO}/resolve/{ALIGNER_REVISION}/{file}"),
+            &dest,
+            crate::download::DownloadOpts { task: ProgressTask::ModelDownload, sha256: Some(sha), approx_bytes: Some(*size) },
+        )
+        .await?;
+    }
+    send(sink, CoreEvent::progress(ProgressTask::ModelDownload, None, 1.0, "word alignment model ready (verified)"));
+    Ok(dir.to_string_lossy().into_owned())
 }

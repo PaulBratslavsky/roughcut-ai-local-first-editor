@@ -65,6 +65,10 @@ pub struct Transcript {
     /// on for transcripts made since, or fixed with `retime_words`.
     #[serde(default)]
     pub words_trimmed: bool,
+    /// Words were placed by forced alignment against the audio
+    /// (`adapters::align`): their times are measured, not whisper's guesses.
+    #[serde(default)]
+    pub words_aligned: bool,
 }
 
 impl Transcript {

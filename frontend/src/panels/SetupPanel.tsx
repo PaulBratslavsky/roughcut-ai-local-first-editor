@@ -9,6 +9,7 @@ import {
   checkHostedKey,
   setHostedKey,
   setHostedModel,
+  downloadAlignerModel,
   downloadWhisperModel,
   downloadGguf,
   getSetupStatus,
@@ -510,6 +511,36 @@ export function SetupPanel({
                 )}
               </p>
             </section>
+
+            {/* ---- word alignment: measured word times ---- */}
+            {status.aligner.available && (
+              <section className="setup-row">
+                <div className="setup-row-head">
+                  <StatusDot ok={status.aligner.downloaded} />
+                  <strong>Word alignment</strong>
+                  <span className="setup-sub">puts every word where it is spoken, so cuts land on the words</span>
+                </div>
+                {status.aligner.downloaded ? (
+                  <p className="setup-detail">
+                    Ready. New transcriptions are aligned to the audio; for an older project use “Fix word
+                    timings” in the transcript. English only for now. Runs on this Mac.
+                  </p>
+                ) : (
+                  <div className="setup-detail">
+                    Transcription only estimates when each word starts and ends, so a cut can miss the word
+                    it aims at. This model (English, about {status.aligner.approx_mb} MB, checked against its
+                    published SHA-256) measures it from the audio, on this Mac.
+                    <button
+                      className="primary-btn tier-btn"
+                      disabled={!!llmBusy}
+                      onClick={() => void llmAction("aligner", downloadAlignerModel)}
+                    >
+                      {llmBusy === "aligner" ? "Downloading…" : "Download"}
+                    </button>
+                  </div>
+                )}
+              </section>
+            )}
 
             {/* ---- DaVinci Resolve hand-off ---- */}
             <section className="setup-row">

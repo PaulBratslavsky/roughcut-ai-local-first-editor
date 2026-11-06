@@ -898,6 +898,7 @@ mod hybrid_tests {
             }],
             model_used: "test".into(),
             words_trimmed: false,
+            words_aligned: false,
         }
     }
 
@@ -945,6 +946,7 @@ mod hybrid_tests {
             ],
             model_used: "test".into(),
             words_trimmed: false,
+            words_aligned: false,
         };
         let spots = filler_spots(&t, &[]);
         assert_eq!(spots, vec![FillerSpot { start: 1.45, end: 1.8, prev_end: 1.4, next_start: 1.85 }]);

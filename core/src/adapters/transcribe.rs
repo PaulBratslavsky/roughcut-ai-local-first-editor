@@ -148,7 +148,7 @@ fn parse_whisper_json(json: &str, media_id: Uuid) -> Result<Transcript> {
             is_best_take: false,
         });
     }
-    Ok(Transcript { id: Uuid::new_v4(), media_id, language, segments, model_used, words_trimmed: false })
+    Ok(Transcript { id: Uuid::new_v4(), media_id, language, segments, model_used, words_trimmed: false, words_aligned: false })
 }
 
 /// whisper.cpp's alignment-heads preset for a model file, by name: DTW word
@@ -366,6 +366,7 @@ impl Transcriber for WhisperRs {
                 segments,
                 model_used: model_name,
                 words_trimmed: false,
+                words_aligned: false,
             })
         })
         .await

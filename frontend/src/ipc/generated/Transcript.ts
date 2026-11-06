@@ -6,4 +6,9 @@ export type Transcript = { id: string, media_id: string, language: string, segme
  * Word edges were trimmed to the audio (`detect::trim_words_to_audio`):
  * on for transcripts made since, or fixed with `retime_words`.
  */
-words_trimmed: boolean, };
+words_trimmed: boolean, 
+/**
+ * Words were placed by forced alignment against the audio
+ * (`adapters::align`): their times are measured, not whisper's guesses.
+ */
+words_aligned: boolean, };

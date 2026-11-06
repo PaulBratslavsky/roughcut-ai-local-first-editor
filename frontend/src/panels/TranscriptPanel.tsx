@@ -519,7 +519,11 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
       { project_id: projectId },
       {
         onSuccess: (res) =>
-          setRoughCutResult(`word timings fixed: ${res.trimmed} of ${res.words} words trimmed`),
+          setRoughCutResult(
+            res.aligned
+              ? `words aligned to the audio (${res.chunks - res.chunks_kept} of ${res.chunks} passages)`
+              : `word edges trimmed (${res.trimmed} of ${res.words} words)${res.note ? ` · ${res.note}` : ""}`,
+          ),
         onError: (err) => setRoughCutResult(`couldn't fix word timings: ${errText(err)}`),
       },
     );
@@ -543,12 +547,12 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
         <button className="primary-btn" onClick={onRoughCut} disabled={roughCut.isPending}>
           {roughCut.isPending ? "Cutting…" : "Rough cut"}
         </button>
-        {transcript && !transcript.words_trimmed && (
+        {transcript && !transcript.words_aligned && (
           <button
             className="ghost-btn"
             onClick={onRetime}
             disabled={retime.isPending}
-            title="This transcript's words include the pauses around them, so cuts aimed at words land in the wrong place. Fixing trims each word to its sound; no text or cuts change."
+            title="This transcript's word times are estimates, so cuts aimed at words can land in the wrong place. Fixing lines every word up with the audio (with the word alignment model from Setup) and trims it to its sound; no text or cuts change."
           >
             {retime.isPending ? "Fixing…" : "Fix word timings"}
           </button>

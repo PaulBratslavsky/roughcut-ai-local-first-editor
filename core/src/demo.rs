@@ -118,5 +118,6 @@ pub fn fixture_transcript(media: &Media) -> Transcript {
         segments,
         model_used: "demo-fixture".into(),
         words_trimmed: false,
+        words_aligned: false,
     }
 }

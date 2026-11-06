@@ -19,6 +19,7 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **Media** (`model.rs`) — the source video: path, duration, frame rate. Edits
   never touch the file. ⚠ The `Media` record is replaced by `append_media`
   (stitched source) outside the journal — see audit B4.
+- **Word times** — every `Word` has a start and end. Whisper only estimates them; **forced alignment** (`adapters/align.rs`, a local wav2vec2 model downloaded in Setup, English) measures them against the audio, then the audio trim tightens the edges. `Transcript.words_aligned` / `words_trimmed` record what ran; `retime_words` fixes an older transcript.
 - **Playable copy** (`adapters/video.rs::ensure_playable_copy`) — an MP4 built
   in the background at `<data dir>/cache/<key>/play.mp4` when the webview can't
   play the source (OBS `.mkv`, `.webm`, `.avi`, an MP4 with its index at the

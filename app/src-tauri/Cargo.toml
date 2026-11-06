@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # whisper-native: end users always get the in-process transcriber; the flag
 # only exists so core-only builds/tests stay light (it compiles whisper.cpp).
-roughcut-core = { path = "../../core", features = ["whisper-native"] }
+roughcut-core = { path = "../../core", features = ["whisper-native", "word-align"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 percent-encoding = "2"
 tauri-plugin-dialog = "2"

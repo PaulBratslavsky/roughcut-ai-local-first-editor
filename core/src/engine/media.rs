@@ -110,17 +110,10 @@ impl Editor {
             let _ = std::fs::remove_file(&wav);
             t.map_err(|e| failed("whisper", e))?
         };
-        // Pull word edges in to the audio: whisper's word times swallow the
-        // pauses around words, and every word-level cut aims at them.
+        // Measured word times: whisper's are estimates, and every word-level
+        // cut aims at them (alignment when it can, then the audio trim).
         if !demo {
-            if let Some(peaks) = crate::adapters::video::load_raw_peaks(&media).await {
-                crate::detect::trim_words_to_audio(
-                    &mut transcript,
-                    &peaks,
-                    crate::adapters::video::PEAKS_PER_SECOND,
-                );
-                transcript.words_trimmed = true;
-            }
+            self.place_words(&mut transcript, &media, project_id).await;
         }
 
         {
@@ -216,33 +209,119 @@ impl Editor {
     }
 }
 
+/// What fixing word times did (`retime_words`, and after transcription).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct WordPlacement {
+    /// Forced alignment placed the words.
+    pub aligned: bool,
+    pub chunks: usize,
+    /// Chunks that kept whisper's times (the model's words didn't match).
+    pub chunks_kept: usize,
+    #[serde(flatten)]
+    pub trim: crate::detect::TrimStats,
+    /// Why alignment didn't run, when it didn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 impl super::Editor {
-    /// Fix word timings on an existing transcript: trim every word to the
-    /// audio (`detect::trim_words_to_audio`), as transcription now does.
-    /// Changes no text, segment or cut; safe to run again (a trimmed word
-    /// has nothing left to trim).
-    pub async fn retime_words(&self, project_id: Uuid) -> Result<crate::detect::TrimStats> {
+    /// Fix word timings on an existing transcript, as transcription now
+    /// does: forced alignment against the audio when this build and the model
+    /// can (English), then the audio trim. Changes no text, segment order or
+    /// cut.
+    pub async fn retime_words(&self, project_id: Uuid) -> Result<WordPlacement> {
         self.ensure_loaded(project_id)?;
         let media = self
             .with_project(project_id, |p, _| Ok(p.media.clone()))?
             .ok_or_else(|| CoreError::InvalidArg("project has no media".into()))?;
-        if self.get_transcript(project_id)?.is_none() {
-            return Err(CoreError::InvalidArg("project has no transcript; transcribe first".into()));
+        let mut transcript = self
+            .get_transcript(project_id)?
+            .ok_or_else(|| CoreError::InvalidArg("project has no transcript; transcribe first".into()))?;
+        if crate::adapters::video::load_raw_peaks(&media).await.is_none() {
+            return Err(CoreError::Unavailable("fixing word timings reads the audio, which needs ffmpeg".into()));
         }
-        let peaks = crate::adapters::video::load_raw_peaks(&media).await.ok_or_else(|| {
-            CoreError::Unavailable("fixing word timings reads the audio, which needs ffmpeg".into())
-        })?;
-        let stats = {
+        let placement = self.place_words(&mut transcript, &media, project_id).await;
+        {
             let mut state = self.inner.state.lock().unwrap();
             let entry = state.get_mut(&project_id).ok_or_else(|| CoreError::NotFound("project".into()))?;
             let t = entry.transcript.as_mut().ok_or_else(|| CoreError::InvalidArg("no transcript".into()))?;
-            let stats = crate::detect::trim_words_to_audio(t, &peaks, crate::adapters::video::PEAKS_PER_SECOND);
-            t.words_trimmed = true;
+            // Times only: the text may have changed meanwhile (the background
+            // clean-up), so word times are copied by position.
+            if t.segments.len() == transcript.segments.len() {
+                for (dst, src) in t.segments.iter_mut().zip(&transcript.segments) {
+                    if dst.words.len() == src.words.len() {
+                        dst.start = src.start;
+                        dst.end = src.end;
+                        for (dw, sw) in dst.words.iter_mut().zip(&src.words) {
+                            dw.start = sw.start;
+                            dw.end = sw.end;
+                        }
+                    }
+                }
+                t.words_trimmed |= transcript.words_trimmed;
+                t.words_aligned |= transcript.words_aligned;
+            }
             self.inner.store.save_transcript(project_id, t)?;
-            stats
-        };
+        }
         send(&self.inner.sink, CoreEvent::TranscriptChanged { project_id });
-        Ok(stats)
+        Ok(placement)
+    }
+
+    /// Measured word times for `transcript`: forced alignment (when the
+    /// `word-align` build has its model and the language is English), then
+    /// the audio trim. Best effort: whatever can't run is skipped and
+    /// reported in `note`, never an error.
+    async fn place_words(&self, transcript: &mut Transcript, media: &Media, project_id: Uuid) -> WordPlacement {
+        use crate::adapters::align;
+        let mut out = WordPlacement::default();
+        if !align::aligner_compiled() {
+            out.note = Some("this build has no word aligner".into());
+        } else if !align::aligner_downloaded() {
+            out.note = Some("download the word alignment model in Setup for measured word times".into());
+        } else if !align::language_supported(&transcript.language) {
+            out.note = Some(format!("word alignment is English-only; this transcript is '{}'", transcript.language));
+        } else {
+            send(&self.inner.sink, CoreEvent::progress(ProgressTask::Transcribe, Some(project_id), 0.98, "aligning words to the audio"));
+            match align::read_audio_16k(&media.file_path).await {
+                Ok(samples) => {
+                    let mut t = transcript.clone();
+                    let sink = self.sink();
+                    let duration = media.duration;
+                    let run = tokio::task::spawn_blocking(move || {
+                        let r = align::align_transcript(&mut t, &samples, duration, &|f| {
+                            send(
+                                &sink,
+                                CoreEvent::progress(
+                                    ProgressTask::Transcribe,
+                                    Some(project_id),
+                                    0.98 + 0.019 * f,
+                                    format!("aligning words to the audio — {:.0}%", f * 100.0),
+                                ),
+                            );
+                        });
+                        (t, r)
+                    })
+                    .await;
+                    match run {
+                        Ok((t, Ok(stats))) => {
+                            *transcript = t;
+                            transcript.words_aligned = stats.aligned > 0;
+                            out.aligned = transcript.words_aligned;
+                            out.chunks = stats.chunks;
+                            out.chunks_kept = stats.kept;
+                        }
+                        Ok((_, Err(e))) => out.note = Some(format!("word alignment failed: {e}")),
+                        Err(e) => out.note = Some(format!("word alignment stopped: {e}")),
+                    }
+                }
+                Err(e) => out.note = Some(e.to_string()),
+            }
+        }
+        if let Some(peaks) = crate::adapters::video::load_raw_peaks(media).await {
+            out.trim = crate::detect::trim_words_to_audio(transcript, &peaks, crate::adapters::video::PEAKS_PER_SECOND);
+            transcript.words_trimmed = true;
+        }
+        out
     }
 
     /// Append another video to the END of this project's source: lossless

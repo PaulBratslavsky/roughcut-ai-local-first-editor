@@ -159,6 +159,15 @@ async fn ollama_pull_model(state: State<'_, AppState>, model: String) -> Result<
         .map_err(|e| e.to_json())
 }
 
+/// Setup → Word alignment → Download: the local model that places each word
+/// where it is spoken (user-triggered, ADR-0004).
+#[tauri::command]
+async fn download_aligner_model(state: State<'_, AppState>) -> Result<String, Value> {
+    roughcut_core::setup::download_aligner_model(&state.editor.sink())
+        .await
+        .map_err(|e| e.to_json())
+}
+
 #[tauri::command]
 async fn install_llama_server(state: State<'_, AppState>) -> Result<String, Value> {
     roughcut_core::llm_runtime::install_llama_server(&state.editor.sink())
@@ -324,6 +333,7 @@ pub fn run() {
             check_hosted_key,
             ollama_pull_model,
             install_llama_server,
+            download_aligner_model,
             download_gguf,
             start_managed_llm,
             download_whisper_model,

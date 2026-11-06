@@ -27,6 +27,7 @@ receive results or file paths.
 | `inference.rs` | Chat completions / tool calls | `OpenAiCompatClient` (OpenAI-compatible HTTP) | — (no mock here) |
 | `anthropic.rs` | Hosted mode: Claude through the Messages API | `AnthropicClient` (`HostedBackend`) | tests use a local axum stub |
 | `embed.rs` | Text embeddings for semantic search | `OllamaEmbedder` (OpenAI-compatible HTTP) | `MockEmbedder` |
+| `align.rs` | Forced alignment: each transcript word placed where it is spoken | wav2vec2 (`facebook/wav2vec2-base-960h`, English) through `wav2vec2-rs` on Candle, feature `word-align` | Without the feature: `Unavailable`; the pure parts (chunks, mapping) always build |
 | `face.rs` | Face finding and 9:16 crop math | Apple Vision (`#[cfg(target_os = "macos")]`) | Off macOS: `CoreError::Unavailable` |
 
 ## Interface
@@ -166,6 +167,26 @@ receive results or file paths.
   times to sample across the kept `(source_in, source_out)` spans.
 - `pub fn png_size(path: &Path) -> Result<(u32, u32)>`: reads the size from
   the IHDR chunk.
+
+### `align.rs`
+
+- `align_transcript(transcript, samples_16k, duration, on_progress) ->
+  Result<AlignStats>` (feature `word-align`; blocking, CPU): splits the
+  transcript into ~30 s chunks of whole segments (`chunks`), splitting at the
+  quietest 20 ms frame within 1 s of whisper's boundary so chunks don't
+  overlap; aligns each chunk's normalized text (`normalize`: upper-case
+  letters and apostrophes) against its audio; `apply_alignment` maps the
+  model's words back onto the transcript's words in order (multi-token words
+  span their tokens; words with none, like "24", sit evenly between their
+  neighbours; a chunk whose words don't match keeps whisper's times).
+- Model files: `aligner_dir()` (`<data dir>/models/wav2vec2-base-960h/`, or
+  `ROUGHCUT_ALIGNER_DIR`), `ALIGNER_FILES` pinned to `ALIGNER_REVISION` with
+  SHA-256 each; `aligner_downloaded()`, `aligner_compiled()`,
+  `language_supported()` (English).
+- `read_audio_16k(file_path)`: the first audio track as 16 kHz mono f32 via
+  ffmpeg.
+- Measured on a 62-minute stream (M4 Pro, CPU): 140 chunks in 146 s; words
+  over 1.5 s fell from 47 to 3.
 
 There are no child directories with contracts.
 
