@@ -227,7 +227,7 @@ This package depends on the following crate modules but does not own them:
   to the cuts already there, then adds its own exclusions, tagged
   `ClipOrigin::AiCut`, on top. Its cuts carry their own margins, so padding
   them would shrink each into the word it removes; cuts shorter than
-  `detect::MIN_CUT_S` (0.2 s) are dropped.
+  `detect::MIN_CUT_S` (0.1 s) are dropped.
 - `transcribe` trims every word to the audio (`detect::trim_words_to_audio`)
   when raw peaks load, before saving.
 - `rough_cut_peaks` belongs to the whole Editor, not to one project. Any

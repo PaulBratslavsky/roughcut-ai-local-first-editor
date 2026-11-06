@@ -1677,7 +1677,7 @@ async fn the_rough_cut_never_leaves_a_sliver_cut() {
         .map(|c| c["source_out"].as_f64().unwrap() - c["source_in"].as_f64().unwrap())
         .collect();
     assert!(!cuts.is_empty(), "the demo transcript has things to cut");
-    assert!(cuts.iter().all(|&d| d >= 0.2 - 1e-6), "a cut under 0.2 s: {cuts:?}");
+    assert!(cuts.iter().all(|&d| d >= roughcut_core::detect::MIN_CUT_S - 1e-6), "a sliver cut: {cuts:?}");
 }
 
 #[tokio::test]
