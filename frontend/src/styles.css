@@ -2288,3 +2288,52 @@ input, select { font: inherit; }
 }
 .models-console { margin-left: auto; font-size: 12px; color: var(--text-muted); text-decoration: underline; }
 .models-console:hover { color: var(--text); }
+
+/* ---- import from a link (LinkImportField: empty screen, top bar) ---- */
+.link-import { display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%; }
+.link-import-row { display: flex; gap: 6px; }
+.link-import-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 0;
+  padding: 6px 8px;
+}
+.link-import-input::placeholder { color: var(--text-muted); }
+.link-import-input:focus { outline: none; border-color: var(--text); }
+.link-import-progress { display: flex; flex-direction: column; gap: 4px; }
+.link-import-bar { height: 2px; background: var(--border-soft); }
+.link-import-bar span { display: block; height: 100%; background: var(--accent); transition: width 0.2s; }
+.link-import-message,
+.link-import-note { font-size: 11px; color: var(--text-muted); margin: 0; }
+.link-import-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--danger);
+  margin: 0;
+}
+.link-import-anchor { position: relative; display: inline-flex; }
+.link-import-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: min(440px, calc(100vw - 32px));
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.empty-link {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(480px, 100%);
+}
+.empty-link-label { font-size: 11px; color: var(--text-muted); text-transform: lowercase; }

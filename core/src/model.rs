@@ -23,6 +23,10 @@ pub struct Media {
     pub audio_sample_rate: u32,
     pub codec: String,
     pub imported_at: DateTime<Utc>,
+    /// The link an `import_url` download came from; `None` for a file
+    /// import. Kept when the same video is relinked.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 // ------------------------------------------------------------ transcript
@@ -602,6 +606,10 @@ pub struct Preferences {
     /// start without it.
     #[serde(default)]
     pub hosted_consent_at: Option<DateTime<Utc>>,
+    /// Where link imports are saved. `None` means `~/Movies/RoughCut/Downloads/`.
+    /// Only the user, in the app, changes it (never an MCP client).
+    #[serde(default)]
+    pub download_dir: Option<String>,
 }
 
 fn default_embedding_model() -> String {
@@ -718,6 +726,7 @@ impl Default for Preferences {
             model_mode: ModelMode::Local,
             hosted_model: default_hosted_model(),
             hosted_consent_at: None,
+            download_dir: None,
         }
     }
 }
@@ -820,6 +829,21 @@ impl PlaySpan {
 pub struct ClipBatchError {
     pub candidate_id: Uuid,
     pub message: String,
+}
+
+/// What `import_url` returns: the new project around the downloaded video.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct UrlImport {
+    pub project: Project,
+    /// Where the video was saved (inside the download folder).
+    pub file_path: String,
+    /// The video's title on the site it came from.
+    pub title: String,
+    pub source_url: String,
+    /// Notes that didn't stop the import, e.g. a video that isn't H.264.
+    pub warnings: Vec<String>,
 }
 
 /// One clip's outcome in `export_clips`: the written path, or why not.

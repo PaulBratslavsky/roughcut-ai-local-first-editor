@@ -78,6 +78,8 @@ pub struct SetupStatus {
     pub runtime: RuntimeStatus,
     /// DaVinci Resolve hand-off (app detected / plugin installed).
     pub resolve: crate::resolve::ResolveStatus,
+    /// Import from a link: yt-dlp and Deno, installed by the user here.
+    pub link_import: LinkImportStatus,
     pub demo: bool,
     /// Why demo mode is active (None when it isn't).
     pub demo_reason: Option<String>,
@@ -118,6 +120,7 @@ pub async fn status(editor: &Editor) -> SetupStatus {
             recommended: t.id == recommended_id,
         })
         .collect();
+    let link_import = link_import_status(&prefs);
     SetupStatus {
         ffmpeg: caps.media_ready(),
         ffmpeg_path: caps.ffmpeg.as_ref().map(|p| p.to_string_lossy().into_owned()),
@@ -134,6 +137,7 @@ pub async fn status(editor: &Editor) -> SetupStatus {
         embedding_model: prefs.embedding_model,
         runtime,
         resolve: crate::resolve::status(),
+        link_import,
         demo,
         demo_reason: if demo {
             caps.demo_reason().or_else(|| Some("fixture adapters forced (test instance)".into()))
@@ -260,4 +264,274 @@ pub async fn download_whisper_model(sink: &SharedSink, tier: &str) -> Result<Str
         ),
     );
     Ok(dest.to_string_lossy().into_owned())
+}
+
+// ------------------------------------------------------------ link import
+
+/// "Import from a link" in Setup: the app's own yt-dlp and Deno
+/// (docs/designs/url-import-and-cli.md, ADR-0009). Installing them is the
+/// user's action that turns link import on; Remove turns it off.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkImportStatus {
+    /// The app's yt-dlp is in `<data dir>/bin/`: link import is on.
+    pub installed: bool,
+    pub ytdlp: Option<String>,
+    pub deno: Option<String>,
+    /// yt-dlp's version (a date) is more than 60 days old: Update.
+    pub outdated: bool,
+    /// Where link imports are saved.
+    pub download_dir: String,
+    /// There are builds of yt-dlp and Deno for this machine.
+    pub supported: bool,
+}
+
+/// Read from files only: status never runs yt-dlp or Deno.
+pub fn link_import_status(prefs: &crate::model::Preferences) -> LinkImportStatus {
+    use crate::adapters::fetch;
+    let (ytdlp, deno) = fetch::recorded_versions();
+    let outdated = ytdlp.as_deref().map(ytdlp_is_old).unwrap_or(false);
+    LinkImportStatus {
+        installed: fetch::ytdlp_path().is_file(),
+        ytdlp,
+        deno,
+        outdated,
+        download_dir: crate::engine::download_folder_path(prefs).to_string_lossy().into_owned(),
+        supported: link_import_assets().is_some(),
+    }
+}
+
+/// yt-dlp versions are release dates (`2026.10.26`, sometimes with a `.N`
+/// suffix). Older than 60 days means YouTube has likely changed since.
+fn ytdlp_is_old(version: &str) -> bool {
+    let mut parts = version.split('.').map(|p| p.parse::<i32>().ok());
+    let (Some(Some(y)), Some(Some(m)), Some(Some(d))) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let Some(date) = chrono::NaiveDate::from_ymd_opt(y, m as u32, d as u32) else { return false };
+    (chrono::Utc::now().date_naive() - date).num_days() > 60
+}
+
+/// The release assets for this machine: yt-dlp's standalone build and
+/// Deno's zip. `None` where neither project publishes one.
+fn link_import_assets() -> Option<(&'static str, &'static str)> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    match (os, arch) {
+        ("macos", "aarch64") => Some(("yt-dlp_macos", "deno-aarch64-apple-darwin.zip")),
+        ("macos", "x86_64") => Some(("yt-dlp_macos", "deno-x86_64-apple-darwin.zip")),
+        ("linux", "x86_64") => Some(("yt-dlp_linux", "deno-x86_64-unknown-linux-gnu.zip")),
+        ("linux", "aarch64") => Some(("yt-dlp_linux_aarch64", "deno-aarch64-unknown-linux-gnu.zip")),
+        ("windows", "x86_64") => Some(("yt-dlp.exe", "deno-x86_64-pc-windows-msvc.zip")),
+        _ => None,
+    }
+}
+
+const YTDLP_RELEASE: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+const DENO_RELEASE: &str = "https://github.com/denoland/deno/releases/latest/download";
+
+/// The hash for `name` in a checksum file (`<hex>  <name>` lines, or a file
+/// holding only the hash).
+fn hash_for(sums: &str, name: &str) -> Option<String> {
+    let is_hash = |t: &str| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit());
+    for line in sums.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(hash), rest) = (parts.next(), parts.next()) else { continue };
+        let file = rest.map(|r| r.trim_start_matches('*'));
+        if is_hash(hash) && (file.is_none() || file == Some(name)) {
+            return Some(hash.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+async fn fetch_text(url: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .user_agent("roughcut")
+        .build()
+        .map_err(|e| CoreError::Unavailable(format!("download client: {e}")))?;
+    let resp = client.get(url).send().await.map_err(|e| CoreError::Unavailable(format!("download: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(CoreError::Unavailable(format!("download {url}: HTTP {}", resp.status())));
+    }
+    resp.text().await.map_err(|e| CoreError::Unavailable(format!("download: {e}")))
+}
+
+/// Install, or update, yt-dlp and Deno into `<data dir>/bin/` from their
+/// latest GitHub releases, each checked against its published SHA-256.
+/// All or nothing: both are staged, checked and run once before either
+/// replaces the copy in use, so a failure leaves the previous state.
+/// User-triggered from Setup only (ADR-0004): never a registry tool.
+pub async fn install_link_import(editor: &Editor) -> Result<LinkImportStatus> {
+    use crate::adapters::fetch;
+    let sink = &editor.sink();
+    let (ytdlp_asset, deno_asset) = link_import_assets()
+        .ok_or_else(|| CoreError::Unavailable("yt-dlp and Deno have no builds for this machine".into()))?;
+    let bin = fetch::bin_dir();
+    let staging = bin.join("link-import-staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+    let result = stage_link_import(sink, ytdlp_asset, deno_asset, &staging).await;
+    let outcome = match result {
+        Ok((ytdlp_version, deno_version)) => {
+            let names = |n: &str| if cfg!(windows) { format!("{n}.exe") } else { n.to_string() };
+            std::fs::rename(staging.join(names("yt-dlp")), fetch::bin_dir().join(names("yt-dlp")))?;
+            std::fs::rename(staging.join(names("deno")), fetch::bin_dir().join(names("deno")))?;
+            let record = serde_json::json!({
+                "ytdlp": ytdlp_version,
+                "deno": deno_version,
+                "installed_at": chrono::Utc::now().to_rfc3339(),
+            });
+            std::fs::write(fetch::versions_file(), serde_json::to_string_pretty(&record)?)?;
+            crate::events::send(
+                sink,
+                crate::events::CoreEvent::progress(
+                    crate::events::ProgressTask::RuntimeInstall,
+                    None,
+                    1.0,
+                    "link import is on".to_string(),
+                ),
+            );
+            Ok(link_import_status(&editor.get_preferences().unwrap_or_default()))
+        }
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    outcome
+}
+
+/// Download, check, unpack and run both into `staging`; returns their
+/// versions.
+async fn stage_link_import(
+    sink: &SharedSink,
+    ytdlp_asset: &str,
+    deno_asset: &str,
+    staging: &std::path::Path,
+) -> Result<(Option<String>, Option<String>)> {
+    use crate::download::{download_to, DownloadOpts};
+    use crate::events::{send, CoreEvent, ProgressTask};
+    let step = |fraction: f64, message: &str| {
+        send(sink, CoreEvent::progress(ProgressTask::RuntimeInstall, None, fraction, message.to_string()));
+    };
+    let names = |n: &str| if cfg!(windows) { format!("{n}.exe") } else { n.to_string() };
+    let ytdlp = staging.join(names("yt-dlp"));
+    let deno = staging.join(names("deno"));
+
+    step(0.0, "checking yt-dlp's latest release");
+    let sums = fetch_text(&format!("{YTDLP_RELEASE}/SHA2-256SUMS")).await?;
+    let hash = hash_for(&sums, ytdlp_asset)
+        .ok_or_else(|| CoreError::Unavailable(format!("no checksum for {ytdlp_asset} in yt-dlp's release")))?;
+    download_to(
+        sink,
+        &format!("{YTDLP_RELEASE}/{ytdlp_asset}"),
+        &ytdlp,
+        DownloadOpts { task: ProgressTask::RuntimeInstall, sha256: Some(&hash), approx_bytes: Some(36_000_000) },
+    )
+    .await
+    .map_err(|e| checksum_message(e, "yt-dlp"))?;
+
+    step(0.5, "checking Deno's latest release");
+    let sums = fetch_text(&format!("{DENO_RELEASE}/{deno_asset}.sha256sum")).await?;
+    let hash = hash_for(&sums, deno_asset)
+        .ok_or_else(|| CoreError::Unavailable(format!("no checksum for {deno_asset} in Deno's release")))?;
+    let zip = staging.join("deno.zip");
+    download_to(
+        sink,
+        &format!("{DENO_RELEASE}/{deno_asset}"),
+        &zip,
+        DownloadOpts { task: ProgressTask::RuntimeInstall, sha256: Some(&hash), approx_bytes: Some(45_000_000) },
+    )
+    .await
+    .map_err(|e| checksum_message(e, "Deno"))?;
+    step(0.9, "unpacking Deno");
+    // bsdtar (macOS, Windows) reads zip files; Linux uses unzip.
+    let unpacked = if cfg!(target_os = "linux") {
+        tokio::process::Command::new("unzip").args(["-o", "-q"]).arg(&zip).arg("-d").arg(staging).status().await
+    } else {
+        tokio::process::Command::new("tar").arg("-xf").arg(&zip).arg("-C").arg(staging).status().await
+    };
+    let _ = std::fs::remove_file(&zip);
+    match unpacked {
+        Ok(s) if s.success() && deno.is_file() => {}
+        Ok(s) => return Err(CoreError::Other(format!("unpacking Deno failed ({s})"))),
+        Err(e) => return Err(CoreError::Other(format!("unpacking Deno: {e} (on Linux, install unzip)"))),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&ytdlp, &deno] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+
+    // Run each once, now, so status can show versions without running them,
+    // and so a binary that can't start never replaces a working one.
+    let version = |path: std::path::PathBuf, what: &'static str| async move {
+        let out = tokio::process::Command::new(&path)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|e| CoreError::Unavailable(format!("{what} won't start: {e}")))?;
+        if !out.status.success() {
+            return Err(CoreError::Unavailable(format!("{what} won't start ({})", out.status)));
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = text.lines().next().unwrap_or("").trim().to_string();
+        Ok(first
+            .strip_prefix("deno ")
+            .map(|v| v.split_whitespace().next().unwrap_or(v).to_string())
+            .or(Some(first).filter(|v| !v.is_empty())))
+    };
+    let ytdlp_version = version(ytdlp, "yt-dlp").await?;
+    let deno_version = version(deno, "Deno").await?;
+    Ok((ytdlp_version, deno_version))
+}
+
+fn checksum_message(e: CoreError, what: &str) -> CoreError {
+    let text = e.to_string();
+    if text.to_ascii_lowercase().contains("sha256") || text.to_ascii_lowercase().contains("checksum") {
+        CoreError::Unavailable(format!("checksum mismatch for {what}: not installed"))
+    } else {
+        e
+    }
+}
+
+/// Remove yt-dlp and Deno: link import is off again.
+pub fn remove_link_import() -> Result<()> {
+    use crate::adapters::fetch;
+    for path in [fetch::ytdlp_path(), fetch::deno_path(), fetch::versions_file()] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod link_import_tests {
+    use super::*;
+
+    #[test]
+    fn checksums_are_read_from_either_file_shape() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let sums = format!("{a}  yt-dlp\n{b}  yt-dlp_macos\n");
+        assert_eq!(hash_for(&sums, "yt-dlp_macos").unwrap(), "b".repeat(64));
+        assert!(hash_for(&sums, "yt-dlp_linux").is_none());
+        assert_eq!(hash_for(&format!("{a}\n"), "deno-x.zip").unwrap(), a, "a bare hash");
+        assert_eq!(hash_for(&format!("{a} *deno-x.zip\n"), "deno-x.zip").unwrap(), a, "binary-mode star");
+        assert!(hash_for("not a hash  yt-dlp", "yt-dlp").is_none());
+    }
+
+    #[test]
+    fn an_old_ytdlp_version_date_is_flagged() {
+        assert!(ytdlp_is_old("2020.01.01"));
+        let today = chrono::Utc::now().date_naive().format("%Y.%m.%d").to_string();
+        assert!(!ytdlp_is_old(&today));
+        assert!(!ytdlp_is_old(&format!("{today}.1")));
+        assert!(!ytdlp_is_old("nightly"), "an unknown format isn't flagged");
+    }
 }

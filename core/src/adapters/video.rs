@@ -226,6 +226,7 @@ impl VideoEngine for FfmpegCli {
                 .unwrap_or(48000),
             codec: video["codec_name"].as_str().unwrap_or("unknown").to_string(),
             imported_at: Utc::now(),
+            source_url: None,
         })
     }
 
@@ -834,6 +835,7 @@ impl VideoEngine for MockVideoEngine {
             audio_sample_rate: 48000,
             codec: "h264 (demo)".into(),
             imported_at: Utc::now(),
+            source_url: None,
         })
     }
 
@@ -1184,6 +1186,7 @@ mod tests {
             audio_sample_rate: 48000,
             codec: "h264".into(),
             imported_at: chrono::Utc::now(),
+            source_url: None,
         }
     }
 

@@ -4,7 +4,8 @@
 // ships lean; models arrive on demand.
 
 import { useEffect, useRef, useState } from "react";
-import { logPath, openExternal, revealPath } from "../ipc/api";
+import { callTool, isTauri, logPath, openExternal, revealPath } from "../ipc/api";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import {
   checkHostedKey,
   setHostedKey,
@@ -12,8 +13,10 @@ import {
   downloadWhisperModel,
   downloadGguf,
   getSetupStatus,
+  installLinkImport,
   installLlamaServer,
   installResolvePlugin,
+  removeLinkImport,
   ollamaPullModel,
   onAppEvent,
   startManagedLlm,
@@ -511,6 +514,70 @@ export function SetupPanel({
               </p>
             </section>
 
+            {/* ---- import from a link (ADR-0009) ---- */}
+            <section className="setup-row">
+              <div className="setup-row-head">
+                <StatusDot ok={status.link_import.installed && !status.link_import.outdated} />
+                <strong>Import from a link</strong>
+                <span className="setup-sub">download a video from YouTube or another site with yt-dlp</span>
+              </div>
+              {!status.link_import.supported ? (
+                <p className="setup-detail">yt-dlp and Deno have no builds for this machine.</p>
+              ) : status.link_import.installed ? (
+                <div className={`setup-detail${status.link_import.outdated ? " warn" : ""}`}>
+                  On: yt-dlp {status.link_import.ytdlp ?? "?"}, Deno {status.link_import.deno ?? "not found"}
+                  {status.link_import.outdated && " (yt-dlp may be out of date: sites change, so update it)"}.
+                  You and any client you connect (Claude Code, scripts using <code>roughcut</code>) can import
+                  links.
+                  <button
+                    className="primary-btn tier-btn"
+                    disabled={!!llmBusy}
+                    onClick={() => void llmAction("links", installLinkImport)}
+                  >
+                    {llmBusy === "links" ? "Updating…" : "Update"}
+                  </button>
+                  <button
+                    className="ghost-btn"
+                    disabled={!!llmBusy}
+                    onClick={() => void llmAction("links-off", removeLinkImport)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <div className="setup-detail">
+                  Off. Install downloads yt-dlp and Deno (about 80 MB) from their GitHub releases, checks each
+                  against its published SHA-256, and turns link import on, for you and for any client you
+                  connect (Claude Code, scripts using <code>roughcut</code>).
+                  <button
+                    className="primary-btn tier-btn"
+                    disabled={!!llmBusy}
+                    onClick={() => void llmAction("links", installLinkImport)}
+                  >
+                    {llmBusy === "links" ? "Installing…" : "Install"}
+                  </button>
+                </div>
+              )}
+              <p className="setup-detail">
+                Saved to <code>{status.link_import.download_dir}</code>
+                {isTauri && (
+                  <button
+                    className="ghost-btn"
+                    disabled={!!llmBusy}
+                    onClick={() =>
+                      void llmAction("links-dir", async () => {
+                        const picked = await openFolderDialog({ directory: true, multiple: false });
+                        if (typeof picked !== "string") return;
+                        await callTool("set_preferences", { preferences: { download_dir: picked } });
+                      })
+                    }
+                  >
+                    Choose…
+                  </button>
+                )}
+              </p>
+            </section>
+
             {/* ---- DaVinci Resolve hand-off ---- */}
             <section className="setup-row">
               <div className="setup-row-head">
@@ -574,7 +641,7 @@ export function SetupPanel({
             <p className="setup-footer">
               {hosted
                 ? `Hosted: AI steps send text to Anthropic (${model?.hosted_model_name ?? "Claude"}) — transcripts, your chat, and the app's prompts and results. Video, audio, frames, transcription and search stay on this machine. Other network use: these user-triggered model downloads.`
-                : "Everything runs on this machine. The only network use is these user-triggered model downloads and the API-key check (Save / Test)."}
+                : "Everything runs on this machine. The only network use is these user-triggered model downloads, the API-key check (Save / Test), and link imports once you install yt-dlp."}
             </p>
           </>
         )}

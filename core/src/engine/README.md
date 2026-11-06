@@ -101,7 +101,11 @@ This package depends on the following crate modules but does not own them:
 
 | Method                                                                    | Notes                                                                                                              |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `async import_media(project_id: Option<Uuid>, file_path) -> Result<Media>` | Probes the file. Given a project: no media yet → sets it with `Timeline::new(media.duration)`; same video moved → relinks; a different video → `InvalidArg`. |
+| `async import_media(project_id: Option<Uuid>, file_path) -> Result<Media>` | Probes the file. Given a project: no media yet → sets it with `Timeline::new(media.duration)`; same video moved → relinks (keeping `source_url`); a different video → `InvalidArg`. |
+| `async import_url(url, name: Option<&str>, out_dir: Option<&str>) -> Result<UrlImport>` | Link import (ADR-0009): checks the link (`http`/`https`, no local or private host) and the download folder (`out_dir` must be inside it), sweeps `.roughcut-*` folders no running import owns, probes, then downloads, creates the project and sets `media.source_url` in a spawned task, so a caller that stops waiting doesn't stop it. Logs `url_import_*` with the host only. |
+| `cancel_imports()` | Kills every running link import's process group (app quit, `serve` exit). |
+| `set_fetcher_for_tests(Arc<dyn UrlFetcher>)` | Swaps the link-import fetcher; `test_instance` uses `MockFetcher`. |
+| `download_folder_path(prefs) -> PathBuf` (free fn) | `Preferences.download_dir`, else `~/Movies/RoughCut/Downloads/`. |
 | `async transcribe(id, language: Option<&str>) -> Result<Transcript>`      | On-device transcription, then a background LLM cleanup and semantic-index pass.                                    |
 | `update_segment_texts(id, &[(Uuid, String)]) -> Result<u32>`              | Replaces segment text and keeps every timestamp. Used by the LLM cleanup pass.                                     |
 | `async append_media(id, file_path) -> Result<Media>`                      | Lossless concat onto the source (a new file in `<data dir>/media/`), swaps the project media, appends an included `Manual` clip over the new span, and extends the undo history and checkpoints to match. |
@@ -423,7 +427,11 @@ This package depends on the following crate modules but does not own them:
   left under `<data dir>/secrets/` by the removed frontier path.
 - **Network** (`route.rs`): in Hosted mode, AI requests to
   `api.anthropic.com`; in either mode, one `GET /v1/models/{model}` when the
-  user saves or tests a key.
+  user saves or tests a key. `import_url` (`media.rs`) runs yt-dlp, which
+  fetches from the link's site, once the user has installed it (ADR-0009).
+- **Filesystem** (`media.rs::import_url`): creates the download folder and
+  `out_dir`; writes the video there through yt-dlp; removes stale
+  `.roughcut-*` temporary folders in them.
 - **Events**: `model-route` from `set_model_mode`, `set_hosted_key(None)` and
   the routers.
 - **Events (`events::send`):**
@@ -436,7 +444,8 @@ This package depends on the following crate modules but does not own them:
     `TimelineChanged`, and `transcribe` clears them and sends only
     `TranscriptChanged`.
   - `TranscriptChanged`: transcribe, annotate, and segment text updates.
-  - `ProjectsChanged`: create, duplicate, delete, and restore.
+  - `ProjectsChanged`: create, duplicate, delete, restore, and `import_url`.
+  - `Progress { task: UrlImport, project_id: None }`: `import_url`.
   - `ClipsChanged`: clip and candidate mutations.
   - `MediaAssetsChanged`: `append_media` and the background playable copy
     (when it lands or fails).

@@ -39,7 +39,7 @@ is the one exception, emitted by the Tauri shell:
 
 | event | payload |
 |---|---|
-| `progress` | `{ task: ProgressTask, project_id?, fraction: number (0..1), message: string }` — task names are GENERATED (`core/src/events.rs` → `generated/ProgressTask.ts`): `transcribe`, `rough_cut`, `export`, `model_download`, `model_pull`, `runtime_install`, `find_clips`, `make_clips` (framing in `create_clips`), `export_clips` (the whole batch; `project_id` set) |
+| `progress` | `{ task: ProgressTask, project_id?, fraction: number (0..1), message: string }` — task names are GENERATED (`core/src/events.rs` → `generated/ProgressTask.ts`): `transcribe`, `rough_cut`, `export`, `model_download`, `model_pull`, `runtime_install`, `find_clips`, `make_clips` (framing in `create_clips`), `export_clips` (the whole batch; `project_id` set), `url_import` (`import_url`'s download; no `project_id`) |
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
@@ -92,6 +92,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 ### Ingest & transcription
 - `append_media { project_id, file_path } -> { media, note }` — lossless concat to the END of the source (new file; originals untouched; cuts keep timestamps; undo history and checkpoints are extended to cover the new footage; the append itself is not undoable; re-run `transcribe` after)
 - `import_media { file_path, project_id? } -> Media` — probes the file. With `project_id`: a project with no media gets it and a fresh timeline; a project whose video moved is relinked to the same video at a new path (matching duration, size, and frame rate keeps cuts, history, transcript, and clips); a different video is refused (`invalid_argument` — create a new project or use `append_media`)
+- `import_url { url, name?, out_dir? } -> { project, file_path, title, source_url, warnings }` — downloads ONE video from a link with yt-dlp into the download folder (`Preferences.download_dir`, default `~/Movies/RoughCut/Downloads/`) and creates a new project named `name` or the video's title; `media.source_url` keeps the link. Off until the user installs yt-dlp in Setup (`unavailable` otherwise). Refused (`invalid_argument`): non-`http(s)` links, links naming this computer or a private network, playlists, live streams, and an `out_dir` outside the download folder. Never overwrites: a file for the same video id is reused. Long-running (`progress` events, task `url_import`, no project id); the download finishes even if the caller stops waiting. Does not transcribe. UI and MCP only (not the in-app agent). See ADR-0009
 - `transcribe { project_id, language? } -> Transcript` (long-running; `progress` events)
 
 ### Analysis

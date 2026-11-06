@@ -6,11 +6,13 @@
 pub mod anthropic;
 pub mod embed;
 pub mod face;
+pub mod fetch;
 pub mod inference;
 pub mod transcribe;
 pub mod video;
 
 pub use embed::{Embedder, MockEmbedder, OllamaEmbedder};
+pub use fetch::{MockFetcher, UrlFetcher, YtDlpFetcher};
 pub use inference::{ChatMessage, ChatRequest, ChatResponse, InferenceClient, OpenAiCompatClient, ToolCall};
 pub use transcribe::{AutoTranscriber, MockTranscriber, Transcriber, WhisperCli};
 pub use video::{AutoVideoEngine, FfmpegCli, MockVideoEngine, VideoEngine};

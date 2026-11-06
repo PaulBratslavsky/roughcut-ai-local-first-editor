@@ -239,6 +239,12 @@ impl Editor {
                     .into(),
             ));
         }
+        // Where link imports land: the user's choice, in the app (ADR-0009).
+        if source != ActionSource::Ui && next.download_dir != current.download_dir {
+            return Err(CoreError::InvalidArg(
+                "download_dir can only be changed in the app (Setup → Import from a link)".into(),
+            ));
+        }
         if source != ActionSource::Ui
             && next.inference_endpoint != current.inference_endpoint
             && !is_loopback_url(&next.inference_endpoint)
@@ -299,6 +305,39 @@ fn merge_into(
 }
 
 /// Is `url` served from this machine (localhost, 127.0.0.0/8, ::1)?
+/// A link naming this machine or a private network: `localhost`, loopback,
+/// private (10/8, 172.16/12, 192.168/16, fc00::/7), link-local, or
+/// unspecified. The link is read as written: a name that resolves to such an
+/// address, or a redirect to one, isn't caught.
+pub(crate) fn names_local_host(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)) else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || (a == 100 && (64..128).contains(&b)) // carrier-grade NAT, 100.64/10
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().map(|v4| v4.is_loopback() || v4.is_private() || v4.is_link_local()).unwrap_or(false)
+        }
+        Err(_) => false,
+    }
+}
+
 fn is_loopback_url(url: &str) -> bool {
     let Some(host) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned))
     else {
@@ -313,6 +352,35 @@ fn is_loopback_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_naming_this_machine_or_a_private_network_are_spotted() {
+        for url in [
+            "http://localhost/v",
+            "http://api.localhost/v",
+            "http://printer.local/v",
+            "http://127.0.0.1:8000/v",
+            "http://0.0.0.0/v",
+            "http://10.1.2.3/v",
+            "http://172.16.0.9/v",
+            "http://192.168.1.2/v",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.0.1/v",
+            "http://[::1]/v",
+            "http://[::]/v",
+            "http://[::ffff:127.0.0.1]/v",
+            "http://[fd00::1]/v",
+            "http://[fe80::1]/v",
+            "https://user:pass@127.0.0.1/v",
+        ] {
+            assert!(names_local_host(url), "{url}");
+        }
+        for url in ["https://www.youtube.com/watch?v=x", "https://8.8.8.8/v", "https://100.128.0.1/v", "https://[2606:4700::1]/v"] {
+            assert!(!names_local_host(url), "{url}");
+        }
+        // The inference_endpoint guard keeps its own, narrower rule.
+        assert!(!is_loopback_url("http://0.0.0.0:11434/v1"));
+    }
 
     #[test]
     fn loopback_urls() {

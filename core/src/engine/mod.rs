@@ -22,10 +22,11 @@ pub mod route;
 mod semantic;
 
 pub use clips::{ClipChanges, ClipScan, ClipSource, FaceCrop};
+pub use media::download_folder_path;
 
 use crate::adapters::{
-    AutoTranscriber, AutoVideoEngine, Embedder, MockTranscriber,
-    MockVideoEngine, OllamaEmbedder, Transcriber, VideoEngine,
+    AutoTranscriber, AutoVideoEngine, Embedder, MockFetcher, MockTranscriber,
+    MockVideoEngine, OllamaEmbedder, Transcriber, UrlFetcher, VideoEngine, YtDlpFetcher,
 };
 use crate::error::{CoreError, Result};
 use crate::events::{NullSink, SharedSink};
@@ -84,6 +85,11 @@ pub struct Inner {
     /// can't write back a model switch the user changed meanwhile.
     pub(crate) prefs_write: Mutex<()>,
     state: Mutex<HashMap<Uuid, ProjectState>>,
+    /// The link-import seam (yt-dlp; tests swap in the mock).
+    pub(crate) fetcher: Mutex<Arc<dyn UrlFetcher>>,
+    /// Running link imports: their yt-dlp process ids, so a quit can stop
+    /// them ([`Editor::cancel_imports`]).
+    pub(crate) imports: Mutex<HashMap<Uuid, u32>>,
 }
 
 #[derive(Clone)]
@@ -114,6 +120,8 @@ impl Editor {
                 route: route::RouteState::new(Arc::new(crate::secrets::KeyringStore::hosted())),
                 prefs_write: Mutex::new(()),
                 state: Mutex::new(HashMap::new()),
+                fetcher: Mutex::new(Arc::new(YtDlpFetcher)),
+                imports: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -162,7 +170,32 @@ impl Editor {
         );
         // Tests never read or write the developer's real key store.
         editor.set_secret_store_for_tests(Arc::new(crate::secrets::MemoryStore::default()));
+        // Nor run yt-dlp or touch the network.
+        editor.set_fetcher_for_tests(Arc::new(MockFetcher));
         editor
+    }
+
+    /// Swap the link-import fetcher (tests use [`MockFetcher`]).
+    pub fn set_fetcher_for_tests(&self, fetcher: Arc<dyn UrlFetcher>) {
+        *self.inner.fetcher.lock().unwrap() = fetcher;
+    }
+
+    pub(crate) fn fetcher(&self) -> Arc<dyn UrlFetcher> {
+        self.inner.fetcher.lock().unwrap().clone()
+    }
+
+    /// Stop every running link import (the app quitting, `serve` exiting).
+    /// Kills yt-dlp now; the hidden temporary folder is swept by the next
+    /// import.
+    pub fn cancel_imports(&self) {
+        let pids: Vec<u32> = self.inner.imports.lock().unwrap().drain().map(|(_, pid)| pid).collect();
+        for pid in pids {
+            // The whole process group: yt-dlp's launcher, yt-dlp, ffmpeg.
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill").args(["-s", "KILL", "--", &format!("-{pid}")]).status();
+            #[cfg(windows)]
+            let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+        }
     }
 
     /// Dynamic: fixtures forced (tests / FABLE_DEMO) or the media toolchain is

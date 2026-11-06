@@ -71,6 +71,7 @@ mod tests {
             audio_sample_rate: 48_000,
             codec: "h264".into(),
             imported_at: chrono::Utc::now(),
+            source_url: None,
         };
         let mut project = Project::new("Q&A");
         project.timeline = Timeline::new(media.duration);

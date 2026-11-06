@@ -335,6 +335,11 @@ handler!(h_import_media, |e, a, _s| {
     Ok(serde_json::to_value(media)?)
 });
 
+handler!(h_import_url, |e, a, _s| {
+    let r = e.import_url(arg_str(a, "url")?, a["name"].as_str(), a["out_dir"].as_str()).await?;
+    Ok(serde_json::to_value(r)?)
+});
+
 handler!(h_transcribe, |e, a, _s| {
     let t = e.transcribe(arg_uuid(a, "project_id")?, a["language"].as_str()).await?;
     Ok(serde_json::to_value(t)?)
@@ -1240,6 +1245,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("import_media", "Probe a local video file and return its metadata. With project_id, attach it to that project: a project with no media gets it (and a fresh timeline); a project whose video was moved can be relinked to the same video at a new path (same duration, size, frame rate — cuts, history, and transcript are kept). A different video is refused: create a new project, or use append_media.",
         || obj(json!({"project_id": pid_schema(), "file_path": {"type": "string"}}), &["file_path"]),
         agent: false, meta: false, h_import_media),
+    tool!("import_url", "Download ONE video from a link (YouTube or another site yt-dlp supports) into the user's download folder and create a new project around it; returns { project, file_path, title, source_url, warnings }. It does not transcribe: call transcribe next. Works only after the user turned link import on in the app's Setup (installing yt-dlp). Playlists, live streams, and links to this computer or a private network are refused; files are never overwritten. name sets the project name (default: the video's title); out_dir must be the download folder or a folder inside it. A long download keeps going if you stop waiting: the project appears when it finishes (list_projects).",
+        || obj(json!({"url": {"type": "string"}, "name": {"type": "string"}, "out_dir": {"type": "string"}}), &["url"]),
+        agent: false, meta: false, h_import_url),
     tool!("transcribe", "Transcribe the project's media on-device into time-aligned text. Afterwards the app polishes punctuation with its model in the background (on-device, or on Claude when the user has switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "language": {"type": "string"}}), &["project_id"]),
         agent: false, meta: false, h_transcribe),

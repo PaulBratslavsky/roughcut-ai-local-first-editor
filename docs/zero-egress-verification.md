@@ -79,3 +79,25 @@ What Hosted sends is text: transcripts (with segment times and ids), the
 project name, the user's chat and recent chat turns, the agent's tool
 results (which can include the media file's path) and the app's prompts.
 Never video, audio, frames or thumbnails.
+
+## Link import (2026-11-05, ADR-0009)
+
+Link import is off until the user clicks Install in Setup → "Import from a
+link". That click downloads yt-dlp and Deno from their GitHub releases
+(`github.com` and its release-asset host), each checked against its published
+SHA-256. Update repeats it; Remove deletes both and turns link import off.
+
+Once it is on, `import_url` (from the app, or an MCP client the user
+connected) runs yt-dlp as a **child process**: its connections go to the
+link's site and whatever hosts yt-dlp contacts for it (YouTube's video CDN,
+for example), which is not a fixed list. `lsof -p <app pid>` can't see a
+child's sockets, so verify by process:
+
+1. With link import off, or on but with no import running, `pgrep -P <app
+   pid> yt-dlp` prints nothing, and the session above passes unchanged.
+2. During an import, sample the child as well:
+   `lsof -nP -i -a -p "$(pgrep -P <app pid> yt-dlp)"`. Expected: peers only
+   while the import runs, and the yt-dlp process gone when it ends (or when
+   the app quits: `Editor::cancel_imports`).
+3. Opening Setup runs nothing: status reads `<data dir>/bin/link-import.json`
+   for the versions, so no yt-dlp or Deno process appears.

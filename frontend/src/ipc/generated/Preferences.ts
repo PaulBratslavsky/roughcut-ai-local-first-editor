@@ -23,4 +23,9 @@ hosted_model: string,
  * When the user confirmed what Hosted mode sends. Hosted runs refuse to
  * start without it.
  */
-hosted_consent_at: string | null, };
+hosted_consent_at: string | null, 
+/**
+ * Where link imports are saved. `None` means `~/Movies/RoughCut/Downloads/`.
+ * Only the user, in the app, changes it (never an MCP client).
+ */
+download_dir: string | null, };

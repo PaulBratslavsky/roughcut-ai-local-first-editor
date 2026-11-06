@@ -156,6 +156,20 @@ async fn ollama_pull_model(state: State<'_, AppState>, model: String) -> Result<
         .map_err(|e| e.to_json())
 }
 
+/// Setup → Import from a link → Install / Update: the user's action that
+/// turns link import on (ADR-0009). Never a registry tool (ADR-0004).
+#[tauri::command]
+async fn install_link_import(state: State<'_, AppState>) -> Result<Value, Value> {
+    let status = roughcut_core::setup::install_link_import(&state.editor).await.map_err(|e| e.to_json())?;
+    Ok(serde_json::to_value(status).unwrap_or(Value::Null))
+}
+
+/// Setup → Import from a link → Remove: link import is off again.
+#[tauri::command]
+fn remove_link_import() -> Result<(), Value> {
+    roughcut_core::setup::remove_link_import().map_err(|e| e.to_json())
+}
+
 #[tauri::command]
 async fn install_llama_server(state: State<'_, AppState>) -> Result<String, Value> {
     roughcut_core::llm_runtime::install_llama_server(&state.editor.sink())
@@ -317,6 +331,8 @@ pub fn run() {
             check_hosted_key,
             ollama_pull_model,
             install_llama_server,
+            install_link_import,
+            remove_link_import,
             download_gguf,
             start_managed_llm,
             download_whisper_model,
@@ -331,9 +347,14 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building RoughCut")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 applog::write(applog::Level::Info, applog::Event::AppExit {});
+                // Stop running link downloads; the next import sweeps their
+                // temporary folders.
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.editor.cancel_imports();
+                }
                 roughcut_core::llm_runtime::stop_managed();
                 roughcut_core::pty::kill_all();
             }

@@ -19,6 +19,11 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **Media** (`model.rs`) — the source video: path, duration, frame rate. Edits
   never touch the file. ⚠ The `Media` record is replaced by `append_media`
   (stitched source) outside the journal — see audit B4.
+- **Link import** (`import_url`; `adapters/fetch.rs`; ADR-0009) — one video
+  downloaded from a link with the app's own yt-dlp into the **download folder**
+  (`Preferences.download_dir`, default `~/Movies/RoughCut/Downloads/`, changed
+  only in the app), then a new project around it; `Media.source_url` keeps the
+  link. Off until the user installs yt-dlp and Deno in Setup.
 - **Playable copy** (`adapters/video.rs::ensure_playable_copy`) — an MP4 built
   in the background at `<data dir>/cache/<key>/play.mp4` when the webview can't
   play the source (OBS `.mkv`, `.webm`, `.avi`, an MP4 with its index at the
@@ -164,7 +169,8 @@ Keep entries short. When a refactor names a new module, add the term here.
   embeddings, preferences, kv). A deep seam; intentionally one trait.
 - **VideoEngine** (`adapters/video.rs`), **Transcriber** (`adapters/transcribe.rs`),
   **Embedder** (`adapters/embed.rs`), **InferenceClient** (`adapters/inference.rs`)
-  — the portability seam. Only video and transcription have an `Auto*` variant
+  and **UrlFetcher** (`adapters/fetch.rs`: `YtDlpFetcher`, `MockFetcher` for
+  tests) — the portability seam. Only video and transcription have an `Auto*` variant
   (`AutoVideoEngine`, `AutoTranscriber`), which picks real-vs-mock on every call
   via `capabilities::probe`. Embeddings use `OllamaEmbedder`. Inference has two
   production clients (`OpenAiCompatClient`, `AnthropicClient`) and no mock;

@@ -7,7 +7,7 @@
 // creating the project switches the app to it and the caller is often gone.
 
 import { callTool } from "./ipc/api";
-import type { Project } from "./ipc/types";
+import type { Project, UrlImport } from "./ipc/types";
 import { errText } from "./panels/clipUtil";
 import { setTranscribeError } from "./state/transcribeStore";
 
@@ -48,4 +48,26 @@ export async function ingestFile(
     throw err;
   }
   return project.id;
+}
+
+/** Import one video from a link (`import_url`: yt-dlp downloads it into the
+ *  download folder and the core creates the project), then transcribe, as
+ *  `ingestFile` does. Download progress arrives as `url_import` events. */
+export async function ingestUrl(
+  url: string,
+  cb: IngestCallbacks & { onCreated?: (projectId: string) => void } = {},
+): Promise<string> {
+  cb.onPhase?.("Reading the link…");
+  const result = await callTool<UrlImport>("import_url", { url: url.trim() });
+  const projectId = result.project.id;
+  cb.onCreated?.(projectId);
+  cb.onPhase?.("Starting transcription…");
+  setTranscribeError(projectId, null);
+  try {
+    await callTool("transcribe", { project_id: projectId });
+  } catch (err) {
+    setTranscribeError(projectId, `Transcription failed: ${errText(err)}`);
+    throw err;
+  }
+  return projectId;
 }

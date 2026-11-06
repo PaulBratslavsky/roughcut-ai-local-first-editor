@@ -28,13 +28,15 @@ receive results or file paths.
 | `anthropic.rs` | Hosted mode: Claude through the Messages API | `AnthropicClient` (`HostedBackend`) | tests use a local axum stub |
 | `embed.rs` | Text embeddings for semantic search | `OllamaEmbedder` (OpenAI-compatible HTTP) | `MockEmbedder` |
 | `face.rs` | Face finding and 9:16 crop math | Apple Vision (`#[cfg(target_os = "macos")]`) | Off macOS: `CoreError::Unavailable` |
+| `fetch.rs` | Link import: one video from a link (ADR-0009) | `YtDlpFetcher` (the app's own yt-dlp + Deno in `<data dir>/bin/`) | `MockFetcher` (tests; `Editor::test_instance` uses it) |
 
 ## Interface
 
 ### `mod.rs`
 
-- Declares `pub mod anthropic; embed; face; inference; transcribe; video;`.
-- Re-exports `Embedder`, `MockEmbedder`, `OllamaEmbedder`; `ChatMessage`,
+- Declares `pub mod anthropic; embed; face; fetch; inference; transcribe; video;`.
+- Re-exports `Embedder`, `MockEmbedder`, `OllamaEmbedder`; `MockFetcher`,
+  `UrlFetcher`, `YtDlpFetcher`; `ChatMessage`,
   `ChatRequest`, `ChatResponse`, `InferenceClient`, `OpenAiCompatClient`,
   `ToolCall`; `AutoTranscriber`, `MockTranscriber`, `Transcriber`,
   `WhisperCli`; `AutoVideoEngine`, `FfmpegCli`, `MockVideoEngine`,
@@ -166,6 +168,26 @@ receive results or file paths.
   times to sample across the kept `(source_in, source_out)` spans.
 - `pub fn png_size(path: &Path) -> Result<(u32, u32)>`: reads the size from
   the IHDR chunk.
+
+### `fetch.rs`
+
+- `#[async_trait] pub trait UrlFetcher: Send + Sync { fn ready(&self) ->
+  Result<()>; fn version(&self) -> String; async fn probe(&self, url) ->
+  Result<Probe>; async fn download(&self, probe, home, temp, sink, on_pid) ->
+  Result<Fetched> }`. `ready` is `Unavailable` when link import is off (no
+  yt-dlp in `<data dir>/bin/`) or ffmpeg is missing. `probe` is the metadata
+  pass (`-J --flat-playlist`) and refuses playlists and live or upcoming
+  streams (`InvalidArg`). `download` runs yt-dlp with `-P home:` / `-P temp:`,
+  reports `ProgressTask::UrlImport` through `progress::stream_progress` (both
+  pipes), and passes the child's pid (its own process group) to `on_pid`.
+- `Probe { webpage_url, id, title, duration, size_approx, streams }`;
+  `Fetched { file, reused }` (`reused`: the file was already there, so it
+  isn't the import's to delete).
+- `pub fn ytdlp_path()`, `deno_path()` (`<data dir>/bin/`, overridden by
+  `YTDLP_PATH` / `DENO_PATH` for development), `bin_dir()`, `versions_file()`
+  (`link-import.json`), `recorded_versions()`, `OFF_MESSAGE`.
+- Pure helpers with unit tests: `probe_args`, `download_args`, `parse_probe`,
+  `parse_progress`, `error_reason`, `find_by_id`.
 
 There are no child directories with contracts.
 
@@ -413,6 +435,9 @@ There are no child directories with contracts.
     `-f concat -safe 0 … -c copy` joins).
   - `transcribe.rs`: `whisper-cli`; `which whisper-cli` (blocking
     `std::process`, also run inside every `capabilities::probe()`).
+  - `fetch.rs`: the app's `yt-dlp` (metadata pass, then download), in its own
+    process group, with the user's config ignored and the link after `--`.
+    Network traffic goes to the link's site (ADR-0009).
 - **Filesystem writes.**
   - `<data_dir>/cache/<key>/`: `peaks.bin`, `peaks_raw.bin`, `thumb_%04d.jpg`,
     `play.mp4.part` renamed to `play.mp4`.

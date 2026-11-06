@@ -1658,3 +1658,141 @@ async fn cut_passage_cuts_the_whole_span_with_clean_edges() {
     .await;
     assert!(refused.is_err() || refused.unwrap()["cut"]["seconds"].as_f64().unwrap() < 1800.0);
 }
+
+#[tokio::test]
+async fn import_url_turns_one_link_into_a_project_inside_the_download_folder() {
+    let editor = Editor::test_instance(); // MockFetcher: no yt-dlp, no network
+    let folder = std::env::temp_dir().join(format!("roughcut-dl-{}", uuid::Uuid::new_v4()));
+    call(&editor, "set_preferences", json!({ "preferences": { "download_dir": folder.to_string_lossy() } })).await;
+    let projects = |editor: Editor| async move {
+        call(&editor, "list_projects", json!({})).await["projects"].as_array().unwrap().len()
+    };
+    let temp_folders = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".roughcut-")).count())
+            .unwrap_or(0)
+    };
+
+    // An MCP client (Claude Code, the CLI) imports a link into a subfolder.
+    let link = "https://www.youtube.com/watch?v=abc";
+    let out = tools::dispatch(&editor, "import_url", &json!({ "url": link, "out_dir": "talks" }), Caller::Mcp)
+        .await
+        .unwrap();
+    assert_eq!(out["title"], "Mock video");
+    assert_eq!(out["project"]["name"], "Mock video");
+    assert_eq!(out["source_url"], link);
+    assert_eq!(out["project"]["media"]["source_url"], link, "the project keeps the link");
+    let file = std::path::PathBuf::from(out["file_path"].as_str().unwrap());
+    assert!(file.starts_with(folder.join("talks")) && file.is_file(), "{file:?}");
+    assert_eq!(temp_folders(&folder.join("talks")), 0, "the temporary folder is gone");
+    // It is an ordinary project: transcription works on it.
+    let pid = out["project"]["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+
+    // The same video again: the file is reused, not downloaded twice.
+    let again = call(&editor, "import_url", json!({ "url": link, "name": "Second look", "out_dir": "talks" })).await;
+    assert_eq!(again["project"]["name"], "Second look");
+    assert_eq!(again["file_path"], out["file_path"]);
+    assert!(again["warnings"][0].as_str().unwrap().contains("already in the download folder"));
+
+    // Refused before anything is fetched.
+    let count = projects(editor.clone()).await;
+    for (args, needle) in [
+        (json!({ "url": "file:///etc/passwd" }), "only http and https"),
+        (json!({ "url": "-o/tmp/x" }), "not a link"),
+        (json!({ "url": "http://127.0.0.1:8000/v" }), "private network"),
+        (json!({ "url": "http://192.168.1.2/v" }), "private network"),
+        (json!({ "url": "http://localhost/v" }), "private network"),
+        (json!({ "url": "https://www.youtube.com/playlist?list=PL1" }), "playlist"),
+        (json!({ "url": "https://example.com/live/1" }), "live stream"),
+        (json!({ "url": link, "out_dir": "/tmp" }), "out_dir must be"),
+        (json!({ "url": link, "out_dir": "../elsewhere" }), "out_dir must be"),
+    ] {
+        let err = tools::dispatch(&editor, "import_url", &args, Caller::Mcp).await.unwrap_err().to_string();
+        assert!(err.contains(needle), "{args}: {err}");
+    }
+
+    // A failed download leaves no project and nothing behind.
+    let err = tools::dispatch(&editor, "import_url", &json!({ "url": "https://example.com/fail" }), Caller::Mcp)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("private"), "yt-dlp's reason is shown: {err}");
+    assert_eq!(projects(editor.clone()).await, count);
+    assert_eq!(temp_folders(&folder), 0);
+    let files: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().filter(|e| e.path().is_file()).collect();
+    assert!(files.is_empty(), "no partial file: {files:?}");
+
+    // Only the user moves the download folder; the in-app agent can't import.
+    let err = tools::dispatch(
+        &editor,
+        "set_preferences",
+        &json!({ "preferences": { "download_dir": "/tmp/elsewhere" } }),
+        Caller::Mcp,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("only be changed in the app"), "{err}");
+    let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let err = tools::dispatch(&editor, "import_url", &json!({ "url": link }), agent).await.unwrap_err().to_string();
+    assert!(err.contains("not available to the agent loop"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[tokio::test]
+async fn import_url_is_off_until_the_user_installs_ytdlp() {
+    struct Off;
+    #[async_trait::async_trait]
+    impl roughcut_core::adapters::UrlFetcher for Off {
+        fn ready(&self) -> roughcut_core::error::Result<()> {
+            Err(roughcut_core::error::CoreError::Unavailable(roughcut_core::adapters::fetch::OFF_MESSAGE.into()))
+        }
+        fn version(&self) -> String {
+            String::new()
+        }
+        async fn probe(&self, _url: &str) -> roughcut_core::error::Result<roughcut_core::adapters::fetch::Probe> {
+            panic!("nothing is fetched while link import is off")
+        }
+        async fn download(
+            &self,
+            _probe: &roughcut_core::adapters::fetch::Probe,
+            _home: &std::path::Path,
+            _temp: &std::path::Path,
+            _sink: &roughcut_core::events::SharedSink,
+            _on_pid: &(dyn Fn(u32) + Send + Sync),
+        ) -> roughcut_core::error::Result<roughcut_core::adapters::fetch::Fetched> {
+            panic!("nothing is fetched while link import is off")
+        }
+    }
+    let editor = Editor::test_instance();
+    editor.set_fetcher_for_tests(std::sync::Arc::new(Off));
+    let err = tools::dispatch(&editor, "import_url", &json!({ "url": "https://example.com/v" }), Caller::Mcp)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("link import is off") && err.contains("Setup"), "{err}");
+}
+
+#[tokio::test]
+async fn import_url_sweeps_leftovers_and_a_relink_keeps_the_link() {
+    let editor = Editor::test_instance();
+    let folder = std::env::temp_dir().join(format!("roughcut-dl-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(folder.join(".roughcut-leftover")).unwrap();
+    std::fs::write(folder.join(".roughcut-leftover/video.part"), b"half").unwrap();
+    call(&editor, "set_preferences", json!({ "preferences": { "download_dir": folder.to_string_lossy() } })).await;
+
+    // A quit left a temporary folder behind: the next import removes it.
+    let out = call(&editor, "import_url", json!({ "url": "https://example.com/watch/1" })).await;
+    assert!(!folder.join(".roughcut-leftover").exists(), "swept");
+
+    // The same video moved and relinked: the project keeps its link.
+    let pid = out["project"]["id"].as_str().unwrap().to_string();
+    let moved = folder.join("moved.mp4");
+    std::fs::rename(out["file_path"].as_str().unwrap(), &moved).unwrap();
+    let media = call(&editor, "import_media", json!({ "project_id": pid, "file_path": moved.to_string_lossy() })).await;
+    assert_eq!(media["source_url"], "https://example.com/watch/1");
+
+    let _ = std::fs::remove_dir_all(&folder);
+}

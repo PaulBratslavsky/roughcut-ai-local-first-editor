@@ -14,6 +14,7 @@ import { ExportMenu } from "./ExportMenu";
 import { ModelChip } from "./ModelChip";
 import { currentTheme, toggleTheme } from "../theme";
 import { SetupPanel } from "./SetupPanel";
+import { LinkImportField } from "./LinkImportField";
 
 /** The app's screens, in the top bar's switch: id, label, tooltip. */
 const SCREENS: [AppScreen, string, string][] = [
@@ -35,6 +36,7 @@ export function TopBar({
   const projects = useProjects();
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
+  const [showLink, setShowLink] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
   const screen = useStore(viewStore, (s) => s.screen);
 
@@ -120,6 +122,32 @@ export function TopBar({
         >
           + New video
         </button>
+        <span className="link-import-anchor">
+          <button
+            className="new-video-btn"
+            title="Import a video from a link (YouTube or another site) as a new project"
+            aria-expanded={showLink}
+            onClick={() => setShowLink((v) => !v)}
+          >
+            + From link
+          </button>
+          {showLink && (
+            <div className="link-import-popover card">
+              <LinkImportField
+                autoFocus
+                onCreated={(id) => {
+                  setShowLink(false);
+                  setProjectId(id);
+                  void queryClient.invalidateQueries();
+                }}
+                onOpenSetup={() => {
+                  setShowLink(false);
+                  setShowSetup(true);
+                }}
+              />
+            </div>
+          )}
+        </span>
         <button
           className="icon-btn delete-project-btn"
           title="Delete this project (keeps the video file)"

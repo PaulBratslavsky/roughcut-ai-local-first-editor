@@ -65,8 +65,10 @@ user's Mac.
 
 1. **Local-first / zero egress by default.** The app works with networking off.
    The only outbound traffic is downloads the user starts (models, runtimes)
-   and, only after the user turns it on, Hosted mode: text sent to Claude with
-   the user's own key (ADR-0007). Embeddings never leave the machine.
+   and, only after the user turns each on: Hosted mode, text sent to Claude
+   with the user's own key (ADR-0007); and link import, where installing
+   yt-dlp in Setup lets the user and connected clients download videos with
+   `import_url` (ADR-0009). Embeddings never leave the machine.
 2. **Non-destructive editing.** Source files are never changed. A cut hides a
    range; restoring brings it back.
 3. **The Rust core owns all state.** The frontend reads through tools and
@@ -782,6 +784,7 @@ nowhere. Design: [`designs/logging.md`](designs/logging.md).
 | `model_route` | `Editor::record_route`, once per change of what the chip shows |
 | `ffmpeg_failed` (exit code, the end of stderr) | `FfmpegCli::output`, `render_mp4` |
 | `transcribe_start`, `transcribe_end`, `transcribe_failed` (stage) | `Editor::transcribe` |
+| `url_import_start`, `url_import_end`, `url_import_failed` (host and yt-dlp version only; never the link or title) | `Editor::import_url` |
 
 Events are typed, so there is no field for transcript text, prompts, replies
 or keys; the only free text is error text, which can only be built through

@@ -30,6 +30,8 @@ pub enum ProgressTask {
     MakeClips,
     /// `export_clips`: the whole batch (the per-clip render events are folded in).
     ExportClips,
+    /// `import_url`: downloading a video from a link.
+    UrlImport,
 }
 
 #[derive(Debug, Clone, Serialize)]

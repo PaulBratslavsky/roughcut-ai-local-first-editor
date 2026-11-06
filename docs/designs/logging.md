@@ -249,6 +249,9 @@ the event's fields. Fields that don't apply are left out.
 | `transcribe_start` | info | `project`, `media_s`, `language`, `engine`, `whisper_model` | `Editor::transcribe` |
 | `transcribe_end` | info | `project`, `ms`, `segments`, `model` | `Editor::transcribe` |
 | `transcribe_failed` | error | `project`, `stage` (audio / whisper / save), `ms`, `code`, `error` | `Editor::transcribe` |
+| `url_import_start` | info | `host`, `ytdlp` (version) | `Editor::import_url` (added by `url-import-and-cli.md`) |
+| `url_import_end` | info | `host`, `ms`, `bytes` | `Editor::import_url` |
+| `url_import_failed` | error | `host`, `ms`, `code`, `error` (links, video id and title cut out) | `Editor::import_url` |
 
 Notes:
 

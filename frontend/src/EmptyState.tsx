@@ -13,6 +13,9 @@ import { useModelStatus } from "./state/modelStore";
 import { ModelChip } from "./panels/ModelChip";
 import type { WhisperTier, ProgressEvent, SetupStatus } from "./ipc/types";
 import { errText } from "./panels/clipUtil";
+import { LinkImportField } from "./panels/LinkImportField";
+import { SetupPanel } from "./panels/SetupPanel";
+import { setProjectId } from "./state/viewStore";
 
 /** The empty state is also where you land after trashing your LAST project —
  *  the trash must be reachable from here, not just the project switcher. */
@@ -140,6 +143,7 @@ export function EmptyState() {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [setup, setSetup] = useState<SetupStatus | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const workingRef = useRef(false);
   const queryClient = useQueryClient();
@@ -264,6 +268,16 @@ export function EmptyState() {
               Use demo footage
             </button>
           )}
+          <div className="empty-link">
+            <span className="empty-link-label">or import from a link</span>
+            <LinkImportField
+              onCreated={(id) => {
+                setProjectId(id);
+                void queryClient.invalidateQueries();
+              }}
+              onOpenSetup={() => setShowSetup(true)}
+            />
+          </div>
           {error && <p className="empty-error">{error}</p>}
           <ModelChip variant="line" />
           <TrashList />
@@ -276,6 +290,14 @@ export function EmptyState() {
           </div>
           <p className="progress-message">{message}</p>
         </div>
+      )}
+      {showSetup && (
+        <SetupPanel
+          onClose={() => {
+            setShowSetup(false);
+            refreshSetup();
+          }}
+        />
       )}
     </div>
   );

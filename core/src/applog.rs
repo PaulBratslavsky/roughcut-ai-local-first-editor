@@ -100,6 +100,11 @@ pub enum Event {
     },
     TranscribeEnd { project: Uuid, ms: u64, segments: usize, model: String },
     TranscribeFailed { project: Uuid, stage: &'static str, ms: u64, code: &'static str, error: ErrText },
+    /// A link import began. The site's host only: never the full link or the
+    /// video's title.
+    UrlImportStart { host: String, ytdlp: String },
+    UrlImportEnd { host: String, ms: u64, bytes: u64 },
+    UrlImportFailed { host: String, ms: u64, code: &'static str, error: ErrText },
 }
 
 #[derive(Debug, Serialize)]

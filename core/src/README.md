@@ -53,7 +53,7 @@ examples in [`core/examples/`](../examples/README.md).
 | `error.rs` | The crate error type | `CoreError` (`code`, `to_json`, `hosted`, `is_fatal_model_error`), `HostedErrorKind`, `Result` |
 | `time.rs` | Frame-exact time and timecode | `RationalTime`, `snap_to_frame`, `to_frame`, `fps_tick_rate`, `timecode`, `timecode_frames` |
 | `capabilities.rs` | What this machine can do right now; decides demo mode | `Capabilities`, `probe`, `system_ram_gb` |
-| `setup.rs` | First-run status and whisper model downloads from Hugging Face | `SetupStatus`, `TierStatus`, `RuntimeStatus`, `status`, `embeddings_reachable`, `MODEL_TIERS`, `ModelTier` (a whisper download tier, distinct from `model::ModelTier`), `download_whisper_model` |
+| `setup.rs` | First-run status, whisper model downloads from Hugging Face, and link import's yt-dlp + Deno install (ADR-0009) | `SetupStatus`, `TierStatus`, `RuntimeStatus`, `LinkImportStatus`, `status`, `link_import_status`, `install_link_import`, `remove_link_import`, `embeddings_reachable`, `MODEL_TIERS`, `ModelTier` (a whisper download tier, distinct from `model::ModelTier`), `download_whisper_model` |
 | `llm_runtime.rs` | Ollama pulls and the managed llama-server sidecar | `ollama_cli_available`, `ollama_pull`, `install_llama_server`, `llama_server_installed`, `download_gguf`, `list_ggufs`, `start_managed`, `stop_managed`, `managed_running` |
 | `download.rs` | Generic streaming HTTP download with progress and an optional sha256 check | `download_to`, `DownloadOpts` |
 | `progress.rs` | Child-process output → progress events | `stream_progress`, `Delimiter` |

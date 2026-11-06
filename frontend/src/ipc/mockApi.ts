@@ -25,6 +25,7 @@ import type {
   SourceRange,
   Timeline,
   Transcript,
+  UrlImport,
   TranscriptSegment,
   Word,
   EditOp,
@@ -81,10 +82,12 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 //               runs stop with hosted_key_rejected (hosted CUJ 4). Read on
 //               every call, so localStorage.setItem("rc-mock-badkey", "1")
 //               revokes the key of an already-Hosted session without reload.
+//   nolinks     link import is off (yt-dlp not installed): Setup shows
+//               Install, and import_url fails with the "turn it on" message.
 // ---------------------------------------------------------------------------
 
 export function mockSwitch(
-  name: "nomodel" | "failexport" | "failtranscribe" | "failimport" | "nohosted" | "badkey",
+  name: "nomodel" | "failexport" | "failtranscribe" | "failimport" | "nohosted" | "badkey" | "nolinks",
 ): boolean {
   try {
     if (new URLSearchParams(window.location.search).has(name)) return true;
@@ -523,6 +526,7 @@ const state: MockState = {
     model_mode: "local",
     hosted_model: "claude-opus-5-5",
     hosted_consent_at: null,
+    download_dir: null,
   },
 };
 
@@ -1028,6 +1032,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
             audio_sample_rate: 48000,
             codec: "h264",
             imported_at: now,
+            source_url: null,
           }
         : null,
       timeline: httpMedia
@@ -1314,9 +1319,54 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       audio_sample_rate: 48000,
       codec: "h264",
       imported_at: new Date().toISOString(),
+      source_url: null,
     };
     p.updated_at = new Date().toISOString();
     return clone(p.media!);
+  },
+
+  // After the core's import_url: one video from a link into a new project.
+  // The mock skips the download and attaches the demo footage.
+  async import_url(args): Promise<UrlImport> {
+    const url = typeof args.url === "string" ? args.url.trim() : "";
+    if (mockSwitch("nolinks")) {
+      throw {
+        code: "unavailable",
+        message: "link import is off: install yt-dlp in RoughCut's Setup (only you can turn it on)",
+      };
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      throw { code: "invalid_argument", message: "only http and https links can be imported" };
+    }
+    if (/^https?:\/\/(localhost|127\.|10\.|192\.168\.|\[::1\])/i.test(url)) {
+      throw { code: "invalid_argument", message: "links to this computer or a private network can't be imported" };
+    }
+    if (/[?&]list=|\/playlist/i.test(url)) {
+      throw { code: "invalid_argument", message: "this link is a playlist; import one video at a time" };
+    }
+    const last = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "video";
+    const title = decodeURIComponent(last).replace(/[-_]+/g, " ").trim() || "Untitled video";
+    for (const [fraction, message] of [
+      [0, "reading the link"],
+      [0.4, "downloading video 1/2: 80%"],
+      [0.9, "downloading audio 2/2: 80%"],
+    ] as const) {
+      emit("progress", { task: "url_import", fraction, message } satisfies ProgressEvent);
+      await sleep(250);
+    }
+    const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : title;
+    tools.create_project({ name });
+    tools.import_media({ file_path: "/demo/talking-head.mp4" });
+    const p = requireProject();
+    p.media!.source_url = url;
+    emit("progress", { task: "url_import", fraction: 1, message: "downloaded" } satisfies ProgressEvent);
+    return {
+      project: clone(p),
+      file_path: `~/Movies/RoughCut/Downloads/${title} [mock].mp4`,
+      title,
+      source_url: url,
+      warnings: [],
+    };
   },
 
   async transcribe(args): Promise<Transcript> {

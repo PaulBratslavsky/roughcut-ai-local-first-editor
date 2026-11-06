@@ -109,6 +109,14 @@ export async function getSetupStatus(): Promise<SetupStatus> {
       plugin_outdated: false,
       scripts_dir: "(browser mock)",
     },
+    link_import: {
+      installed: !mockSwitch("nolinks"),
+      ytdlp: "2026.10.26",
+      deno: "2.9.8",
+      outdated: false,
+      download_dir: "~/Movies/RoughCut/Downloads",
+      supported: true,
+    },
     demo: true,
     demo_reason: "browser mock",
   };
@@ -157,6 +165,30 @@ export async function checkHostedKey(): Promise<KeyCheck> {
 export async function downloadWhisperModel(tier: WhisperTier): Promise<string> {
   if (!isTauri) throw new Error("model download is only available in the desktop app");
   return invoke<string>("download_whisper_model", { tier });
+}
+
+// ---- Import from a link (Setup) ----
+// Shell commands, not registry tools (ADR-0004, ADR-0009): installing yt-dlp
+// and Deno is the user's action that turns link import on; Remove turns it off.
+import type { LinkImportStatus } from "./types";
+
+export async function installLinkImport(): Promise<LinkImportStatus> {
+  if (!isTauri) {
+    return {
+      installed: true,
+      ytdlp: "2026.10.26",
+      deno: "2.9.8",
+      outdated: false,
+      download_dir: "~/Movies/RoughCut/Downloads",
+      supported: true,
+    };
+  }
+  return invoke<LinkImportStatus>("install_link_import");
+}
+
+export async function removeLinkImport(): Promise<void> {
+  if (!isTauri) return;
+  return invoke("remove_link_import");
 }
 
 /** Install/refresh the DaVinci Resolve script (desktop only). */

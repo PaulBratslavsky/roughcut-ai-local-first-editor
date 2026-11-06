@@ -4,6 +4,8 @@
 // Event payloads and tool-result envelopes below follow docs/tool-api.md.
 
 export type { Media } from "./generated/Media";
+export type { UrlImport } from "./generated/UrlImport";
+export type { LinkImportStatus } from "./generated/LinkImportStatus";
 export type { Word } from "./generated/Word";
 export type { TranscriptSegment } from "./generated/TranscriptSegment";
 export type { Transcript } from "./generated/Transcript";
