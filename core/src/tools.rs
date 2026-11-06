@@ -672,6 +672,25 @@ handler!(h_story_edit, |e, a, s| {
                 ))
             })?),
         },
+        match &a["cut_beats"] {
+            Value::Null => None,
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .map(|v| {
+                        v.as_u64().map(|n| n as usize).ok_or_else(|| {
+                            CoreError::InvalidArg("'cut_beats' must be beat numbers from a proposal".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            v => {
+                return Err(CoreError::InvalidArg(format!(
+                    "'cut_beats' must be an array of beat numbers, got {}",
+                    json_kind(v)
+                )))
+            }
+        },
         s,
     )
     .await?;
@@ -1312,8 +1331,8 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower model pass per seam (on-device unless the user switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "a model pass per seam (slower; on-device unless the app is in Hosted mode); default false runs only the instant deterministic checks"}}), &["project_id"]),
         agent: true, meta: false, h_review_flow),
-    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
-        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}}), &["project_id", "instruction"]),
+    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Without target_duration_s, a plan that would cut more than a quarter of what is left is NOT applied: the result has a `proposal` (the beats it would cut) and nothing changes. Show it to the user; if they confirm, call story_edit again with the same instruction and cut_beats set to the proposal's numbers, which cuts exactly those. Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
+        || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}, "cut_beats": {"type": "array", "items": {"type": "integer"}, "description": "beat numbers from a proposal the user confirmed: cut exactly these"}}), &["project_id", "instruction"]),
         agent: true, meta: false, mutating: true, h_story_edit),
     tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: groups still-included segments into whole sentences, ranks them by how central they are to the video, and cuts the least-central ones first, gathered into runs so cut points land between sentences (intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s and the passages it cut (times + opening words) — name the main ones in your reply. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
         || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),

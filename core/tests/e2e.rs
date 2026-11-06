@@ -1679,3 +1679,79 @@ async fn the_rough_cut_never_leaves_a_sliver_cut() {
     assert!(!cuts.is_empty(), "the demo transcript has things to cut");
     assert!(cuts.iter().all(|&d| d >= 0.2 - 1e-6), "a cut under 0.2 s: {cuts:?}");
 }
+
+#[tokio::test]
+async fn a_big_story_edit_is_proposed_and_only_the_confirmed_beats_are_cut() {
+    use async_trait::async_trait;
+    use roughcut_core::adapters::inference::{ChatMessage, ChatRequest, ChatResponse, InferenceClient};
+
+    /// Plans to cut the first half of the beats (a run, so no seam guard
+    /// drops it); anything else isn't JSON, so the outline falls back to
+    /// pause-based beats and the flow check runs without a model.
+    struct Planner;
+    #[async_trait]
+    impl InferenceClient for Planner {
+        async fn chat(&self, req: ChatRequest) -> roughcut_core::error::Result<ChatResponse> {
+            let user = req.messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.clone()).unwrap_or_default();
+            let text = match user.split_once("Beats:") {
+                Some((_, beats)) => {
+                    let n = beats.lines().filter(|l| l.split('|').next().is_some_and(|k| k.trim().parse::<usize>().is_ok())).count();
+                    let cut: Vec<usize> = (1..=(n / 2).max(2)).filter(|&k| k + 1 < n).collect();
+                    json!({ "cut_beats": cut, "rationale": "tangents" }).to_string()
+                }
+                None => "not json".into(),
+            };
+            Ok(ChatResponse::new(ChatMessage::assistant(&text)))
+        }
+        async fn healthy(&self) -> bool {
+            true
+        }
+    }
+
+    let editor = Editor::test_instance();
+    editor.set_inference_for_tests(std::sync::Arc::new(Planner), std::sync::Arc::new(hosted_fakes::Claude {
+        reject: false,
+        fail_from: usize::MAX,
+        calls: Default::default(),
+    }));
+    let p = call(&editor, "create_project", json!({ "name": "story", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let kept = |tl: &Value| -> f64 {
+        tl["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["included"] == true)
+            .map(|c| c["source_out"].as_f64().unwrap() - c["source_in"].as_f64().unwrap())
+            .sum()
+    };
+    let before = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+
+    // No length asked for: a big plan comes back as a proposal; nothing changes.
+    let out = call(&editor, "story_edit", json!({ "project_id": pid, "instruction": "tighten it" })).await;
+    let proposal = &out["proposal"];
+    assert!(proposal.is_object(), "expected a proposal: {out}");
+    assert!(out["actions"].as_array().unwrap().is_empty(), "nothing cut: {out}");
+    assert!(out["summary"].as_str().unwrap().starts_with("Nothing is cut yet"), "{out}");
+    let same = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert!((kept(&before) - kept(&same)).abs() < 1e-6, "the timeline is unchanged");
+    assert_eq!(before["cut_count"], same["cut_count"]);
+
+    // The user confirms: exactly those beats are cut, with no new plan.
+    let beats = proposal["cut_beats"].clone();
+    let out = call(&editor, "story_edit", json!({ "project_id": pid, "instruction": "tighten it", "cut_beats": beats })).await;
+    assert!(out["proposal"].is_null(), "{out}");
+    assert!(!out["actions"].as_array().unwrap().is_empty(), "{out}");
+    let after = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    let cut_s = proposal["cut_s"].as_f64().unwrap();
+    let lost = kept(&before) - kept(&after);
+    assert!(lost >= cut_s * 0.9, "the confirmed beats were cut: lost {lost:.1}s of {cut_s:.1}s");
+
+    // A named length is the user's yes: no proposal.
+    let fresh = call(&editor, "create_project", json!({ "name": "story2", "file_path": "/demo/footage.mp4" })).await;
+    let pid2 = fresh["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid2 })).await;
+    let out = call(&editor, "story_edit", json!({ "project_id": pid2, "instruction": "tighten it", "target_duration_s": 120 })).await;
+    assert!(out["proposal"].is_null(), "{out}");
+}

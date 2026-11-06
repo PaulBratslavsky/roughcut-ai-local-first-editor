@@ -72,7 +72,12 @@ fn system_prompt(project_id: Uuid) -> String {
          silences') — call story_edit ONCE with their words (add \
          target_duration_s if they named a length). It outlines the story, \
          cuts whole beats, verifies every cut point still reads, and repairs \
-         the flow. Do not attempt that pipeline yourself. \
+         the flow. Do not attempt that pipeline yourself. Without a length, a \
+         big story edit comes back as a PROPOSAL and cuts nothing: do not make \
+         those cuts another way. When the user then confirms ('apply', 'yes', \
+         'go ahead'), call story_edit again with the same instruction and \
+         cut_beats set to the section numbers in that proposal (drop any the \
+         user wants kept). \
          DURATION TARGETS: when the user names a length ('make it 20 minutes', \
          'cut it in half'), make ONE call: plan_duration_cut with \
          target_duration_s and apply=true — it ranks, cuts, and reports the new \

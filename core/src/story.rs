@@ -668,6 +668,43 @@ pub struct StoryEditOutcome {
     pub after_s: f64,
     pub coherent: bool,
     pub issues_remaining: usize,
+    /// Set when nothing was cut because the plan was too big to apply
+    /// without the user's yes: what it would cut. Apply it by calling
+    /// `story_edit` again with `cut_beats`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<StoryProposal>,
+}
+
+/// A story edit the user hasn't confirmed: the beats it would cut.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoryProposal {
+    pub cut_beats: Vec<usize>,
+    pub beats: Vec<ProposedBeat>,
+    pub cut_s: f64,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProposedBeat {
+    pub beat: usize,
+    pub title: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// Without a length the user asked for, a story edit that would cut more
+/// than this share of what's still in the video is proposed, not applied:
+/// one model call over a handful of beat summaries is not enough to delete
+/// half a stream on its own (it once cut 80% of a 62-minute video).
+pub const MAX_UNCONFIRMED_SHARE: f64 = 0.25;
+
+fn clock(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 fn narrate(editor: &Editor, project_id: Uuid, step: usize, text: impl Into<String>) {
@@ -704,11 +741,13 @@ pub async fn story_edit(
     project_id: Uuid,
     instruction: &str,
     target_s: Option<f64>,
+    confirmed_beats: Option<Vec<usize>>,
     source: ActionSource,
 ) -> Result<StoryEditOutcome> {
     // One `story_plan` line in the app log for the whole edit.
     let mut step = applog::Step::start(editor, "story_plan", Some(project_id));
-    let result = story_edit_logged(editor, project_id, instruction, target_s, source, &mut step).await;
+    let result =
+        story_edit_logged(editor, project_id, instruction, target_s, confirmed_beats, source, &mut step).await;
     if let Ok(outcome) = &result {
         step.count("actions", outcome.actions.len());
     }
@@ -721,6 +760,7 @@ async fn story_edit_logged(
     project_id: Uuid,
     instruction: &str,
     target_s: Option<f64>,
+    confirmed_beats: Option<Vec<usize>>,
     source: ActionSource,
     step: &mut applog::Step,
 ) -> Result<StoryEditOutcome> {
@@ -766,6 +806,7 @@ async fn story_edit_logged(
                 after_s,
                 coherent: true,
                 issues_remaining: 0,
+                proposal: None,
             });
         }
         return Err(CoreError::Unavailable(
@@ -814,7 +855,13 @@ async fn story_edit_logged(
         rationale: String,
     }
     let plan_schema = story_plan_schema();
-    let (plan, served): (Plan, _) = crate::llm::ask_json_schema_served(
+    let user_confirmed = confirmed_beats.is_some();
+    // The user confirmed a proposal: cut exactly those beats, no new plan
+    // (a second model call could pick different ones).
+    let (plan, served): (Plan, _) = if let Some(cut_beats) = confirmed_beats {
+        (Plan { cut_beats, rationale: String::new() }, None)
+    } else {
+        crate::llm::ask_json_schema_served(
         inference.as_ref(),
         &prefs.inference_model,
         "story plan",
@@ -831,7 +878,8 @@ async fn story_edit_logged(
         0.1,
         Some(&plan_schema),
     )
-    .await?;
+    .await?
+    };
     step.served(served.as_ref());
     // Guardrails: a "story edit" that deletes (almost) everything is a bug,
     // not a bold choice. Dedup first (weak models repeat indexes), refuse
@@ -879,6 +927,52 @@ async fn story_edit_logged(
             "the plan removes over 80% of the video with no target to justify it — refusing"
                 .into(),
         ));
+    }
+    // No length asked for and a big cut: propose it, change nothing.
+    if !user_confirmed
+        && target_s.is_none()
+        && before_s > 0.0
+        && cut_duration > before_s * MAX_UNCONFIRMED_SHARE
+    {
+        let beats: Vec<ProposedBeat> = valid
+            .iter()
+            .map(|&n| ProposedBeat {
+                beat: n,
+                title: outline.beats[n].title.clone(),
+                start: outline.beats[n].start,
+                end: outline.beats[n].end,
+            })
+            .collect();
+        let listed: Vec<String> = beats
+            .iter()
+            .map(|b| format!("#{} {} ({}–{})", b.beat, b.title, clock(b.start), clock(b.end)))
+            .collect();
+        let numbers: Vec<String> = valid.iter().map(|n| n.to_string()).collect();
+        narrate(editor, project_id, 2, "that is a big cut — proposing it instead of applying it");
+        step.count("proposed_beats", valid.len());
+        return Ok(StoryEditOutcome {
+            actions: vec![],
+            summary: format!(
+                "Nothing is cut yet. This edit would remove {:.0} of the {:.0} minutes left, more \
+                 than I cut without asking. It would remove {} section(s): {}. Say \"apply\" to \
+                 cut them (story_edit with cut_beats [{}]), or tell me which to keep.",
+                cut_duration / 60.0,
+                before_s / 60.0,
+                beats.len(),
+                listed.join("; "),
+                numbers.join(", ")
+            ),
+            before_s,
+            after_s: before_s,
+            coherent: true,
+            issues_remaining: 0,
+            proposal: Some(StoryProposal {
+                cut_beats: valid.clone(),
+                beats,
+                cut_s: cut_duration,
+                rationale: plan.rationale.clone(),
+            }),
+        });
     }
 
     // Nothing has been changed until here: the outline and plan read the
@@ -939,6 +1033,7 @@ async fn story_edit_logged(
                         after_s,
                         coherent: false,
                         issues_remaining: 0,
+                        proposal: None,
                     });
                 }
             }
@@ -1101,7 +1196,7 @@ async fn story_edit_logged(
     );
     narrate(editor, project_id, 6, summary.clone());
 
-    Ok(StoryEditOutcome { actions, summary, before_s, after_s, coherent, issues_remaining })
+    Ok(StoryEditOutcome { actions, summary, before_s, after_s, coherent, issues_remaining, proposal: None })
 }
 
 /// Lean JSON for tool results (beats without the id arrays are useless to
