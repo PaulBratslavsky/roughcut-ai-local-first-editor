@@ -165,8 +165,9 @@ no "this project is gone, drop its assets". Nothing in `core/` or `app/` prunes 
 Two compounding effects:
 - `ensure_playable_copy` (video.rs:446) is a **lossless remux** (`-c:v copy`,
   `+faststart`), not a downscaled proxy — by design, but it means every source
-  needing faststart or a >2ch audio downmix leaves a **full-size second copy** of
-  the video on disk. Observed: 4.0 GB of `play.mp4` across 4 imports, one of them
+  needing a container change or a >2ch audio downmix leaves a **full-size second
+  copy** of the video on disk. (MP4s whose index sits at the end, every OBS
+  MP4, no longer get one: the preview plays them through `rcmedia`.) Observed: 4.0 GB of `play.mp4` across 4 imports, one of them
   2.4 GB (1920x1080, 8 Mbps, 43 min).
 - `asset_cache_key` (video.rs:540) intentionally invalidates when the file
   changes — but the superseded directory is **orphaned, not removed**, so

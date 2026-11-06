@@ -12,10 +12,9 @@ export type MediaAssets = {
  */
 peaks_path: string | null, peaks_per_second: number, thumbnails: Array<ThumbnailRef>, 
 /**
- * Web-playable copy when the source itself isn't (mp4 with the moov
- * index at the END streams as an endless black frame in WebKit; an OBS
- * .mkv doesn't open at all). None = play the source, or the copy isn't
- * built yet.
+ * Web-playable copy when the source itself isn't (an OBS .mkv doesn't
+ * open at all in WebKit; audio with more than 2 channels plays silent).
+ * None = play the source, or the copy isn't built yet.
  */
 playback_path: string | null, 
 /**

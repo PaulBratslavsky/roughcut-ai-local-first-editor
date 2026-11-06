@@ -3,7 +3,8 @@
 //! Makes 10-second test clips and checks that `ensure_playable_copy` turns an
 //! OBS-style `.mkv` (H.264 + AAC, H.264 + Opus, HEVC + AAC, two audio tracks)
 //! and an odd-sized VP9 `.webm` into a faststart MP4 with stereo AAC audio
-//! (HEVC tagged `hvc1`), and that an ordinary MP4 gets no copy. Then joins
+//! (HEVC tagged `hvc1`), and that an MP4 gets no copy, its index at the end
+//! or not, unless it is HEVC tagged `hev1`. Then joins
 //! files with `concat_media`: MP4s into an MP4; `.mkv` files into an `.mkv`
 //! whose preview copy plays; two-track OBS files twice in a row (as two
 //! "add footage" steps); and refuses files that don't match. Runs with a
@@ -150,6 +151,26 @@ async fn main() {
     let media = engine.probe(&mp4.to_string_lossy()).await.expect("probe mp4");
     assert_eq!(ensure_playable_copy(&media).await.expect("mp4"), None, "a faststart MP4 needs no copy");
     println!("  {:<26} → plays as-is (no copy)", "plain.mp4");
+
+    // OBS writes its MP4 index at the end: the preview reads it as it is.
+    let late = clips.join("obs-late-index.mp4");
+    make_clip(&late, "640x360", H264, &["-c:a", "aac"], false);
+    assert!(!moov_first(&late.to_string_lossy()), "the test clip should have its index at the end");
+    let media = engine.probe(&late.to_string_lossy()).await.expect("probe late-index mp4");
+    assert_eq!(ensure_playable_copy(&media).await.expect("late mp4"), None, "a late index needs no copy");
+    println!("  {:<26} → plays as-is (no copy)", name(&late));
+
+    // HEVC in MP4: ffmpeg tags it hev1, which Apple players refuse, so it
+    // gets a copy tagged hvc1; one already tagged hvc1 plays as it is.
+    let hev1 = clips.join("hevc-hev1.mp4");
+    make_clip(&hev1, "640x360", hevc, &["-c:a", "aac"], false);
+    assert_eq!(probe(&hev1.to_string_lossy(), "stream=codec_tag_string", "v:0"), "hev1");
+    check_copy(&engine, &hev1, "hevc", Some("hvc1")).await;
+    let hvc1 = clips.join("hevc-hvc1.mp4");
+    make_clip(&hvc1, "640x360", &[&hevc[..], &["-tag:v", "hvc1"]].concat(), &["-c:a", "aac"], false);
+    let media = engine.probe(&hvc1.to_string_lossy()).await.expect("probe hvc1 mp4");
+    assert_eq!(ensure_playable_copy(&media).await.expect("hvc1 mp4"), None, "hvc1 HEVC needs no copy");
+    println!("  {:<26} → plays as-is (no copy)", name(&hvc1));
 
     println!("join:");
     let mp4_2 = clips.join("plain-2.mp4");

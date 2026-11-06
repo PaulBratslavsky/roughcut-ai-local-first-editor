@@ -25,10 +25,9 @@ pub struct MediaAssets {
     pub peaks_path: Option<String>,
     pub peaks_per_second: u32,
     pub thumbnails: Vec<ThumbnailRef>,
-    /// Web-playable copy when the source itself isn't (mp4 with the moov
-    /// index at the END streams as an endless black frame in WebKit; an OBS
-    /// .mkv doesn't open at all). None = play the source, or the copy isn't
-    /// built yet.
+    /// Web-playable copy when the source itself isn't (an OBS .mkv doesn't
+    /// open at all in WebKit; audio with more than 2 channels plays silent).
+    /// None = play the source, or the copy isn't built yet.
     pub playback_path: Option<String>,
     /// Why building the playable copy failed in this run, if it did.
     pub playback_error: Option<String>,
@@ -394,9 +393,11 @@ pub fn playable_copy_failure(media: &Media) -> Option<String> {
     playable_failures().lock().unwrap().get(&asset_cache_key(media)).cloned()
 }
 
-/// Build the web-playable copy when the source needs one: an MP4 whose index
-/// sits at the end, audio WebKit can't play, or a container WebKit can't open
-/// at all (OBS's `.mkv`, `.webm`, `.avi`, …). Stream copy where the codecs
+/// Build the web-playable copy when the source needs one: audio WebKit can't
+/// play, HEVC without Apple's `hvc1` tag, or a container WebKit can't open at
+/// all (OBS's `.mkv`, `.webm`, `.avi`, …). An MP4 whose index sits at the end
+/// plays as it is (the shell's `rcmedia` protocol serves every read the
+/// player asks for), so it gets no full-size copy. Stream copy where the codecs
 /// allow it, with +faststart, written to `.part` then renamed, so a crash
 /// never leaves a half-copy that looks playable. Idempotent and deduplicated;
 /// Ok(None) = the source plays as-is (or another task is building the copy).
@@ -418,17 +419,7 @@ pub async fn ensure_playable_copy(media: &Media) -> Result<Option<String>> {
 }
 
 async fn build_playable_copy(media: &Media) -> Result<Option<String>> {
-    let index_at_end = needs_faststart(&media.file_path);
-    let fix = match container_info(&media.file_path).await {
-        Ok(info) => playable_fix(&info, index_at_end),
-        // ffprobe failed: still fix an MP4's late index, copying the first
-        // video and audio track as they are.
-        Err(_) if index_at_end => {
-            Some(PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy })
-        }
-        Err(e) => return Err(e),
-    };
-    let Some(fix) = fix else {
+    let Some(fix) = playable_fix(&container_info(&media.file_path).await?) else {
         return Ok(None);
     };
     let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
@@ -465,6 +456,8 @@ struct ContainerInfo {
     /// ffprobe `format_name`: "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi", …
     format_name: String,
     video_codec: Option<String>,
+    /// The video's sample-entry tag: `avc1`, `hvc1`, `hev1`, …
+    video_tag: Option<String>,
     audio_codec: Option<String>,
     audio_channels: u32,
 }
@@ -504,7 +497,7 @@ async fn container_info(path: &str) -> Result<ContainerInfo> {
     let mut cmd = Command::new(probe);
     cmd.args([
         "-v", "error",
-        "-show_entries", "format=format_name:stream=codec_type,codec_name,channels",
+        "-show_entries", "format=format_name:stream=codec_type,codec_name,codec_tag_string,channels",
         "-of", "json",
         path,
     ]);
@@ -523,14 +516,15 @@ fn parse_container_info(json: &str) -> Option<ContainerInfo> {
     let audio = first("audio");
     Some(ContainerInfo {
         format_name,
-        video_codec: video.and_then(|s| s["codec_name"].as_str().map(str::to_string)),
+        video_codec: video.as_ref().and_then(|s| s["codec_name"].as_str().map(str::to_string)),
+        video_tag: video.and_then(|s| s["codec_tag_string"].as_str().map(str::to_string)),
         audio_codec: audio.as_ref().and_then(|s| s["codec_name"].as_str().map(str::to_string)),
         audio_channels: audio.and_then(|s| s["channels"].as_u64()).unwrap_or(0) as u32,
     })
 }
 
 /// None = the original plays in the preview as-is.
-fn playable_fix(info: &ContainerInfo, index_at_end: bool) -> Option<PlayableFix> {
+fn playable_fix(info: &ContainerInfo) -> Option<PlayableFix> {
     let is_mp4 = info.is_mp4();
     let hevc = info.video_codec.as_deref() == Some("hevc");
     let audio = match info.audio_codec.as_deref() {
@@ -543,7 +537,11 @@ fn playable_fix(info: &ContainerInfo, index_at_end: bool) -> Option<PlayableFix>
         Some(_) => AudioFix::StereoAac,
     };
     if is_mp4 {
-        if !index_at_end && audio != AudioFix::StereoAac {
+        // Wherever its index sits: WebKit reads a late `moov` fine through
+        // `rcmedia`. Only audio it can't play, or HEVC tagged `hev1` (Apple
+        // players need `hvc1`), needs a copy.
+        let untagged_hevc = hevc && info.video_tag.as_deref() != Some("hvc1");
+        if audio != AudioFix::StereoAac && !untagged_hevc {
             return None;
         }
         return Some(PlayableFix { reencode_video: false, tag_hvc1: hevc, audio });
@@ -683,41 +681,6 @@ fn join_signature(json: &str) -> Option<(bool, String)> {
         format!("{} {}ch {}Hz", s(&x, "codec_name"), s(&x, "channels"), s(&x, "sample_rate"))
     });
     Some((is_mp4, format!("{video} + {audio}")))
-}
-
-/// True when an mp4/mov's `moov` index sits AFTER the `mdat` payload —
-/// fine for ffmpeg, an endless black frame for progressive playback in
-/// WebKit. Box-header walk only; reads a few dozen bytes.
-fn needs_faststart(path: &str) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut off: u64 = 0;
-    let mut saw_mdat = false;
-    let mut header = [0u8; 16];
-    while off + 8 <= len {
-        if f.seek(SeekFrom::Start(off)).is_err() || f.read_exact(&mut header[..8]).is_err() {
-            return false;
-        }
-        let mut size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as u64;
-        let typ: [u8; 4] = header[4..8].try_into().unwrap();
-        if size == 1 {
-            if f.read_exact(&mut header[8..16]).is_err() {
-                return false;
-            }
-            size = u64::from_be_bytes(header[8..16].try_into().unwrap());
-        }
-        if size < 8 {
-            return false; // not an MP4 box structure
-        }
-        match &typ {
-            b"moov" => return saw_mdat,
-            b"mdat" => saw_mdat = true,
-            _ => {}
-        }
-        off = off.saturating_add(size);
-    }
-    false
 }
 
 /// Stable identity for derived assets: hash of path + size + mtime, so the
@@ -1340,6 +1303,7 @@ mod playable_tests {
         ContainerInfo {
             format_name: format.into(),
             video_codec: video.map(str::to_string),
+            video_tag: None,
             audio_codec: audio.map(str::to_string),
             audio_channels: channels,
         }
@@ -1350,23 +1314,27 @@ mod playable_tests {
 
     #[test]
     fn a_normal_mp4_plays_as_is() {
-        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("aac"), 2), false), None);
+        // Wherever its index sits: there's no index flag to pass any more.
+        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("aac"), 2)), None);
         // An MP4's own audio was never converted unless it had >2 channels.
-        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("pcm_s16le"), 2), false), None);
+        assert_eq!(playable_fix(&info(MP4, Some("h264"), Some("pcm_s16le"), 2)), None);
+        let tagged = ContainerInfo { video_tag: Some("hvc1".into()), ..info(MP4, Some("hevc"), Some("aac"), 2) };
+        assert_eq!(playable_fix(&tagged), None, "HEVC already tagged hvc1");
     }
 
     #[test]
-    fn mp4_fixes_are_unchanged() {
-        let late_index = playable_fix(&info(MP4, Some("h264"), Some("aac"), 2), true).unwrap();
-        assert_eq!(late_index, PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy });
-        let three_ch = playable_fix(&info(MP4, Some("h264"), Some("aac"), 3), false).unwrap();
+    fn mp4_copies_only_for_audio_or_the_hevc_tag() {
+        let hev1 = ContainerInfo { video_tag: Some("hev1".into()), ..info(MP4, Some("hevc"), Some("aac"), 2) };
+        let fix = playable_fix(&hev1).unwrap();
+        assert_eq!(fix, PlayableFix { reencode_video: false, tag_hvc1: true, audio: AudioFix::Copy });
+        let three_ch = playable_fix(&info(MP4, Some("h264"), Some("aac"), 3)).unwrap();
         assert_eq!(three_ch.audio, AudioFix::StereoAac);
         assert!(!three_ch.reencode_video);
     }
 
     #[test]
     fn obs_mkv_is_copied_into_an_mp4() {
-        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2), false).unwrap();
+        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2)).unwrap();
         assert_eq!(fix, PlayableFix { reencode_video: false, tag_hvc1: false, audio: AudioFix::Copy });
         let args = playable_args(&fix);
         assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]), "{args:?}");
@@ -1377,7 +1345,7 @@ mod playable_tests {
 
     #[test]
     fn hevc_gets_the_apple_tag() {
-        let fix = playable_fix(&info(MKV, Some("hevc"), Some("aac"), 2), false).unwrap();
+        let fix = playable_fix(&info(MKV, Some("hevc"), Some("aac"), 2)).unwrap();
         assert!(fix.tag_hvc1 && !fix.reencode_video);
         assert!(playable_args(&fix).windows(2).any(|w| w == ["-tag:v", "hvc1"]));
     }
@@ -1385,10 +1353,10 @@ mod playable_tests {
     #[test]
     fn other_audio_in_other_containers_becomes_aac() {
         for codec in ["opus", "pcm_s16le", "flac", "mp3"] {
-            let fix = playable_fix(&info(MKV, Some("h264"), Some(codec), 2), false).unwrap();
+            let fix = playable_fix(&info(MKV, Some("h264"), Some(codec), 2)).unwrap();
             assert_eq!(fix.audio, AudioFix::StereoAac, "{codec}");
         }
-        let fix = playable_fix(&info("avi", Some("h264"), None, 0), false).unwrap();
+        let fix = playable_fix(&info("avi", Some("h264"), None, 0)).unwrap();
         assert_eq!(fix.audio, AudioFix::None);
         assert!(playable_args(&fix).contains(&"-an"));
     }
@@ -1396,7 +1364,7 @@ mod playable_tests {
     #[test]
     fn video_webkit_cant_play_is_converted() {
         for codec in ["vp9", "vp8", "mpeg4", "av1"] {
-            let fix = playable_fix(&info(MKV, Some(codec), Some("opus"), 2), false).unwrap();
+            let fix = playable_fix(&info(MKV, Some(codec), Some("opus"), 2)).unwrap();
             assert!(fix.reencode_video, "{codec}");
             assert!(playable_args(&fix).contains(&"libx264"));
         }
@@ -1410,6 +1378,9 @@ mod playable_tests {
             {"codec_name":"aac","codec_type":"audio","channels":1}],
             "format":{"format_name":"matroska,webm"}}"#;
         assert_eq!(parse_container_info(json), Some(info(MKV, Some("h264"), Some("aac"), 2)));
+        let tagged = r#"{"streams":[{"codec_name":"hevc","codec_tag_string":"hev1","codec_type":"video"}],
+            "format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}"#;
+        assert_eq!(parse_container_info(tagged).unwrap().video_tag.as_deref(), Some("hev1"));
         // Unreadable output is an error, never "not an MP4, no audio" (that
         // would build a silent copy of a file that was fine).
         assert_eq!(parse_container_info("not json"), None);
@@ -1418,13 +1389,13 @@ mod playable_tests {
 
     #[test]
     fn copies_map_the_first_tracks_and_reencodes_to_even_sizes() {
-        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2), false).unwrap();
+        let fix = playable_fix(&info(MKV, Some("h264"), Some("aac"), 2)).unwrap();
         let args = playable_args(&fix);
         assert!(args.windows(2).any(|w| w == ["-map", "0:v:0?"]), "{args:?}");
         assert!(args.windows(2).any(|w| w == ["-map", "0:a:0?"]), "{args:?}");
-        let silent = playable_fix(&info(MKV, Some("h264"), None, 0), false).unwrap();
+        let silent = playable_fix(&info(MKV, Some("h264"), None, 0)).unwrap();
         assert!(!playable_args(&silent).contains(&"0:a:0?"));
-        let vp9 = playable_fix(&info(MKV, Some("vp9"), Some("opus"), 2), false).unwrap();
+        let vp9 = playable_fix(&info(MKV, Some("vp9"), Some("opus"), 2)).unwrap();
         assert!(playable_args(&vp9).contains(&"scale=trunc(iw/2)*2:trunc(ih/2)*2"));
     }
 

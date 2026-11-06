@@ -477,7 +477,8 @@ removed (ADR-0008, [`designs/remove-recording.md`](designs/remove-recording.md))
 4. **Clean and index** (§3, §6).
 5. **Media assets.** `get_media_assets` builds waveform peaks and a thumbnail
    filmstrip in `cache/<key>/`. For a file the WebView can't play (MKV, WebM,
-   AVI, or an MP4 with its index at the end) it starts a **playable copy**,
+   AVI, audio with more than 2 channels, or HEVC not tagged `hvc1`) it starts
+   a **playable copy**,
    `cache/<key>/play.mp4` (first video and first audio track, stereo AAC,
    H.264 when needed). `media-assets-changed` says when it's ready or failed;
    the preview shows "Preparing preview…" until then.

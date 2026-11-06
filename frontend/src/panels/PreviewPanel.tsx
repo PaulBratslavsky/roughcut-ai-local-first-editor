@@ -50,7 +50,7 @@ export function PreviewPanel({
   );
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
-  // Some sources can't stream in a <video> tag (an mp4 index at the end, an
+  // Some sources can't stream in a <video> tag (more than 2 audio channels, an
   // OBS .mkv); the core then builds a playable copy in the background and
   // media-assets-changed swaps it in.
   const { data: assets } = useMediaAssets(projectId);

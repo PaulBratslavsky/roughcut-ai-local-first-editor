@@ -292,13 +292,17 @@ There are no child directories with contracts.
      again.
 - `build_playable_copy`: one ffprobe call (`container_info`: `format_name`,
   the first video and audio streams' codecs, the audio channel count) and the
-  pure `playable_fix(&ContainerInfo, index_at_end)` decide whether a copy is
+  pure `playable_fix(&ContainerInfo)` decide whether a copy is
   needed and how (unit tests in `playable_tests`). ffprobe output that
   `parse_container_info` can't read (no JSON, no format name) is an error,
   not "not an MP4, no audio".
-  - **MP4 / MOV** (`format_name` lists `mp4` or `mov`): a copy only when
-    `moov` comes after `mdat` (`needs_faststart`) or the first audio stream has
-    more than 2 channels. Video is copied; audio is copied, or converted to
+  - **MP4 / MOV** (`format_name` lists `mp4` or `mov`): a copy only when the
+    first audio stream has more than 2 channels, or the video is HEVC not
+    tagged `hvc1` (ffprobe's `codec_tag_string`, e.g. `hev1`). Where the
+    `moov` index sits doesn't matter: the preview reads the file through the
+    shell's `rcmedia` protocol, which serves every byte range WebKit asks for
+    (OBS writes `moov` last; a full-size copy only to move it cost as much
+    disk as the recording). Video is copied; audio is copied, or converted to
     stereo AAC when it has more than 2 channels.
   - **Any other container** (OBS's `.mkv`, `.webm`, `.avi`, …): always a copy.
     H.264 or HEVC video is copied; any other video codec (VP9, AV1, …) is
