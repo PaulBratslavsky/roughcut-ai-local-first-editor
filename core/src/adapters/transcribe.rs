@@ -151,6 +151,99 @@ fn parse_whisper_json(json: &str, media_id: Uuid) -> Result<Transcript> {
     Ok(Transcript { id: Uuid::new_v4(), media_id, language, segments, model_used })
 }
 
+/// Primes whisper to write fillers down instead of tidying them away.
+pub const FILLER_PROMPT: &str =
+    "Umm, let me think, like, hmm... Okay, so, uh, here's what I was, you know, thinking.";
+
+/// whisper.cpp's alignment-heads preset for a model file, by name: DTW word
+/// alignment needs to know which attention heads track time. None = an
+/// unknown model; DTW stays off and raw token times are used.
+#[cfg(feature = "whisper-native")]
+fn dtw_preset(model_name: &str) -> Option<whisper_rs::DtwModelPreset> {
+    use whisper_rs::DtwModelPreset as P;
+    let n = model_name.to_ascii_lowercase();
+    let english = n.contains(".en");
+    Some(if n.contains("large-v3-turbo") {
+        P::LargeV3Turbo
+    } else if n.contains("large-v3") {
+        P::LargeV3
+    } else if n.contains("large-v2") {
+        P::LargeV2
+    } else if n.contains("large-v1") || n.ends_with("large") || n.contains("large-q") {
+        P::LargeV1
+    } else if n.contains("medium") {
+        if english { P::MediumEn } else { P::Medium }
+    } else if n.contains("small") {
+        if english { P::SmallEn } else { P::Small }
+    } else if n.contains("base") {
+        if english { P::BaseEn } else { P::Base }
+    } else if n.contains("tiny") {
+        if english { P::TinyEn } else { P::Tiny }
+    } else {
+        return None;
+    })
+}
+
+/// One whisper token with its times (seconds).
+#[derive(Debug, Clone)]
+pub struct RawToken {
+    pub text: String,
+    pub t0: f64,
+    pub t1: f64,
+    /// The DTW-aligned time, when alignment ran.
+    pub t_dtw: Option<f64>,
+    pub p: f64,
+}
+
+/// Join whisper's tokens into words. A token that starts with a space
+/// begins a new word; one that doesn't (the rest of a long word, a
+/// contraction, punctuation) joins the word before it. Special tokens
+/// (`[_BEG_]`, `<|en|>`, …) are dropped.
+///
+/// A word starts at its first token's aligned time (DTW) when there is one,
+/// else at the raw token time, and ends where the next word starts (the last
+/// word at the segment's end). Times are kept in order and inside the
+/// segment. The audio trim (`detect::trim_words_to_audio`) then pulls each
+/// word's edges in to where there is actually sound.
+pub fn tokens_to_words(tokens: &[RawToken], seg_start: f64, seg_end: f64) -> Vec<Word> {
+    struct Building {
+        text: String,
+        start: f64,
+        p_sum: f64,
+        n: usize,
+    }
+    let mut built: Vec<Building> = vec![];
+    for tok in tokens {
+        let raw = tok.text.as_str();
+        if raw.starts_with("[_") || raw.starts_with("<|") || raw.trim().is_empty() {
+            continue;
+        }
+        let time = tok.t_dtw.unwrap_or(tok.t0);
+        let starts_word = raw.starts_with(' ') || built.is_empty();
+        if starts_word {
+            built.push(Building { text: raw.trim().to_string(), start: time, p_sum: tok.p, n: 1 });
+        } else if let Some(last) = built.last_mut() {
+            last.text.push_str(raw.trim());
+            last.p_sum += tok.p;
+            last.n += 1;
+        }
+    }
+    let lo = seg_start.min(seg_end);
+    let hi = seg_end.max(seg_start);
+    let mut words: Vec<Word> = Vec::with_capacity(built.len());
+    let mut prev = lo;
+    for b in &built {
+        let start = b.start.clamp(prev, hi);
+        words.push(Word { text: b.text.clone(), start, end: start, confidence: b.p_sum / b.n as f64 });
+        prev = start;
+    }
+    for i in 0..words.len() {
+        let next = if i + 1 < words.len() { words[i + 1].start } else { hi };
+        words[i].end = next.max(words[i].start);
+    }
+    words
+}
+
 /// In-process whisper.cpp via the `whisper-rs` bindings (feature
 /// `whisper-native`). No PATH dependency, no temp JSON, and real progress
 /// events through the model's progress callback. Metal/GPU is enabled by the
@@ -183,7 +276,17 @@ impl Transcriber for WhisperRs {
         let result = tokio::task::spawn_blocking(move || -> Result<Transcript> {
             use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-            let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default())
+            // DTW alignment: whisper.cpp aligns each token to the audio using
+            // the model's alignment heads, so word times stop stretching
+            // across pauses (raw token times do). Known models only.
+            let mut ctx_params = WhisperContextParameters::default();
+            if let Some(preset) = dtw_preset(&model_name) {
+                ctx_params.dtw_parameters(whisper_rs::DtwParameters {
+                    mode: whisper_rs::DtwMode::ModelPreset { model_preset: preset },
+                    ..Default::default()
+                });
+            }
+            let ctx = WhisperContext::new_with_params(&model, ctx_params)
                 .map_err(|e| CoreError::Unavailable(format!("whisper model load: {e}")))?;
             let mut state = ctx
                 .create_state()
@@ -194,6 +297,12 @@ impl Transcriber for WhisperRs {
                 params.set_language(Some(&lang)); // "auto" triggers detection
             }
             params.set_token_timestamps(true);
+            // Whisper learned from cleaned-up captions and drops "um" / "uh".
+            // A disfluent prompt keeps them, so filler cuts can find them.
+            // English only: an English prompt would pull other languages.
+            if lang == "en" || lang.starts_with("en-") {
+                params.set_initial_prompt(FILLER_PROMPT);
+            }
             params.set_print_special(false);
             params.set_print_progress(false);
             params.set_print_realtime(false);
@@ -229,25 +338,25 @@ impl Transcriber for WhisperRs {
                 if text.is_empty() {
                     continue;
                 }
-                let mut words = vec![];
+                let seg_start = seg.start_timestamp() as f64 / 100.0;
+                let seg_end = seg.end_timestamp() as f64 / 100.0;
+                let mut tokens = vec![];
                 for i in 0..seg.n_tokens() {
                     let Some(tok) = seg.get_token(i) else { continue };
-                    let t = tok.to_str_lossy().map(|s| s.into_owned()).unwrap_or_default();
-                    if t.starts_with("[_") {
-                        continue; // special tokens
-                    }
                     let data = tok.token_data();
-                    words.push(Word {
-                        text: t.trim().to_string(),
-                        start: data.t0 as f64 / 100.0,
-                        end: data.t1 as f64 / 100.0,
-                        confidence: f64::from(tok.token_probability()),
+                    tokens.push(RawToken {
+                        text: tok.to_str_lossy().map(|s| s.into_owned()).unwrap_or_default(),
+                        t0: data.t0 as f64 / 100.0,
+                        t1: data.t1 as f64 / 100.0,
+                        t_dtw: (data.t_dtw >= 0).then(|| data.t_dtw as f64 / 100.0),
+                        p: f64::from(tok.token_probability()),
                     });
                 }
+                let words = tokens_to_words(&tokens, seg_start, seg_end);
                 segments.push(TranscriptSegment {
                     id: Uuid::new_v4(),
-                    start: seg.start_timestamp() as f64 / 100.0,
-                    end: seg.end_timestamp() as f64 / 100.0,
+                    start: seg_start,
+                    end: seg_end,
                     text,
                     words,
                     is_filler: false,
@@ -359,5 +468,51 @@ impl Transcriber for AutoTranscriber {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    fn tok(text: &str, t0: f64, t_dtw: Option<f64>) -> RawToken {
+        RawToken { text: text.into(), t0, t1: t0 + 0.1, t_dtw, p: 0.9 }
+    }
+
+    #[test]
+    fn tokens_join_into_words_and_specials_are_dropped() {
+        let tokens = vec![
+            tok("[_BEG_]", 0.0, None),
+            tok(" Hello", 0.5, Some(0.6)),
+            tok(",", 0.9, Some(0.95)),
+            tok(" super", 1.0, Some(1.1)),
+            tok("cut", 1.2, Some(1.3)),
+            tok(" isn", 1.6, Some(1.7)),
+            tok("'t", 1.8, Some(1.9)),
+            tok(" um", 2.5, Some(3.4)),
+            tok("<|endoftext|>", 4.0, None),
+        ];
+        let w = tokens_to_words(&tokens, 0.4, 4.0);
+        let texts: Vec<&str> = w.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["Hello,", "supercut", "isn't", "um"]);
+        // Starts come from DTW; each word ends where the next begins.
+        assert_eq!((w[0].start, w[0].end), (0.6, 1.1));
+        assert_eq!((w[3].start, w[3].end), (3.4, 4.0), "the last word ends at the segment's end");
+    }
+
+    #[test]
+    fn times_stay_in_order_and_inside_the_segment() {
+        // DTW can put a token before the segment or out of order.
+        let tokens = vec![tok(" a", 1.0, Some(0.2)), tok(" b", 2.0, Some(1.5)), tok(" c", 3.0, Some(1.2))];
+        let w = tokens_to_words(&tokens, 1.0, 5.0);
+        assert_eq!(w[0].start, 1.0, "clamped to the segment start");
+        assert!(w[1].start <= w[2].start, "never earlier than the word before");
+        assert!(w.iter().all(|w| w.end >= w.start && w.end <= 5.0));
+    }
+
+    #[test]
+    fn without_dtw_the_raw_token_time_is_used() {
+        let w = tokens_to_words(&[tok(" hi", 2.0, None), tok(" there", 2.5, None)], 2.0, 3.0);
+        assert_eq!((w[0].start, w[1].start), (2.0, 2.5));
     }
 }

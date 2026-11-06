@@ -88,7 +88,7 @@ impl Editor {
             e
         };
 
-        let transcript = if demo {
+        let mut transcript = if demo {
             self.inner
                 .transcriber
                 .transcribe(&media, "", &lang, Some(project_id), &self.inner.sink)
@@ -110,6 +110,17 @@ impl Editor {
             let _ = std::fs::remove_file(&wav);
             t.map_err(|e| failed("whisper", e))?
         };
+        // Pull word edges in to the audio: whisper's word times swallow the
+        // pauses around words, and every word-level cut aims at them.
+        if !demo {
+            if let Some(peaks) = crate::adapters::video::load_raw_peaks(&media).await {
+                crate::detect::trim_words_to_audio(
+                    &mut transcript,
+                    &peaks,
+                    crate::adapters::video::PEAKS_PER_SECOND,
+                );
+            }
+        }
 
         {
             let mut state = self.inner.state.lock().unwrap();

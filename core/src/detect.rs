@@ -183,6 +183,38 @@ fn similarity(a: &str, b: &str) -> f64 {
 pub struct RoughCutOutcome {
     pub timeline: Timeline,
     pub cut_count: u32,
+    /// Filler words left in because the audio shows no pause to cut at (the
+    /// "um" runs straight into the next word): cutting there clips speech.
+    pub fillers_skipped: u32,
+}
+
+/// The shortest cut the rough cut makes: anything shorter is a jump, not an
+/// edit.
+pub const MIN_CUT_S: f64 = 0.2;
+
+/// How far from a filler word's edge to look for a quiet point to cut at.
+const FILLER_REACH_OUT_S: f64 = 0.12;
+const FILLER_REACH_IN_S: f64 = 0.06;
+/// A filler cut shorter than this, once snapped, isn't worth the jump.
+const MIN_FILLER_CUT_S: f64 = 0.12;
+
+/// Where to cut a filler word so the cut doesn't clip speech: each edge moves
+/// to the quietest frame near the word's edge, and the filler is left alone
+/// (`None`) when either side has no quiet frame, i.e. it is glued to the
+/// next word.
+pub fn snap_filler_to_quiet(r: &TimeRange, peaks: &[u8], pps: u32, lv: Levels) -> Option<TimeRange> {
+    let fps = pps as f64;
+    let quietest = |from: f64, to: f64| -> Option<f64> {
+        let a = (from.max(0.0) * fps) as usize;
+        let b = ((to * fps) as usize).min(peaks.len().checked_sub(1)?);
+        (a..=b)
+            .min_by_key(|&i| peaks[i])
+            .filter(|&i| peaks[i] as f64 <= lv.enter)
+            .map(|i| i as f64 / fps)
+    };
+    let start = quietest(r.start - FILLER_REACH_OUT_S, r.start + FILLER_REACH_IN_S)?;
+    let end = quietest(r.end - FILLER_REACH_IN_S, r.end + FILLER_REACH_OUT_S)?;
+    (end - start >= MIN_FILLER_CUT_S).then_some(TimeRange { start, end })
 }
 
 /// Compose the first pass: start from the full source, then exclude silences,
@@ -236,12 +268,24 @@ pub fn generate_rough_cut(
             timeline.cut_linked(seg.start, seg.end, &[*id], AiCut);
         }
     }
+    // Filler words inside sentences: cut only where the audio has a pause on
+    // both sides, at the quietest point. Word times alone land mid-word.
+    let levels = raw_peaks.filter(|p| !p.is_empty() && pps > 0).and_then(|p| levels(p).map(|l| (p, l)));
+    let mut fillers_skipped = 0u32;
     for r in &fillers.word_ranges {
-        timeline.set_range_included(r.start, r.end, false, AiCut);
+        let range = match levels {
+            Some((peaks, lv)) => snap_filler_to_quiet(r, peaks, pps, lv),
+            // No audio to check against: the transcript's times, as before.
+            None => Some(r.clone()),
+        };
+        match range {
+            Some(r) => timeline.set_range_included(r.start, r.end, false, AiCut),
+            None => fillers_skipped += 1,
+        }
     }
 
     let cut_count = timeline.cut_count;
-    RoughCutOutcome { timeline, cut_count }
+    RoughCutOutcome { timeline, cut_count, fillers_skipped }
 }
 
 /// TIER 2 — the fuzzy, judgment-call cuts the rough cut MARKS rather than
@@ -498,6 +542,95 @@ pub fn silence_candidates(transcript: &Transcript, duration: f64, min_gap: f64) 
     merge(out)
 }
 
+/// Loudness thresholds from the file's OWN dynamics (a MacBook mic peaks
+/// speech at 2.4% absolute — fixed dB thresholds classify whole recordings as
+/// silence): noise floor = p10, speech = p95, with hysteresis between them.
+#[derive(Debug, Clone, Copy)]
+pub struct Levels {
+    /// At or below this, a frame is quiet.
+    pub enter: f64,
+    /// Above this, a frame is speech (between the two: keeps its state).
+    pub exit: f64,
+}
+
+/// `None` when the file's dynamics are too flat to trust (constant fan,
+/// broken gain): callers then keep the transcript's times instead of
+/// pretending precision.
+pub fn levels(peaks: &[u8]) -> Option<Levels> {
+    if peaks.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<u8> = peaks.to_vec();
+    sorted.sort_unstable();
+    let pct = |p: f64| -> f64 { sorted[((sorted.len() - 1) as f64 * p) as usize] as f64 };
+    let floor = pct(0.10);
+    let speech = pct(0.95);
+    if speech < (floor * 2.0).max(3.0) {
+        return None;
+    }
+    let range = speech - floor;
+    Some(Levels { enter: floor + 0.15 * range, exit: floor + 0.30 * range })
+}
+
+/// What [`trim_words_to_audio`] changed.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TrimStats {
+    pub words: usize,
+    pub trimmed: usize,
+    /// Seconds of silence moved out of words.
+    pub seconds_removed: f64,
+}
+
+/// Never trim a word below this (a short word is still a word).
+const MIN_WORD_S: f64 = 0.08;
+/// Keep this much quiet in front of a word: soft onsets (s, f, h) sit below
+/// the speech threshold for a moment.
+const ONSET_GUARD_S: f64 = 0.04;
+/// …and this much after it: decays trail off quietly.
+const TAIL_GUARD_S: f64 = 0.06;
+
+/// Pull each word's edges in to where there is sound. Whisper's word times
+/// often swallow the pause before or after a word (a 3-second "charm,"), so
+/// a cut aimed at a word lands partly in silence or in the next word. Only
+/// trims, never extends; a word with no loud frame at all is left alone (a
+/// whisper), and so is everything when the file's dynamics are too flat.
+pub fn trim_words_to_audio(transcript: &mut Transcript, peaks: &[u8], pps: u32) -> TrimStats {
+    let mut stats = TrimStats::default();
+    let Some(Levels { exit, .. }) = levels(peaks) else { return stats };
+    if pps == 0 {
+        return stats;
+    }
+    let fps = pps as f64;
+    let loud = |i: usize| peaks.get(i).map(|&v| v as f64 > exit).unwrap_or(false);
+    for seg in transcript.segments.iter_mut().filter(|s| !s.is_silence) {
+        for w in &mut seg.words {
+            stats.words += 1;
+            let (a, b) = ((w.start * fps).floor() as usize, (w.end * fps).ceil() as usize);
+            if b <= a {
+                continue;
+            }
+            let Some(first) = (a..b.min(peaks.len())).find(|&i| loud(i)) else { continue };
+            let last = (a..b.min(peaks.len())).rev().find(|&i| loud(i)).unwrap_or(first);
+            let mut start = (first as f64 / fps - ONSET_GUARD_S).max(w.start);
+            let mut end = ((last + 1) as f64 / fps + TAIL_GUARD_S).min(w.end);
+            if end - start < MIN_WORD_S {
+                // Grow back around the loud part, inside the original span.
+                let mid = (start + end) / 2.0;
+                start = (mid - MIN_WORD_S / 2.0).max(w.start);
+                end = (start + MIN_WORD_S).min(w.end);
+            }
+            let removed = (start - w.start) + (w.end - end);
+            if removed > 0.01 {
+                stats.trimmed += 1;
+                stats.seconds_removed += removed;
+                w.start = start;
+                w.end = end;
+            }
+        }
+    }
+    stats
+}
+
 /// Keep this much attached to the NEXT speech onset (consonant attacks are
 /// fragile) and after the previous word's tail (decay is forgiving).
 const KEEP_PRE_ONSET_S: f64 = 0.12;
@@ -533,21 +666,7 @@ pub fn refine_silences(
         return transcript_only(candidates);
     }
 
-    let mut sorted: Vec<u8> = peaks.to_vec();
-    sorted.sort_unstable();
-    let pct = |p: f64| -> f64 {
-        sorted[((sorted.len() - 1) as f64 * p) as usize] as f64
-    };
-    let floor = pct(0.10);
-    let speech = pct(0.95);
-    // Honesty gate: flat dynamics (constant fan, broken gain) make energy
-    // uninformative — degrade loudly-typed rather than silently wrong.
-    if speech < (floor * 2.0).max(3.0) {
-        return transcript_only(candidates);
-    }
-    let range = speech - floor;
-    let enter = floor + 0.15 * range; // below this = silent
-    let exit = floor + 0.30 * range; // must exceed this to count as speech
+    let Some(Levels { enter, exit }) = levels(peaks) else { return transcript_only(candidates) };
     let blip = ((BLIP_S * pps as f64).round() as usize).max(1);
 
     let mut out = vec![];
@@ -598,6 +717,72 @@ pub fn refine_silences(
 #[cfg(test)]
 mod hybrid_tests {
     use super::*;
+
+    fn one_word_transcript(start: f64, end: f64) -> Transcript {
+        Transcript {
+            id: Uuid::new_v4(),
+            media_id: Uuid::new_v4(),
+            language: "en".into(),
+            segments: vec![TranscriptSegment {
+                id: Uuid::new_v4(),
+                start,
+                end,
+                text: "charm,".into(),
+                words: vec![crate::model::Word { text: "charm,".into(), start, end, confidence: 0.9 }],
+                is_filler: false,
+                is_silence: false,
+                take_group_id: None,
+                is_best_take: false,
+            }],
+            model_used: "test".into(),
+        }
+    }
+
+    #[test]
+    fn a_filler_is_cut_at_the_quiet_points_around_it_or_left_alone() {
+        // 50 pps: speech, pause, "um", pause, speech.
+        let mut p = vec![6u8; 500];
+        p[..100].fill(180); // 0..2 s speech
+        p[110..125].fill(150); // 2.2..2.5 s "um"
+        p[135..250].fill(180); // 2.7..5 s speech, then a quiet tail
+        let lv = levels(&p).unwrap();
+        let r = snap_filler_to_quiet(&TimeRange { start: 2.2, end: 2.5 }, &p, 50, lv).expect("pauses on both sides");
+        assert!(r.start >= 2.0 && r.start <= 2.2, "start {}", r.start);
+        assert!(r.end >= 2.5 && r.end <= 2.7, "end {}", r.end);
+        // The same "um" glued to the next word: no quiet frame after it.
+        let mut glued = p.clone();
+        glued[125..135].fill(170);
+        assert!(snap_filler_to_quiet(&TimeRange { start: 2.2, end: 2.5 }, &glued, 50, lv).is_none());
+    }
+
+    #[test]
+    fn a_word_that_swallowed_a_pause_is_trimmed_to_its_sound() {
+        // Speech 8..12 s; whisper says the word runs 5.5..12.0 (a 2.5 s pause
+        // swallowed in front).
+        let mut t = one_word_transcript(5.5, 12.0);
+        let stats = trim_words_to_audio(&mut t, &synth_peaks(), 50);
+        let w = &t.segments[0].words[0];
+        assert!((w.start - 7.96).abs() < 0.03, "start {}", w.start);
+        assert!((w.end - 12.0).abs() < 0.03, "end {}", w.end);
+        assert_eq!(stats.trimmed, 1);
+        assert!(stats.seconds_removed > 2.4);
+    }
+
+    #[test]
+    fn trimming_never_extends_and_leaves_quiet_or_flat_words_alone() {
+        // Entirely inside the silence 5..8 s: no loud frame, left as is.
+        let mut t = one_word_transcript(5.5, 6.5);
+        trim_words_to_audio(&mut t, &synth_peaks(), 50);
+        assert_eq!((t.segments[0].words[0].start, t.segments[0].words[0].end), (5.5, 6.5));
+        // Inside speech: nothing to trim, never grown.
+        let mut t = one_word_transcript(9.0, 9.5);
+        trim_words_to_audio(&mut t, &synth_peaks(), 50);
+        assert_eq!((t.segments[0].words[0].start, t.segments[0].words[0].end), (9.0, 9.5));
+        // Flat dynamics: untouched.
+        let mut t = one_word_transcript(5.5, 12.0);
+        let stats = trim_words_to_audio(&mut t, &vec![40u8; 1000], 50);
+        assert_eq!(stats.trimmed, 0);
+    }
 
     /// 20s @ 50pps: speech at [0..5], [8..12], silence elsewhere, with a
     /// 100ms breath blip at 6.5s.

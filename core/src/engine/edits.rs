@@ -684,20 +684,31 @@ fn apply_op(
                 rough_cut_peaks,
                 crate::adapters::video::PEAKS_PER_SECOND,
             );
+            // Padding FIRST, on the cuts already there. The rough cut's own
+            // cuts carry their own margins (silences keep onset and tail
+            // guards; fillers are cut at quiet points), so padding them too
+            // would shrink each by start + end and leave slivers inside the
+            // words they remove.
+            let padding = prefs.default_padding;
+            if padding.start_s > 0.0 || padding.end_s > 0.0 {
+                project.timeline.apply_padding(padding.start_s, padding.end_s, padding.linked);
+            }
             // COMPOSE with the existing cut: AI exclusions are added on top of
             // whatever is already cut (manual or MCP edits survive — and the
-            // whole pass is still one undo step).
-            for c in outcome.timeline.clips.iter().filter(|c| !c.included) {
+            // whole pass is still one undo step). No cut shorter than
+            // MIN_CUT_S: that's a jump, not an edit.
+            for c in outcome
+                .timeline
+                .clips
+                .iter()
+                .filter(|c| !c.included && c.duration() >= detect::MIN_CUT_S)
+            {
                 project.timeline.cut_linked(
                     c.source_in,
                     c.source_out,
                     &c.linked_segment_ids,
                     ClipOrigin::AiCut,
                 );
-            }
-            let padding = prefs.default_padding;
-            if padding.start_s > 0.0 || padding.end_s > 0.0 {
-                project.timeline.apply_padding(padding.start_s, padding.end_s, padding.linked);
             }
         }
         EditOp::SetClips { clips, global_padding } => {

@@ -222,9 +222,13 @@ This package depends on the following crate modules but does not own them:
 - `apply_op`: `CutSegments` and `RestoreSegments` need a transcript (otherwise
   `InvalidArg`) and fail with `NotFound("segment {id}")` for an unknown
   segment.
-- `apply_op`: `RoughCut` only adds exclusions, tagged `ClipOrigin::AiCut`, on
-  top of the existing cut, then applies `prefs.default_padding` if it is
-  non-zero.
+- `apply_op`: `RoughCut` first applies `prefs.default_padding` (if non-zero)
+  to the cuts already there, then adds its own exclusions, tagged
+  `ClipOrigin::AiCut`, on top. Its cuts carry their own margins, so padding
+  them would shrink each into the word it removes; cuts shorter than
+  `detect::MIN_CUT_S` (0.2 s) are dropped.
+- `transcribe` trims every word to the audio (`detect::trim_words_to_audio`)
+  when raw peaks load, before saving.
 - `rough_cut_peaks` belongs to the whole Editor, not to one project. Any
   `apply_edit` takes it, whatever the op. Journal replays pass `None`.
 - `cut_confirmed_silences` returns `Ok(vec![])` when there is no transcript,

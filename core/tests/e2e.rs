@@ -1658,3 +1658,24 @@ async fn cut_passage_cuts_the_whole_span_with_clean_edges() {
     .await;
     assert!(refused.is_err() || refused.unwrap()["cut"]["seconds"].as_f64().unwrap() < 1800.0);
 }
+
+#[tokio::test]
+async fn the_rough_cut_never_leaves_a_sliver_cut() {
+    // Padding used to be applied after the rough cut, shrinking every cut by
+    // start + end padding: a 0.3 s "um" became a 0.01 s jump.
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "slivers", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    let cuts: Vec<f64> = tl["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["included"] == false)
+        .map(|c| c["source_out"].as_f64().unwrap() - c["source_in"].as_f64().unwrap())
+        .collect();
+    assert!(!cuts.is_empty(), "the demo transcript has things to cut");
+    assert!(cuts.iter().all(|&d| d >= 0.2 - 1e-6), "a cut under 0.2 s: {cuts:?}");
+}

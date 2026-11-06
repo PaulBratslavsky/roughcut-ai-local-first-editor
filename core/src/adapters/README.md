@@ -364,6 +364,14 @@ There are no child directories with contracts.
 - `WhisperRs` uses greedy decoding (`best_of=1`) with token timestamps, on
   `min(available_parallelism, 8)` threads. Its progress is mapped to the
   `0.25..0.98` band so the bar never moves backwards.
+- `WhisperRs` word timing: DTW alignment is on for known models
+  (`dtw_preset`, by file name: large-v3-turbo, large-v3, small, base, …), and
+  `tokens_to_words` joins tokens into words: a token with a leading space
+  starts a word, others (word pieces, contractions, punctuation) join it.
+  A word starts at its first token's DTW time (raw `t0` without DTW) and ends
+  where the next word starts; `Editor::transcribe` then trims words to the
+  audio (`detect::trim_words_to_audio`). For English it sets
+  `FILLER_PROMPT` as the initial prompt so whisper writes fillers down.
 - `MockTranscriber` emits progress 0.25, 0.5, 0.75, 1.0, sleeping 120 ms after each.
 
 ### Inference and embeddings
