@@ -65,7 +65,15 @@ export function PreviewPanel({
     if (!isTauri && !path.startsWith("http")) return null;
     return playbackSrc(path);
   }, [project?.media, assets?.playback_path]);
-  const ranges = useMemo<Range[]>(() => excludedRanges(timeline?.clips ?? []), [timeline]);
+  // What playback skips: the cuts, plus proposed cuts not skipped — so
+  // playing previews the edit as it would be once applied.
+  const ranges = useMemo<Range[]>(() => {
+    const cuts = excludedRanges(timeline?.clips ?? []);
+    const proposed = (project?.cut_proposal?.cuts ?? [])
+      .filter((c) => !c.skipped)
+      .map((c) => ({ start: c.start, end: c.end }));
+    return proposed.length ? [...cuts, ...proposed].sort((a, b) => a.start - b.start) : cuts;
+  }, [timeline, project?.cut_proposal]);
 
   const { onTimeUpdate } = usePlaybackEngine({ videoRef, src, ranges, duration });
   const [videoError, setVideoError] = useState<string | null>(null);

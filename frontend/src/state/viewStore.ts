@@ -106,6 +106,9 @@ export interface ViewState {
   clipDraft: Range[];
   /** The saved 9:16 clip whose crop the preview is framing (drag to move). */
   cropClipId: string | null;
+  /** The proposed cut the review bar is on (its number), shown in the
+   *  transcript and timeline. */
+  focusedCut: number | null;
 }
 
 export const viewStore = new Store<ViewState>({
@@ -126,6 +129,7 @@ export const viewStore = new Store<ViewState>({
   auditionIsCandidate: false,
   clipDraft: [],
   cropClipId: null,
+  focusedCut: null,
   ...loadPrefs(),
 });
 
@@ -248,6 +252,7 @@ export function scrubTo(t: number, max: number, ms: number): void {
 }
 
 export const setPlaying = (playing: boolean) => patch({ playing });
+export const setFocusedCut = (focusedCut: number | null) => patch({ focusedCut });
 export const togglePlaying = () => patch({ playing: !viewStore.state.playing });
 export const setPlaybackRate = (playbackRate: number) => patch({ playbackRate });
 export const setShowCuts = (showCuts: boolean) => {

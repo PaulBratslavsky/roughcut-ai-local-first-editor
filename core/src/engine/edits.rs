@@ -4,7 +4,7 @@
 //! notify. Undo/redo replay the same `apply_op` the edit used, so history can
 //! never drift from the original edit.
 
-use super::{EditOutcome, Editor, JournalEntry, ProjectState};
+use super::{EditOutcome, Editor, JournalEntry, ProjectState, RoughCutReport};
 use crate::detect;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent};
@@ -52,19 +52,7 @@ impl Editor {
             let before_clips = project.timeline.clips.clone();
             let before_padding = project.timeline.global_padding;
             let mut split_ids = vec![];
-            // Bounds validation for range ops BEFORE mutating: clamped
-            // garbage (start>end, both ends past EOF) used to no-op
-            // silently, journal a phantom entry, and report success — the
-            // exact false-positive a small model cannot repair from.
-            if let EditOp::CutRange { start, end } | EditOp::RestoreRange { start, end } = &op {
-                let dur = project.timeline.duration;
-                if *start >= *end || *start < 0.0 || *start >= dur {
-                    return Err(CoreError::InvalidArg(format!(
-                        "range {:.2}s–{:.2}s is invalid: need 0 <= start < end and start < {dur:.2}s (the source duration)",
-                        start, end
-                    )));
-                }
-            }
+            validate_range(&op, project.timeline.duration)?;
             apply_op(
                 project,
                 transcript.as_mut(),
@@ -150,6 +138,20 @@ impl Editor {
         project_id: Uuid,
         source: ActionSource,
     ) -> Result<Vec<EditAction>> {
+        let mut actions = vec![];
+        for r in self.confirmed_silences(project_id).await? {
+            if let Ok(outcome) =
+                self.apply_edit(project_id, EditOp::CutRange { start: r.start, end: r.end }, source)
+            {
+                actions.push(outcome.action);
+            }
+        }
+        Ok(actions)
+    }
+
+    /// The dead air the audio waveform confirms (see `cut_confirmed_silences`),
+    /// as cut ranges. Empty when there's no transcript, media or audio.
+    pub async fn confirmed_silences(&self, project_id: Uuid) -> Result<Vec<SourceRange>> {
         self.ensure_loaded(project_id)?;
         // Read inputs, then decode peaks OUTSIDE the state lock (slow).
         let (transcript, duration, media) = self.with_project(project_id, |p, t| {
@@ -162,7 +164,7 @@ impl Editor {
         let prefs = self.inner.store.load_preferences()?;
         let min = prefs.silence_min_duration_s.max(0.6);
         let cands = detect::silence_candidates(&t, duration, (min * 0.6).max(0.3));
-        let confirmed: Vec<_> = detect::refine_silences(
+        let confirmed: Vec<SourceRange> = detect::refine_silences(
             &cands,
             Some(&peaks),
             crate::adapters::video::PEAKS_PER_SECOND,
@@ -170,45 +172,65 @@ impl Editor {
         )
         .into_iter()
         .filter(|r| r.source == "confirmed")
+        .map(|r| SourceRange { start: r.start, end: r.end })
         .collect();
-        let mut actions = vec![];
-        for r in confirmed {
-            if let Ok(outcome) =
-                self.apply_edit(project_id, EditOp::CutRange { start: r.start, end: r.end }, source)
-            {
-                actions.push(outcome.action);
-            }
-        }
-        Ok(actions)
+        Ok(confirmed)
     }
 
+    /// The rough cut, as a proposal: works out the pauses and filler words to
+    /// cut (Tier 1) and flags repeated takes (Tier 2 suggestions), reporting
+    /// each step as progress, but cuts nothing unless `apply` — the user
+    /// reviews the proposal first (`apply_cut_proposal`). Replaces any pending
+    /// proposal. Transcribes first if needed.
     pub async fn generate_rough_cut(
         &self,
         project_id: Uuid,
         aggressiveness: Option<Aggressiveness>,
+        apply: bool,
         source: ActionSource,
-    ) -> Result<(EditAction, Timeline, u32, u32)> {
+    ) -> Result<RoughCutReport> {
+        use crate::events::ProgressTask;
         self.ensure_loaded(project_id)?;
         if self.get_transcript(project_id)?.is_none() {
             self.transcribe(project_id, None).await?;
         }
+        let step = |fraction: f64, message: &str| {
+            send(
+                &self.inner.sink,
+                CoreEvent::progress(ProgressTask::RoughCut, Some(project_id), fraction, message),
+            )
+        };
         let prefs = self.inner.store.load_preferences()?;
         let aggr = aggressiveness.unwrap_or(prefs.cut_aggressiveness);
-        // Auto-snapshot before the most destructive single action, so the
-        // pre-rough-cut state is always one click away.
-        let _ = self.create_checkpoint(project_id, "Before rough cut", true);
-        // Hybrid silences: stage raw audio peaks for the RoughCut apply
-        // (best effort — no ffmpeg means transcript-only detection).
+        // Filler and take flags first: they're analysis, not cuts, and the
+        // suggestions below read them.
+        step(0.05, "finding filler words and repeated takes");
+        self.annotate_transcript(project_id)?;
+        // Hybrid silences: real audio energy (best effort — no ffmpeg means
+        // transcript-only detection).
+        step(0.2, "reading the audio");
         let media = self.with_project(project_id, |p, _| Ok(p.media.clone()))?;
-        if let Some(media) = media {
-            let peaks = crate::adapters::video::load_raw_peaks(&media).await;
-            *self.inner.rough_cut_peaks.lock().unwrap() = peaks;
-        }
-        let outcome = self.apply_edit(project_id, EditOp::RoughCut { aggressiveness: aggr }, source)?;
-        let cut_count = outcome.timeline.cut_count;
-        // TIER 2 — compute reviewable suggestions (repeated takes + semantic
-        // repetition) and stash them on the project. Not applied: the user
-        // accepts/dismisses. Embeddings are best-effort (no index → takes only).
+        let peaks = match media {
+            Some(media) => crate::adapters::video::load_raw_peaks(&media).await,
+            None => None,
+        };
+        step(0.6, "finding pauses and checking each cut against the audio");
+        let title = match aggr {
+            Aggressiveness::Natural => "Rough cut",
+            Aggressiveness::Aggressive => "Rough cut (aggressive)",
+        };
+        let proposed = self.propose_ops(
+            project_id,
+            vec![EditOp::RoughCut { aggressiveness: aggr }],
+            title,
+            source,
+            peaks.as_deref(),
+            true,
+        )?;
+        // TIER 2 — reviewable suggestions (repeated takes + semantic
+        // repetition), stashed on the project. Embeddings are best-effort
+        // (no index → takes only).
+        step(0.85, "looking for repeated takes");
         let embeddings = self
             .inner
             .store
@@ -226,7 +248,23 @@ impl Editor {
                 self.inner.store.save_project(p)?;
             }
         }
-        Ok((outcome.action, outcome.timeline, cut_count, suggestion_count))
+        let mut report = RoughCutReport::from_cuts(proposed.proposal.as_ref().map(|p| p.cuts.as_slice()).unwrap_or(&[]));
+        report.suggestions = suggestion_count;
+        report.audio_checked = peaks.is_some();
+        if apply && proposed.proposal.is_some() {
+            let applied = self.apply_cut_proposal(project_id, source)?;
+            report.applied = true;
+            report.action = applied.action;
+        }
+        let done = if report.cut_count == 0 {
+            "nothing to cut".to_string()
+        } else if report.applied {
+            format!("{} cuts made", report.cut_count)
+        } else {
+            format!("{} cuts proposed — review them, then apply", report.cut_count)
+        };
+        step(1.0, &done);
+        Ok(report)
     }
 
     /// Read the pending rough-cut suggestions (Tier-2 flags).
@@ -578,9 +616,25 @@ impl Editor {
 
 // ------------------------------------------------------------- op helpers
 
+/// Bounds validation for range ops BEFORE mutating: clamped garbage
+/// (start>end, both ends past EOF) used to no-op silently, journal a phantom
+/// entry, and report success — the exact false-positive a small model cannot
+/// repair from.
+pub(super) fn validate_range(op: &EditOp, duration: f64) -> Result<()> {
+    if let EditOp::CutRange { start, end } | EditOp::RestoreRange { start, end } = op {
+        if *start >= *end || *start < 0.0 || *start >= duration {
+            return Err(CoreError::InvalidArg(format!(
+                "range {:.2}s–{:.2}s is invalid: need 0 <= start < end and start < {duration:.2}s (the source duration)",
+                start, end
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Frame-snap an op's time fields (frame-exact internally, seconds at the
 /// API edge) and fold linked padding. One place, every caller.
-fn normalize_op(op: EditOp, fps: f64) -> EditOp {
+pub(super) fn normalize_op(op: EditOp, fps: f64) -> EditOp {
     match op {
         EditOp::CutRange { start, end } => {
             EditOp::CutRange { start: snap_to_frame(start, fps), end: snap_to_frame(end, fps) }
@@ -624,8 +678,9 @@ fn resolve_segments(t: &Transcript, ids: &[Uuid]) -> Result<Vec<(Uuid, f64, f64)
 }
 
 /// Apply one op to the project — shared verbatim by apply_edit, undo, and
-/// redo, so history replay can never drift from the original edit.
-fn apply_op(
+/// redo, so history replay can never drift from the original edit (and by
+/// cut proposals, on a copy).
+pub(super) fn apply_op(
     project: &mut Project,
     transcript: Option<&mut Transcript>,
     op: &EditOp,
@@ -709,6 +764,11 @@ fn apply_op(
                     &c.linked_segment_ids,
                     ClipOrigin::AiCut,
                 );
+            }
+        }
+        EditOp::CutRanges { ranges } => {
+            for r in ranges {
+                project.timeline.set_range_included(r.start, r.end, false, ClipOrigin::AiCut);
             }
         }
         EditOp::SetClips { clips, global_padding } => {

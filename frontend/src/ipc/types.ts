@@ -21,6 +21,8 @@ export type { Aggressiveness } from "./generated/Aggressiveness";
 export type { MediaAssets } from "./generated/MediaAssets";
 export type { Layout } from "./generated/Layout";
 export type { CutSuggestion } from "./generated/CutSuggestion";
+export type { CutProposal } from "./generated/CutProposal";
+export type { ProposedCut } from "./generated/ProposedCut";
 export type { HistoryEntry } from "./generated/HistoryEntry";
 export type { History } from "./generated/History";
 export type { ThumbnailRef } from "./generated/ThumbnailRef";
@@ -79,7 +81,7 @@ export type AppEventName =
   | "progress" | "agent-step" | "timeline-changed" | "transcript-changed"
   | "projects-changed" | "media-assets-changed" | "confirm-request"
   | "terminal-output" | "terminal-exit" | "clips-changed" | "model-route"
-  | "project-opened";
+  | "project-opened" | "cut-proposal-changed";
 
 /** `model-route`: where the AI steps actually run changed (Hosted fell back
  *  to Local, came back, or the key was rejected) — the top-bar chip follows
@@ -143,7 +145,19 @@ export interface DurationCutReceipt {
 export interface EditResult { action: EditAction; timeline: Timeline }
 export interface SplitResult { clips: [Clip, Clip]; timeline: Timeline }
 export interface UndoResult { action: EditAction | null; timeline: Timeline }
-export interface RoughCutResult { timeline: Timeline; cut_count: number; suggestions: number }
+/** generate_rough_cut: what it proposed (or, with `apply`, cut). */
+export interface RoughCutResult {
+  cut_count: number; seconds: number;
+  pauses: number; pause_seconds: number;
+  fillers: number; filler_seconds: number;
+  words: number; word_seconds: number;
+  suggestions: number; audio_checked: boolean; applied: boolean;
+  action?: EditAction; note: string;
+}
+export interface ApplyProposalResult {
+  action: EditAction | null; applied: number; skipped: number; seconds: number;
+  cut_count: number; included_duration_s: number;
+}
 export interface InstructionResult { actions: EditAction[]; summary: string }
 export interface ExportResult { path: string }
 export interface ListProjectsResult { projects: ProjectSummary[]; trash: ProjectSummary[] }

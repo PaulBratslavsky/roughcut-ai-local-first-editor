@@ -8,7 +8,7 @@ use crate::detect;
 use crate::engine::Editor;
 use crate::error::{CoreError, Result};
 use crate::events::{send, CoreEvent};
-use crate::model::{ActionSource, EditAction, EditOp};
+use crate::model::{ActionSource, CutProposal, EditAction, EditOp};
 use crate::adapters::inference::{ChatMessage, ChatRequest};
 use crate::tools;
 use serde_json::{json, Value};
@@ -60,6 +60,19 @@ fn system_prompt(project_id: Uuid) -> String {
          Do NOT use story_edit, plan_duration_cut, or generate_rough_cut for a \
          silence request — those re-edit the narrative or also strip filler \
          words and alternate takes, which the user did not ask for. \
+         PROPOSED CUTS: your cut tools (cut_passage, cut_range, \
+         cut_by_transcript, apply_edits, remove_silences, generate_rough_cut, \
+         plan_duration_cut, story_edit) do NOT cut: they PROPOSE. The cuts are \
+         marked in the transcript and timeline, and the user plays them and \
+         presses Apply. Each receipt says what was proposed (proposed, \
+         proposed_seconds, the cuts' words) and included_duration_after_s, the \
+         length once applied. In your reply, say what you proposed in plain \
+         words (what and where) and that nothing is cut until they apply. Never \
+         propose the same cut twice. When the user says 'apply', 'yes', 'do \
+         it', 'go ahead' or similar about proposed cuts, call \
+         apply_cut_proposal. 'Keep the pauses' / 'don't cut the fillers' / \
+         'leave out cut 3' = skip_proposed_cuts (kind or cut_ids); 'never \
+         mind' = discard_cut_proposal; get_cut_proposal lists what is waiting. \
          ROUGH-CUT SUGGESTIONS: after a rough cut there may be pending \
          SUGGESTIONS (repeated takes, repetition) the user can review. To act \
          on them call get_suggestions, then accept_all_suggestions to apply \
@@ -72,18 +85,16 @@ fn system_prompt(project_id: Uuid) -> String {
          silences') — call story_edit ONCE with their words (add \
          target_duration_s if they named a length). It outlines the story, \
          cuts whole beats, verifies every cut point still reads, and repairs \
-         the flow. Do not attempt that pipeline yourself. Without a length, a \
-         big story edit comes back as a PROPOSAL and cuts nothing: do not make \
-         those cuts another way. When the user then confirms ('apply', 'yes', \
-         'go ahead'), call story_edit again with the same instruction and \
-         cut_beats set to the section numbers in that proposal (drop any the \
-         user wants kept). \
+         the flow. Do not attempt that pipeline yourself. It proposes the beats \
+         to cut like every cut tool: when the user confirms, call \
+         apply_cut_proposal (not story_edit again). \
          DURATION TARGETS: when the user names a length ('make it 20 minutes', \
          'cut it in half'), make ONE call: plan_duration_cut with \
-         target_duration_s and apply=true — it ranks, cuts, and reports the new \
-         included_duration_s in a single undoable step. Its receipt lists the \
-         passages it cut: in your reply, say in plain words what the main ones \
-         were about (with times) so the user knows what went. When that report is at \
+         target_duration_s and apply=true — it ranks the passages and proposes \
+         cutting the least central ones, reporting included_duration_after_s. \
+         Its receipt lists the proposed cuts: in your reply, say in plain words \
+         what the main ones are about (with times) so the user knows what would \
+         go. When that report is at \
          or below the target, the job is DONE: reply with your summary. Do not \
          ferry segment ids yourself, do not run generate_rough_cut before or \
          after (it only removes fillers and cannot hit a duration), and do not \
@@ -105,8 +116,9 @@ fn system_prompt(project_id: Uuid) -> String {
          tools. \
          ACT, don't ask: never reply with a request for clarification when the \
          conversation already names the work. If the user says 'apply the edits', \
-         'do it', 'yes', or similar, carry out the edits proposed earlier in this \
-         conversation by calling tools now. Only answer in plain text when the work \
+         'do it', 'yes', or similar and cuts are proposed, call \
+         apply_cut_proposal; otherwise carry out the edits discussed earlier in \
+         this conversation by calling tools now. Only answer in plain text when the work \
          is finished or genuinely impossible. \
          Always pass project_id=\"{project_id}\" to every tool."
     )
@@ -367,6 +379,9 @@ async fn run_instruction_logged(
     source: ActionSource,
     step: &mut applog::Step,
 ) -> Result<InstructionOutcome> {
+    if let Some(applied) = apply_on_yes(editor, project_id, instruction, source) {
+        return applied;
+    }
     // A conversation: once a step ran on Claude, the run never switches to
     // the local model half-way (see engine::route).
     let inference = editor.inference_conversation()?;
@@ -451,6 +466,8 @@ pub async fn run_instruction_with(
     let mut steered = false;
 
     let mut last_turn_error: Option<String> = None;
+    // What was proposed before this turn: the receipt reports what it added.
+    let proposal_at_start = editor.get_cut_proposal(project_id).ok().flatten();
     // Did a chat-driven RAW cut land this turn? (cut_by_transcript / cut_range
     // / apply_edits — NOT remove_silences, generate_rough_cut, or story_edit,
     // which are silence-only or run their own coherence pass.) Drives the
@@ -545,15 +562,17 @@ pub async fn run_instruction_with(
             } else {
                 None
             };
+            let proposed_note = proposal_receipt(editor, project_id, proposal_at_start.as_ref());
             summary = if actions.is_empty() {
-                match &last_turn_error {
-                    Some(err) => format!(
+                match (&last_turn_error, proposed_note) {
+                    (_, Some(note)) => format!("{text}\n\n{note}"),
+                    (Some(err), None) => format!(
                         "{text}\n\n[No changes were applied — the last edit failed: {err}]"
                     ),
-                    None if clips_this_turn => {
+                    (None, None) if clips_this_turn => {
                         format!("{text}\n\n[Main video unchanged — see the Clips tab.]")
                     }
-                    None => format!("{text}\n\n[No changes were applied.]"),
+                    (None, None) => format!("{text}\n\n[No changes were applied.]"),
                 }
             } else {
                 format!(
@@ -649,6 +668,14 @@ pub async fn run_instruction_with(
                                         json!((tl.included_duration() * 10.0).round() / 10.0),
                                     );
                                     obj.insert("source_duration_s".into(), json!(tl.duration));
+                                    // With cuts waiting, the length the user
+                                    // gets once they apply them.
+                                    if let Ok(Some(p)) = editor.get_cut_proposal(project_id) {
+                                        obj.insert(
+                                            "included_duration_after_s".into(),
+                                            json!(((tl.included_duration() - p.seconds()).max(0.0) * 10.0).round() / 10.0),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -771,6 +798,65 @@ pub async fn run_instruction_with(
     Ok(InstructionOutcome { actions, summary })
 }
 
+/// The receipt for cuts a turn proposed: what's waiting now, when the turn
+/// added to it. None when it proposed nothing.
+fn proposal_receipt(editor: &Editor, project_id: Uuid, at_start: Option<&CutProposal>) -> Option<String> {
+    let now = editor.get_cut_proposal(project_id).ok().flatten()?;
+    let unchanged = at_start.is_some_and(|p| p.id == now.id && p.cuts.len() == now.cuts.len());
+    if unchanged {
+        return None;
+    }
+    let n = now.cuts.iter().filter(|c| !c.skipped).count();
+    Some(format!(
+        "[Proposed {n} cut{} ({}) — marked in the transcript and timeline. Nothing is cut \
+         until you press Apply or say “apply”.]",
+        if n == 1 { "" } else { "s" },
+        crate::engine::fmt_seconds(now.seconds())
+    ))
+}
+
+/// "apply", "yes", "do it", "go ahead"… — a plain yes to proposed cuts. Short
+/// on purpose: "apply the cuts but keep the pauses" goes to the model.
+fn is_plain_yes(instruction: &str) -> bool {
+    let t: String = instruction
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    const YES: &[&str] = &[
+        "apply", "apply it", "apply them", "apply the cuts", "apply cuts", "apply the edits",
+        "apply all", "yes", "yes apply", "yes please", "yep", "ok", "okay", "ok apply",
+        "do it", "go ahead", "go", "sounds good", "looks good", "cut them", "make the cuts",
+        "make them", "confirm", "approved", "approve",
+    ];
+    YES.contains(&t.as_str())
+}
+
+/// A plain yes while cuts are proposed: apply them without a model turn (a
+/// small model can't get this wrong if it never sees it).
+fn apply_on_yes(editor: &Editor, project_id: Uuid, instruction: &str, source: ActionSource) -> Option<Result<InstructionOutcome>> {
+    if !is_plain_yes(instruction) {
+        return None;
+    }
+    editor.get_cut_proposal(project_id).ok().flatten()?;
+    emit_step(editor, project_id, 1, "tool_call", Some("apply_cut_proposal".into()), Some(json!({})), None, None);
+    Some(editor.apply_cut_proposal(project_id, source).map(|out| {
+        let summary = match out.action.clone() {
+            Some(_) => format!(
+                "Applied {} cut{} ({}){} — one undoable edit.",
+                out.applied,
+                if out.applied == 1 { "" } else { "s" },
+                crate::engine::fmt_seconds(out.seconds),
+                if out.skipped > 0 { format!(", left out the {} you skipped", out.skipped) } else { String::new() },
+            ),
+            None => "Every proposed cut was skipped, so nothing was cut. Cleared the proposal.".to_string(),
+        };
+        step_text(editor, project_id, 2, "final", summary.clone());
+        InstructionOutcome { actions: out.action.into_iter().collect(), summary }
+    }))
+}
+
 /// No local model server running: cover the common requests deterministically
 /// (find + cut) so the app still functions fully offline.
 async fn run_instruction_offline(
@@ -793,15 +879,26 @@ async fn run_instruction_offline(
         .iter()
         .any(|k| lower.contains(k));
     if wants_silence {
-        let actions = editor.cut_confirmed_silences(project_id, source).await?;
-        let summary = if actions.is_empty() {
-            "No audio-confirmed dead air found (or no audio to check against) — nothing removed."
+        let ops: Vec<EditOp> = editor
+            .confirmed_silences(project_id)
+            .await?
+            .into_iter()
+            .map(|r| EditOp::CutRange { start: r.start, end: r.end })
+            .collect();
+        let at_start = editor.get_cut_proposal(project_id)?;
+        let added = editor.propose_ops(project_id, ops, "Remove pauses", source, None, false)?.added;
+        let summary = if added.is_empty() {
+            "No audio-confirmed dead air found (or no audio to check against) — nothing to cut."
                 .to_string()
         } else {
-            format!("Removed {} audio-confirmed silence range(s); words and order untouched.", actions.len())
+            format!(
+                "Found {} pause(s) the audio confirms; words and order untouched.\n\n{}",
+                added.len(),
+                proposal_receipt(editor, project_id, at_start.as_ref()).unwrap_or_default()
+            )
         };
         step_text(editor, project_id, 1, "final", summary.clone());
-        return Ok(InstructionOutcome { actions, summary });
+        return Ok(InstructionOutcome { actions: vec![], summary });
     }
     // Shorts BEFORE cut: "cut me a few shorts about X" must find clips, not
     // cut a sentence out of the main video.
@@ -867,12 +964,15 @@ async fn run_instruction_offline(
         None,
         None,
     );
-    let outcome =
-        editor.apply_edit(project_id, EditOp::CutSegments { segment_ids: target }, source)?;
-    let action = outcome.action;
-    let summary = format!("Cut the best-matching segment for: “{instruction}”. Undo if it picked wrong.");
+    let at_start = editor.get_cut_proposal(project_id)?;
+    editor.propose_ops(project_id, vec![EditOp::CutSegments { segment_ids: target }], "Chat", source, None, false)?;
+    let summary = format!(
+        "Proposed cutting the best-matching segment for: “{instruction}”. Play it before applying — \
+         offline matching is by keywords.\n\n{}",
+        proposal_receipt(editor, project_id, at_start.as_ref()).unwrap_or_default()
+    );
     step_text(editor, project_id, 2, "final", summary.clone());
-    Ok(InstructionOutcome { actions: vec![action], summary })
+    Ok(InstructionOutcome { actions: vec![], summary })
 }
 
 /// A request for short-form clips: "shorts", "reels", "tiktoks", or "a short

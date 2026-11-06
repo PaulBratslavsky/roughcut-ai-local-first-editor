@@ -20,6 +20,7 @@ import type {
   Preferences,
   Project,
   RoughCutResult,
+  ApplyProposalResult,
   CutSuggestion,
   SplitResult,
   Timeline,
@@ -111,6 +112,10 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
     void queryClient.invalidateQueries({ queryKey: ["suggestions"] });
     void queryClient.invalidateQueries({ queryKey: ["history"] });
   });
+  // The cut proposal lives on the project.
+  const offProposal = onAppEvent("cut-proposal-changed", () => {
+    void queryClient.invalidateQueries({ queryKey: ["project"] });
+  });
   const offTranscript = onAppEvent("transcript-changed", () => {
     void queryClient.invalidateQueries({ queryKey: ["transcript"] });
     // Derived media (peaks/thumbnails/playable remux) lands around the same
@@ -133,6 +138,7 @@ export function invalidateOnCoreEvents(queryClient: QueryClient): () => void {
   return () => {
     offTimeline();
     offTranscript();
+    offProposal();
     offProjects();
     offAssets();
     offClips();
@@ -268,6 +274,30 @@ export interface RoughCutArgs extends Record<string, unknown> {
 
 export function useGenerateRoughCut() {
   return useEditMutation<RoughCutArgs, RoughCutResult>("generate_rough_cut", ["timeline", "project", "suggestions"]);
+}
+
+/** Cut proposals: apply (one undoable edit), discard, skip/unskip. */
+export function useApplyCutProposal() {
+  return useEditMutation<{ project_id: string }, ApplyProposalResult>("apply_cut_proposal", [
+    "timeline",
+    "project",
+    "history",
+  ]);
+}
+
+export function useDiscardCutProposal() {
+  return useEditMutation<{ project_id: string }, { discarded: boolean }>("discard_cut_proposal", ["project"]);
+}
+
+export interface SkipCutsArgs extends Record<string, unknown> {
+  project_id: string;
+  cut_ids?: number[];
+  kind?: "pause" | "filler" | "words";
+  skip?: boolean;
+}
+
+export function useSkipProposedCuts() {
+  return useEditMutation<SkipCutsArgs, { changed: number; to_apply: number }>("skip_proposed_cuts", ["project"]);
 }
 
 import type { History } from "./generated/History";

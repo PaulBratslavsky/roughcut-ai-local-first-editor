@@ -30,10 +30,17 @@ async fn poc_loop_through_the_tool_registry() {
     let segments = transcript["segments"].as_array().unwrap();
     assert!(segments.len() > 10, "expected a real transcript");
 
-    // 2. One-click rough cut: silences + fillers + takes removed, cut count shown.
+    // 2. One-click rough cut: silences + fillers PROPOSED, nothing cut until
+    // the user applies them.
     let rough = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
     let cut_count = rough["cut_count"].as_u64().unwrap();
-    assert!(cut_count >= 5, "rough cut should make several cuts, got {cut_count}");
+    assert!(cut_count >= 5, "rough cut should propose several cuts, got {cut_count}");
+    assert_eq!(rough["applied"], false);
+    let untouched = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(untouched["cut_count"], 0, "proposing must not cut");
+    let applied = call(&editor, "apply_cut_proposal", json!({ "project_id": pid })).await;
+    assert_eq!(applied["applied"].as_u64().unwrap(), cut_count);
+    assert!(applied["cut_count"].as_u64().unwrap() >= 1);
 
     // 3. Edit by transcript: delete a sentence → video cuts to match.
     let victim = segments
@@ -87,18 +94,28 @@ async fn poc_loop_through_the_tool_registry() {
     .await;
     assert_eq!(padded["timeline"]["global_padding"]["start_s"].as_f64().unwrap(), 0.15);
 
-    // 6. Chat instruction → offline agent finds + cuts → undoable.
+    // 6. Chat instruction → offline agent finds + PROPOSES; "apply" makes
+    // the cut → undoable.
+    let before_chat = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
     let outcome = call(
         &editor,
         "apply_instruction",
         json!({ "project_id": pid, "instruction": "cut the part where I ramble about hiking on Saturday" }),
     )
     .await;
-    assert!(outcome["summary"].as_str().unwrap().len() > 5);
+    assert!(outcome["summary"].as_str().unwrap().contains("Proposed"), "{}", outcome["summary"]);
+    assert!(outcome["actions"].as_array().unwrap().is_empty(), "the chat proposes, it doesn't cut");
+    let after_chat = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(before_chat["clips"], after_chat["clips"], "proposing changed the timeline");
+    let waiting = call(&editor, "get_cut_proposal", json!({ "project_id": pid })).await;
+    assert!(waiting["proposal"]["total"].as_u64().unwrap() >= 1);
+    let outcome = call(&editor, "apply_instruction", json!({ "project_id": pid, "instruction": "Apply!" })).await;
     // The chat's edits are the assistant's, not the user's clicks — even
     // though the UI started the run.
     let chat_edits = outcome["actions"].as_array().unwrap();
-    assert!(!chat_edits.is_empty(), "the offline agent should cut the hiking tangent");
+    assert!(!chat_edits.is_empty(), "\"apply\" should make the proposed cut");
+    let waiting = call(&editor, "get_cut_proposal", json!({ "project_id": pid })).await;
+    assert!(waiting["proposal"].is_null(), "applying clears the proposal");
     for action in chat_edits {
         assert_eq!(action["source"], "local_ai", "chat edit credited to {}", action["source"]);
     }
@@ -322,8 +339,10 @@ async fn apply_edits_batches_ops_in_one_call() {
     assert!(result["actions"][0].get("inverse").is_none(), "journal stays internal");
 
     // A rough-cut pass COMPOSES: the manual cuts above survive it.
-    let rough = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
-    let clips = rough["timeline"]["clips"].as_array().unwrap();
+    let rough = call(&editor, "generate_rough_cut", json!({ "project_id": pid, "apply": true })).await;
+    assert_eq!(rough["applied"], true);
+    let after_rough = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    let clips = after_rough["clips"].as_array().unwrap();
     // (padding breathes gap edges, so check the midpoints, not the bounds)
     let still_cut = |mid: f64, min_len: f64| {
         clips.iter().any(|c| {
@@ -335,7 +354,7 @@ async fn apply_edits_batches_ops_in_one_call() {
     };
     assert!(still_cut(12.5, 4.0), "manual cut 10-15 wiped by rough cut");
     assert!(still_cut(42.0, 3.0), "manual cut 40-44 wiped by rough cut");
-    assert!(rough["cut_count"].as_u64().unwrap() > 2, "AI cuts should add to manual ones");
+    assert!(after_rough["cut_count"].as_u64().unwrap() > 2, "AI cuts should add to manual ones");
 
     // Save-as: duplicate carries the cut state, original untouched.
     let copy = call(
@@ -348,7 +367,7 @@ async fn apply_edits_batches_ops_in_one_call() {
     // Carries the full post-rough-cut state (manual + AI cuts).
     assert_eq!(
         copy["timeline"]["cut_count"].as_u64().unwrap(),
-        rough["cut_count"].as_u64().unwrap()
+        after_rough["cut_count"].as_u64().unwrap()
     );
     // Each op is its own undo step: the rough cut undoes first, then padding.
     let undone = call(&editor, "undo", json!({ "project_id": pid })).await;
@@ -1668,6 +1687,7 @@ async fn the_rough_cut_never_leaves_a_sliver_cut() {
     let pid = p["id"].as_str().unwrap().to_string();
     call(&editor, "transcribe", json!({ "project_id": pid })).await;
     call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    call(&editor, "apply_cut_proposal", json!({ "project_id": pid })).await;
     let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
     let cuts: Vec<f64> = tl["clips"]
         .as_array()
@@ -1772,4 +1792,91 @@ async fn retime_words_needs_the_audio_and_changes_nothing_without_it() {
     // The in-app agent isn't offered it.
     let agent = Caller::Agent { attribute_to: ActionSource::LocalAi };
     assert!(!tools::defs(agent).iter().any(|d| d.name == "retime_words"));
+}
+
+#[tokio::test]
+async fn proposed_cuts_change_nothing_until_applied_and_apply_as_one_undo() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "review", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let rough = call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    let total = rough["cut_count"].as_u64().unwrap();
+    assert!(total >= 3 && rough["pauses"].as_u64().unwrap() >= 1, "{rough}");
+    let history = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(history["entries"].as_array().unwrap().len(), 0, "proposing is not an edit");
+
+    // The proposal is on the project, in source order, numbered.
+    let proj = call(&editor, "open_project", json!({ "project_id": pid })).await;
+    let cuts = proj["cut_proposal"]["cuts"].as_array().unwrap().clone();
+    assert_eq!(cuts.len() as u64, total);
+    assert!(cuts.windows(2).all(|w| w[0]["start"].as_f64() <= w[1]["start"].as_f64()));
+
+    // Keep the pauses: skipped cuts aren't made.
+    let skipped = call(&editor, "skip_proposed_cuts", json!({ "project_id": pid, "kind": "pause" })).await;
+    let pauses = rough["pauses"].as_u64().unwrap();
+    assert_eq!(skipped["changed"].as_u64().unwrap(), pauses);
+    let applied = call(&editor, "apply_cut_proposal", json!({ "project_id": pid })).await;
+    assert_eq!(applied["applied"].as_u64().unwrap(), total - pauses);
+    assert_eq!(applied["skipped"].as_u64().unwrap(), pauses);
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    for c in cuts.iter().filter(|c| c["kind"] == "pause") {
+        let mid = (c["start"].as_f64().unwrap() + c["end"].as_f64().unwrap()) / 2.0;
+        let kept = tl["clips"].as_array().unwrap().iter().any(|k| {
+            k["included"] == true && k["source_in"].as_f64().unwrap() <= mid && k["source_out"].as_f64().unwrap() >= mid
+        });
+        assert!(kept, "skipped pause at {mid} was cut");
+    }
+    // One undo takes the whole proposal back.
+    call(&editor, "undo", json!({ "project_id": pid })).await;
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(tl["cut_count"], 0);
+
+    // Discard drops a proposal without cutting.
+    call(&editor, "generate_rough_cut", json!({ "project_id": pid })).await;
+    let d = call(&editor, "discard_cut_proposal", json!({ "project_id": pid })).await;
+    assert_eq!(d["discarded"], true);
+    let waiting = call(&editor, "get_cut_proposal", json!({ "project_id": pid })).await;
+    assert!(waiting["proposal"].is_null());
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(tl["cut_count"], 0);
+}
+
+#[tokio::test]
+async fn the_chat_proposes_its_cuts_and_a_restore_takes_them_back() {
+    let editor = Editor::test_instance();
+    let p = call(&editor, "create_project", json!({ "name": "chat-review", "file_path": "/demo/footage.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    call(&editor, "transcribe", json!({ "project_id": pid })).await;
+    let chat = Caller::Agent { attribute_to: ActionSource::LocalAi };
+    let as_chat = |name: &'static str, args: Value| {
+        let editor = editor.clone();
+        async move { tools::dispatch(&editor, name, &args, chat).await.unwrap_or_else(|e| panic!("{name}: {e}")) }
+    };
+    let r = as_chat("cut_range", json!({ "project_id": pid, "start": 10.0, "end": 15.0 })).await;
+    assert_eq!(r["proposed"], 1, "{r}");
+    let r = as_chat("apply_edits", json!({ "project_id": pid, "edits": [
+        { "type": "cut_range", "start": 20.0, "end": 22.0 },
+        { "type": "cut_range", "start": 12.0, "end": 14.0 }
+    ] })).await;
+    assert_eq!(r["proposed"], 1, "only what isn't already proposed is added: {r}");
+    assert_eq!(r["pending_cuts"], 2);
+    let tl = call(&editor, "get_timeline", json!({ "project_id": pid })).await;
+    assert_eq!(tl["cut_count"], 0, "the chat proposed, it didn't cut");
+
+    // "Keep that part" drops the proposed cut, and journals nothing.
+    let r = as_chat("restore_range", json!({ "project_id": pid, "start": 19.0, "end": 23.0 })).await;
+    assert_eq!(r["proposed_cuts_dropped"], 1);
+    let history = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(history["entries"].as_array().unwrap().len(), 0);
+
+    // The UI and MCP clients still cut at once.
+    let r = call(&editor, "cut_range", json!({ "project_id": pid, "start": 40.0, "end": 41.0 })).await;
+    assert!(r["action"].is_object());
+    let applied = as_chat("apply_cut_proposal", json!({ "project_id": pid })).await;
+    assert_eq!(applied["applied"], 1);
+    let history = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    let newest = &history["entries"][history["current_index"].as_u64().unwrap() as usize];
+    assert_eq!(newest["source"], "local_ai");
+    assert!(newest["description"].as_str().unwrap().starts_with("Chat: 1 cut"), "{newest}");
 }

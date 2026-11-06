@@ -20,6 +20,7 @@ share the `Inner` state defined in `mod.rs`.
 | `projects.rs` | Project lifecycle, trash, read accessors, preferences, and layout/audio offset                          |
 | `media.rs`    | Media import/append/screen media, transcription, and the background cleanup and index pass             |
 | `edits.rs`    | The mutation seam: `apply_edit`, journal, undo/redo/history, checkpoints, rough cut, and suggestions    |
+| `proposals.rs` | Cut proposals: cuts worked out but not made (`propose_ops`), applied as one edit, skipped or discarded |
 | `clips.rs`    | Saved clips, clip candidates, and the 9:16 face-centred crop                                            |
 | `semantic.rs` | Embedding index, semantic and hybrid search, and the duration-cut planner                               |
 | `confirm.rs`  | User approval of destructive ops that an external MCP client requests                                   |
@@ -116,7 +117,8 @@ This package depends on the following crate modules but does not own them:
 | `apply_edit_labeled(id, op, source, label: Option<String>)`                                             | Runs normalize, validate, apply, journal, persist, notify. `label` overrides the history description.      |
 | `annotate_transcript(id) -> Result<(detect::FillerFindings, Vec<detect::TakeGroup>)>`                   | Persists filler and repeated-take flags on the transcript. Not journaled.                                  |
 | `async cut_confirmed_silences(id, source) -> Result<Vec<EditAction>>`                                   | Cuts only the silences that the audio waveform confirms, with one `CutRange` edit per silence.            |
-| `async generate_rough_cut(id, Option<Aggressiveness>, source) -> Result<(EditAction, Timeline, u32, u32)>` | Returns `(action, timeline, cut_count, suggestion_count)`. Transcribes first if needed.                  |
+| `async confirmed_silences(id) -> Result<Vec<SourceRange>>`                                              | The same silences as ranges, without cutting (the chat proposes them).                                     |
+| `async generate_rough_cut(id, Option<Aggressiveness>, apply: bool, source) -> Result<RoughCutReport>`   | Annotates fillers/takes, reads the audio, PROPOSES the rough cut (`propose_ops` with `EditOp::RoughCut`, replacing a pending proposal), stores suggestions; progress events per step. `apply` also applies it. Transcribes first if needed. |
 | `get_suggestions`, `accept_suggestion`, `accept_all_suggestions`, `dismiss_suggestion`                  | Review the Tier-2 `CutSuggestion`s. Accepting applies them as `CutSegments`.                               |
 | `undo(id)`, `redo(id)` -> `Result<(Option<EditAction>, Timeline)>`                                      | Step through the journal one entry at a time.                                                              |
 | `undo_actions(id, ids) -> Result<(usize, Timeline)>`                                                    | Undoes one chat turn's actions, but only if they are still the newest entries.                             |
@@ -235,9 +237,25 @@ This package depends on the following crate modules but does not own them:
 - `cut_confirmed_silences` returns `Ok(vec![])` when there is no transcript,
   no media, or no raw peaks. It cuts only `refine_silences` results with
   `source == "confirmed"`, using `min = max(prefs.silence_min_duration_s, 0.6)`.
-- `generate_rough_cut` first takes an automatic `"Before rough cut"`
-  checkpoint and ignores any failure to do so. Suggestions are stored and are
-  never applied automatically.
+- `generate_rough_cut` cuts nothing unless `apply`; the automatic
+  `"Before …"` checkpoint is taken by `apply_cut_proposal`, which ignores any
+  failure to take it. Suggestions are stored and are never applied
+  automatically.
+
+### Cut proposals (`proposals.rs`)
+
+| Method | Notes |
+| --- | --- |
+| `propose_ops(id, ops, title, source, peaks: Option<&[u8]>, replace: bool) -> Result<ProposeOutcome>` | Runs `ops` with the same `apply_op` an edit uses, on a copy of the project (the live timeline plus the pending proposal's cuts), and proposes every range they newly take out (`newly_cut`; under 0.04 s dropped). Each cut is classed by the words inside it: `pause` (none), `filler` (all `detect::is_filler_word`) or `words`. `replace` starts a fresh proposal; otherwise new cuts join the pending one (titles joined with " + "). Restores, trims and padding in `ops` have no effect. Saves the project, sends `CutProposalChanged`. |
+| `apply_cut_proposal(id, source) -> Result<AppliedProposal>` | Auto checkpoint `"Before {title}"`, then the cuts not skipped as ONE `EditOp::CutRanges` edit labeled `"{title}: N cuts (M:SS)"`; clears the proposal. No cut when every cut is skipped. |
+| `discard_cut_proposal(id) -> Result<bool>`, `get_cut_proposal(id)` | Drop it / read it. |
+| `skip_proposed_cuts(id, ids, kind, skip) -> Result<(CutProposal, usize)>` | Marks cuts left out (or back in) by number, kind, both, or all. |
+| `drop_proposed_cuts_in(id, start, end) -> Result<usize>` | Removes proposed cuts overlapping a range (a chat restore). |
+
+- The tool layer decides who proposes: `generate_rough_cut` always (unless
+  `apply`, which the in-app chat can't use); every other cut tool only for
+  `ActionSource::LocalAi` (the in-app chat). See `tools.rs::proposes`.
+- `RoughCutReport::from_cuts` counts cuts and seconds by kind.
 
 ### Checkpoints and suggestions (`edits.rs`)
 
@@ -441,6 +459,7 @@ This package depends on the following crate modules but does not own them:
     `TimelineChanged`, and `transcribe` clears them and sends only
     `TranscriptChanged`.
   - `TranscriptChanged`: transcribe, annotate, and segment text updates.
+  - `CutProposalChanged`: a proposal made, changed, applied or discarded.
   - `ProjectsChanged`: create, duplicate, delete, and restore.
   - `ClipsChanged`: clip and candidate mutations.
   - `MediaAssetsChanged`: `append_media` and the background playable copy

@@ -2288,3 +2288,120 @@ input, select { font: inherit; }
 }
 .models-console { margin-left: auto; font-size: 12px; color: var(--text-muted); text-decoration: underline; }
 .models-console:hover { color: var(--text); }
+
+/* ---- proposed cuts: the review bar + marks (red = what Apply takes out) ---- */
+.cut-review {
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, var(--panel));
+  font-size: 12px;
+  padding: 6px 10px 6px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cut-review-head,
+.cut-review-kinds,
+.cut-review-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.cut-review-spacer { flex: 1; }
+.cut-review-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  padding: 1px 6px;
+}
+.cut-review-title { font-weight: 700; }
+.cut-review-sum { color: var(--text-muted); }
+.cut-review .ghost-btn,
+.cut-review .primary-btn { padding: 3px 10px; font-size: 12px; }
+.cut-kind {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  padding: 2px 8px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.cut-kind:hover:not(:disabled) { border-color: var(--text); }
+.cut-kind.off { color: var(--text-muted); text-decoration: line-through; }
+.cut-kind-box {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  line-height: 11px;
+  text-align: center;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  color: var(--danger);
+}
+.cut-kind.off .cut-kind-box { color: var(--text-muted); }
+.cut-review-nav { color: var(--text); }
+.cut-review-nav.skipped .cut-review-what { color: var(--text-muted); }
+.cut-review-pos { color: var(--text-muted); min-width: 5ch; text-align: right; }
+.cut-review-at {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+.cut-review-what {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cut-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-soft);
+}
+.cut-review-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.cut-review-list li.focused { background: var(--accent-soft); }
+.cut-review-list li.skipped .cut-review-what { color: var(--text-muted); text-decoration: line-through; }
+.cut-review-list .ghost-btn { padding: 0 8px; }
+.cut-review-kind { color: var(--text-muted); width: 6ch; }
+.cut-review-error { color: var(--danger); }
+
+.word.proposedw {
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+  text-decoration-thickness: 2px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.word.focusw { outline: 1px solid var(--danger); outline-offset: 1px; }
+.proposed-pause {
+  font: inherit;
+  font-size: 10px;
+  color: var(--danger);
+  background: transparent;
+  border: 1px dashed var(--danger);
+  padding: 0 4px;
+  margin: 0 4px 0 0;
+  vertical-align: 1px;
+  cursor: pointer;
+}
+.proposed-pause.focus { border-style: solid; background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.segment.silence.proposed .silence-chip { color: var(--danger); border-color: var(--danger); text-decoration: line-through; }

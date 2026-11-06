@@ -491,6 +491,8 @@ pub enum EditOp {
     SplitClip { clip_id: Uuid, at_time: f64 },
     SetGlobalPadding { start_s: f64, end_s: f64, linked: bool },
     RoughCut { aggressiveness: Aggressiveness },
+    /// Several ranges cut as one edit: an applied cut proposal.
+    CutRanges { ranges: Vec<SourceRange> },
     /// Restore a prior clip arrangement wholesale — the universal exact
     /// inverse (and exact redo) for every other op.
     SetClips { clips: Vec<Clip>, global_padding: Padding },
@@ -504,7 +506,7 @@ impl EditOp {
             EditOp::TrimClip { .. } => "trim",
             EditOp::SplitClip { .. } => "split",
             EditOp::SetGlobalPadding { .. } => "pad",
-            EditOp::RoughCut { .. } => "ai_batch",
+            EditOp::RoughCut { .. } | EditOp::CutRanges { .. } => "ai_batch",
             EditOp::SetClips { .. } => "set_clips",
         }
     }
@@ -527,6 +529,7 @@ impl EditOp {
                 format!("Set global padding start {start_s:.2}s / end {end_s:.2}s")
             }
             EditOp::RoughCut { .. } => "AI rough cut (silences, fillers, takes)".into(),
+            EditOp::CutRanges { ranges } => format!("Cut {} range(s)", ranges.len()),
             EditOp::SetClips { .. } => "Restore previous cut state".into(),
         }
     }
@@ -776,6 +779,56 @@ pub struct Project {
     /// clips until the user saves one; replaced on each run.
     #[serde(default, alias = "short_candidates")]
     pub clip_candidates: Vec<ClipCandidate>,
+    /// Cuts worked out but not made: the Rough cut button and the in-app chat
+    /// propose, and nothing changes until the user applies them. One at a
+    /// time; see [`CutProposal`].
+    #[serde(default)]
+    pub cut_proposal: Option<CutProposal>,
+}
+
+/// Cuts worked out but not made yet. The Rough cut button and the in-app
+/// chat's cut tools put their cuts here instead of on the timeline; the
+/// review bar lists them, the player can play the video as if they were made,
+/// and `apply_cut_proposal` makes the ones not skipped as one undoable edit.
+/// Source time, relative to the timeline as it is (a proposal never undoes a
+/// cut that's already there).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CutProposal {
+    pub id: Uuid,
+    /// What asked for these cuts: "Rough cut", "Chat", "Remove pauses".
+    pub title: String,
+    pub source: ActionSource,
+    pub created_at: DateTime<Utc>,
+    /// In source order.
+    pub cuts: Vec<ProposedCut>,
+}
+
+/// One cut in a [`CutProposal`].
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedCut {
+    /// 1, 2, 3… within the proposal; what `skip_proposed_cuts` takes.
+    pub id: u32,
+    pub start: f64,
+    pub end: f64,
+    /// "pause" (no words inside), "filler" (only filler words: um, uh…) or
+    /// "words".
+    pub kind: String,
+    /// The words it removes, shortened; empty for a pause.
+    pub text: String,
+    /// Left out: applying the proposal won't make this cut.
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+impl CutProposal {
+    /// Seconds the cuts that aren't skipped remove.
+    pub fn seconds(&self) -> f64 {
+        self.cuts.iter().filter(|c| !c.skipped).map(|c| c.end - c.start).sum()
+    }
 }
 
 /// A span of the source media, seconds.
@@ -1124,6 +1177,7 @@ impl Project {
             checkpoints: vec![],
             saved_clips: vec![],
             clip_candidates: vec![],
+            cut_proposal: None,
         }
     }
 

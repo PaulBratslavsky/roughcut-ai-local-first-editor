@@ -63,9 +63,9 @@ examples in [`core/examples/`](../examples/README.md).
 | `demo.rs` | Fixture transcript for demo mode and tests | `fixture_transcript` |
 | `secrets.rs` | The Hosted API key in the OS key store (Keychain / Credential Manager / kernel keyring) | `SecretStore`, `KeyringStore`, `MemoryStore`, `remove_legacy_plaintext` |
 
-The registry (`tools.rs:REGISTRY`) has 65 rows. `Caller::can_use` shows the UI
-all 65, MCP clients 64 (every row except the one `meta` row,
-`apply_instruction`), and the agent loop the 28 rows marked `agent`. 19 rows
+The registry (`tools.rs:REGISTRY`) has 71 rows. `Caller::can_use` shows the UI
+all 71, MCP clients 70 (every row except the one `meta` row,
+`apply_instruction`), and the agent loop the 33 rows marked `agent`. 21 rows
 are `mutating`. The LOCAL / HOSTED switch and its key are not registry rows:
 they are Tauri commands (ADR-0004, ADR-0007). The names and contracts are documented
 in `docs/tool-api.md`.
@@ -81,6 +81,12 @@ in `docs/tool-api.md`.
   Only `string`, `number`, `boolean`, `array`, and `object` types are checked.
 - Handlers receive `caller.source()`, so edits are attributed to the caller;
   `Agent { attribute_to }` separates attribution from permission.
+- The in-app chat's cuts are proposed, not made (`proposes`: source
+  `LocalAi`): `cut_range`, `cut_passage`, `cut_by_transcript`, all-cut
+  `apply_edits`, `remove_silences`, `plan_duration_cut` with `apply`, and
+  `story_edit` put their cuts in the project's cut proposal; its restores also
+  drop proposed cuts. `generate_rough_cut` proposes for every caller unless
+  `apply` (ignored for the chat). UI clicks and MCP clients cut at once.
 - `export`, `export_clip`, `export_clips` (once per batch), and `delete_project` ask the user
   (`Editor::request_confirmation`) when the source is `ActionSource::McpClient`.
 - Adding a tool means adding a row. `core/tests/doc_parity.rs` requires every

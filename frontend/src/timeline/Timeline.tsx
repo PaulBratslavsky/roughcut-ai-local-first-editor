@@ -5,7 +5,7 @@
 // wheel to zoom around the playhead / horizontal scroll.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCutRange, useMediaAssets, useRestoreRange, useSplitClip, useTimeline, useTrimClip } from "../ipc/queries";
+import { useCutRange, useMediaAssets, useProject, useRestoreRange, useSplitClip, useTimeline, useTrimClip } from "../ipc/queries";
 import type { Clip } from "../ipc/types";
 import { loadTimelineAssets, type TimelineAssets } from "./assets";
 import {
@@ -32,7 +32,14 @@ interface DragState {
 
 export function Timeline({ projectId }: { projectId: string }) {
   const { data: timeline } = useTimeline(projectId);
+  const { data: project } = useProject(projectId);
   const { data: assetMeta, isLoading: assetsGenerating } = useMediaAssets(projectId);
+  // Proposed cuts (skipped ones aren't drawn), read by the draw loop.
+  const proposedRef = useRef<{ id: number; start: number; end: number }[]>([]);
+  proposedRef.current = useMemo(
+    () => (project?.cut_proposal?.cuts ?? []).filter((c) => !c.skipped),
+    [project?.cut_proposal],
+  );
   const trimClip = useTrimClip();
   const cutRange = useCutRange();
   const restoreRange = useRestoreRange();
@@ -174,6 +181,7 @@ export function Timeline({ projectId }: { projectId: string }) {
         hoverEdge: hoverEdgeRef.current,
         drag: dragRef.current?.kind === "trim" ? dragRef.current.preview : null,
         assets: assetsRef.current,
+        proposed: proposedRef.current.map((c) => ({ start: c.start, end: c.end, focused: c.id === s.focusedCut })),
       });
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -190,7 +198,7 @@ export function Timeline({ projectId }: { projectId: string }) {
   useEffect(() => {
     // nudge the store so the rAF loop sees a change
     viewStore.setState((s) => ({ ...s }));
-  }, [timeline, assets]);
+  }, [timeline, assets, project?.cut_proposal]);
 
   // --- helpers ---------------------------------------------------------------
   const currentLayout = () => {

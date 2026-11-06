@@ -76,6 +76,8 @@ function summarizeCall(tool: string, args?: Record<string, unknown>): string {
       return `padding ${Number(a.start_s ?? 0)}s around every cut`;
     case "generate_rough_cut":
       return `aggressiveness: ${String(a.aggressiveness ?? "default")}`;
+    case "skip_proposed_cuts":
+      return `${a.skip === false ? "cutting again" : "keeping"} ${a.kind ? `the ${String(a.kind)} cuts` : Array.isArray(a.cut_ids) ? `cut ${(a.cut_ids as number[]).join(", ")}` : "every cut"}`;
     case "read_transcript":
       return `reading segments ${Number(a.offset ?? 0)}–${Number(a.offset ?? 0) + Number(a.limit ?? 50)}`;
     default: {
@@ -90,6 +92,19 @@ function summarizeResult(result?: Record<string, unknown>): string | null {
   if (!result) return null;
   const r = result as Record<string, any>;
   if (r.error) return `failed: ${String(r.error.message ?? r.error)}`;
+  // Proposals: nothing was cut yet.
+  if (typeof r.proposed === "number")
+    return r.proposed > 0
+      ? `proposed ${r.proposed} cut${r.proposed === 1 ? "" : "s"} (${Number(r.proposed_seconds ?? 0).toFixed(1)}s) — not cut yet`
+      : "nothing new to cut";
+  if (typeof r.applied === "boolean" && typeof r.cut_count === "number" && typeof r.pauses === "number")
+    return r.applied
+      ? `rough cut: ${r.cut_count} cuts made`
+      : `rough cut: ${r.cut_count} cuts proposed (${r.pauses} pauses, ${r.fillers} fillers) — not cut yet`;
+  if (typeof r.applied === "number" && typeof r.skipped === "number" && typeof r.seconds === "number")
+    return `applied ${r.applied} proposed cut${r.applied === 1 ? "" : "s"} (${r.seconds.toFixed(1)}s)`;
+  if (r.proposal === null) return "no cuts proposed";
+  if (r.proposal?.total !== undefined) return `${r.proposal.total} cuts proposed`;
   // Batch receipts and single-action results both carry descriptions.
   if (Array.isArray(r.actions) && r.actions.length > 0) {
     const dur = typeof r.included_duration_s === "number" ? ` — cut runs ${fmtTime(r.included_duration_s)}` : "";

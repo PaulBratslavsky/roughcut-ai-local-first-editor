@@ -162,6 +162,9 @@ export interface DrawState {
   drag: DragPreview | null;
   /** Real peaks/thumbnails when loaded; null = synthetic waveform fallback. */
   assets: TimelineAssets | null;
+  /** Proposed cuts (not made yet), source seconds; `focused` is the one the
+   *  review bar is on. */
+  proposed?: { start: number; end: number; focused: boolean }[];
 }
 
 const DARK_COLORS = {
@@ -181,6 +184,8 @@ const DARK_COLORS = {
   playheadText: "#15171a",
   selected: "#ffffff",
   handle: "#ffffff",
+  proposed: "#d96b6b",
+  proposedFill: "rgba(217, 107, 107, 0.22)",
 };
 
 const LIGHT_COLORS: typeof DARK_COLORS = {
@@ -200,6 +205,8 @@ const LIGHT_COLORS: typeof DARK_COLORS = {
   playheadText: "#ffffff",
   selected: "#15171a",
   handle: "#15171a",
+  proposed: "#c0392b",
+  proposedFill: "rgba(192, 57, 43, 0.16)",
 };
 
 /** Active palette follows <html data-theme>. */
@@ -391,6 +398,24 @@ export function drawTimeline(ctx: CanvasRenderingContext2D, s: DrawState): void 
       roundRectPath(ctx, r.x + r.w - 5, TRACK_TOP + trackH / 2 - 9, 3, 18, 2);
       ctx.fill();
     }
+  }
+
+  // --- proposed cuts: red, dashed — what Apply would take out ---------------------
+  for (const p of s.proposed ?? []) {
+    const x0 = (map.toDisplay(p.start) - s.scrollX) * s.zoom;
+    const x1 = (map.toDisplay(p.end) - s.scrollX) * s.zoom;
+    if (x1 < 0 || x0 > width) continue;
+    const w = Math.max(2, x1 - x0);
+    ctx.fillStyle = theme().proposedFill;
+    ctx.fillRect(x0, TRACK_TOP, w, trackH);
+    ctx.strokeStyle = theme().proposed;
+    ctx.lineWidth = p.focused ? 2 : 1;
+    ctx.setLineDash(p.focused ? [] : [3, 2]);
+    ctx.strokeRect(x0 + 0.5, TRACK_TOP + 0.5, w - 1, trackH - 1);
+    ctx.setLineDash([]);
+    // A tick on the ruler, so short cuts read at fit zoom.
+    ctx.fillStyle = theme().proposed;
+    ctx.fillRect(x0, RULER_H - 4, w, 3);
   }
 
   // --- playhead -----------------------------------------------------------------

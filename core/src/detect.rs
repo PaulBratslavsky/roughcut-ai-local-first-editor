@@ -62,6 +62,13 @@ fn normalize_word(w: &str) -> String {
     w.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
+/// A filler word (um, uh…, or one of the user's own), as the rough cut sees it.
+pub fn is_filler_word(word: &str, custom_words: &[String]) -> bool {
+    let w = normalize_word(word);
+    !w.is_empty()
+        && (DEFAULT_FILLERS.contains(&w.as_str()) || custom_words.iter().any(|c| normalize_word(c) == w))
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct FillerFindings {
     /// Segments that are entirely filler ("um" as its own segment).

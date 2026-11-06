@@ -43,6 +43,7 @@ is the one exception, emitted by the Tauri shell:
 | `agent-step` | `{ project_id, step: number, kind: "thinking"\|"tool_call"\|"tool_result"\|"final", tool?: string, args?: object, result?: object, text?: string }` |
 | `timeline-changed` | `{ project_id }` — refetch `get_timeline` (TanStack Query invalidation) |
 | `transcript-changed` | `{ project_id }` |
+| `cut-proposal-changed` | `{ project_id }` — the cut proposal was made, changed, applied or discarded; refetch the project (`Project.cut_proposal`) |
 | `projects-changed` | `{}` — library changed (create/duplicate/delete/restore); refetch `list_projects` |
 | `project-opened` | `{ project_id }` — an MCP client called `open_project`; the app switches to show that project (never sent for the UI's own calls) |
 | `clips-changed` | `{ project_id }` — saved clips or clip candidates changed (by any caller); refetch them |
@@ -96,7 +97,7 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `retime_words { project_id } -> { aligned, chunks, chunks_kept, words, trimmed, seconds_removed, relocated, note? }` — fixes the existing transcript's word times as transcription now does: forced alignment against the audio with the local word alignment model (English; `aligned`, `Transcript.words_aligned`), then the audio trim (`Transcript.words_trimmed`). `note` says why alignment didn't run (no model, not English). No text or cut changes. UI and MCP only
 
 ### Analysis
-- `remove_silences { project_id, min_duration_s? } -> { applied, actions, note, cut_count, included_duration_s, source_duration_s }` — remove ONLY waveform-confirmed dead air, one undoable batch; never touches words, fillers, takes, or order
+- `remove_silences { project_id, min_duration_s? } -> { applied, actions, note, cut_count, included_duration_s, source_duration_s }` — remove ONLY waveform-confirmed dead air; never touches words, fillers, takes, or order. From the in-app chat it proposes them instead (a proposal receipt, below)
 - `detect_silences { project_id, min_duration_s? } -> { method: "hybrid"|"transcript", segments: [{start, end, source: "confirmed"|"transcript_only", confidence}] }` — word-gap candidates confirmed + boundary-snapped against audio energy (file-adaptive thresholds; honest fallback without audio)
 - `detect_fillers { project_id } -> { segment_ids: string[], word_ranges: [{start,end}] }` (persists `is_filler` flags; stoplist comes from preferences)
 - `detect_takes { project_id } -> { take_groups: [{ id, segment_ids, best_segment_id }] }` (persists take flags — same write path as the rough cut)
@@ -104,7 +105,14 @@ Errors: every tool returns either its result or `{ "error": { "code": string, "m
 - `accept_suggestion { project_id, suggestion_id } -> { action }` — apply one suggestion as an undoable cut
 - `accept_all_suggestions { project_id } -> { action, accepted }` — apply all pending suggestions in one undoable batch
 - `dismiss_suggestion { project_id, suggestion_id } -> { dismissed }` — discard one suggestion without cutting
-- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive" } -> { action: EditAction, timeline: Timeline, cut_count: number, suggestions: number }`
+- `generate_rough_cut { project_id, aggressiveness?: "natural"|"aggressive", apply?: boolean } -> { cut_count, seconds, pauses, pause_seconds, fillers, filler_seconds, words, word_seconds, suggestions, audio_checked, applied, action?, note }` — works out the pauses (checked against the audio) and filler words to cut and flags repeated takes (`suggestions`). **Proposes**: the cuts become the project's cut proposal (replacing a pending one) and nothing is cut until `apply_cut_proposal`; `apply: true` cuts at once (one undoable edit; ignored for the in-app chat). Reports each step as `progress` (`task: "rough_cut"`). `words` counts cuts that take out other words too (a pause or filler glued to them)
+
+### Cut proposals
+Cuts worked out but not made (`Project.cut_proposal`, one per project). `generate_rough_cut` proposes; so does every cut tool called by the in-app chat (`cut_range`, `cut_passage`, `cut_by_transcript`, all-cut `apply_edits`, `remove_silences`, `plan_duration_cut` with `apply`, `story_edit`), joining the pending proposal. Their receipt: `{ proposed, proposed_seconds, cuts: [≤12 cuts], pending_cuts, included_duration_after_s, note }`. A restore from the chat (`restore_range`, `restore_by_transcript`) also drops proposed cuts there (`proposed_cuts_dropped`) and journals nothing when nothing there was cut. UI clicks and MCP clients cut at once, as before. The app shows the proposal in the transcript and timeline and plays the video as if it were applied.
+- `get_cut_proposal { project_id, limit? } -> { proposal: null | { title, created_at, total, skipped, to_apply: { cuts, seconds, pauses, fillers, words }, cuts: [{ id, start, end, kind: "pause"|"filler"|"words", text, skipped }] } }` — `limit` caps the list (default 200)
+- `apply_cut_proposal { project_id } -> { action: EditAction | null, applied, skipped, seconds, cut_count, included_duration_s }` — makes the cuts not skipped as ONE undoable edit (op `cut_ranges`, kind `ai_batch`, after an automatic "Before …" checkpoint) and clears the proposal. A plain "apply" / "yes" in the chat does this without a model turn
+- `discard_cut_proposal { project_id } -> { discarded }` — drops the proposal, cuts nothing
+- `skip_proposed_cuts { project_id, cut_ids?: number[], kind?: "pause"|"filler"|"words", skip?: boolean } -> { changed, to_apply, skipped, seconds_to_apply }` — leaves cuts out (`skip`, default true) or puts them back, by number, kind, both, or all
 
 ### Editing
 - `apply_edits { project_id, edits: [EditOp] } -> { applied, actions: [EditAction], cut_count, included_duration_s, source_duration_s }` (+ `requested`; on a mid-batch failure returns a PARTIAL receipt `{applied, requested, actions, failed_at, error, note}` — applied edits are journaled and undoable) — batch power tool for orchestrators (≤100 ops/call, each individually undoable; lean receipt, use `get_timeline` for clips)
@@ -224,8 +232,14 @@ interface EditAction { id: string; kind: string; source: "ui"|"local_ai"|"mcp_cl
 
 interface Project { id: string; name: string; media: Media | null;
   timeline: Timeline; created_at: string; updated_at: string;
+  cut_proposal: CutProposal | null;
   /* … plus checkpoints, suggestions, saved_clips, clip_candidates and more:
      see generated/Project.ts */ }
+
+interface CutProposal { id: string; title: string; source: "ui"|"local_ai"|"mcp_client";
+  created_at: string; cuts: ProposedCut[] /* source order */ }
+interface ProposedCut { id: number; start: number; end: number;
+  kind: "pause" | "filler" | "words"; text: string; skipped: boolean }
 // Note: preferences are GLOBAL (get/set_preferences) and read fresh at use
 // time — projects no longer carry a settings copy.
 

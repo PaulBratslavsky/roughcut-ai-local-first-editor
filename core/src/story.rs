@@ -928,6 +928,64 @@ async fn story_edit_logged(
                 .into(),
         ));
     }
+    // The in-app chat proposes: the plan's beats (and the dead air the audio
+    // confirms) become the project's cut proposal, which the user reviews,
+    // plays and applies. Nothing on the timeline changes here.
+    if source == ActionSource::LocalAi {
+        let silences = editor.confirmed_silences(project_id).await?;
+        let mut ops: Vec<EditOp> =
+            silences.iter().map(|r| EditOp::CutRange { start: r.start, end: r.end }).collect();
+        let cut_ids: Vec<Uuid> =
+            valid.iter().flat_map(|&n| outline.beats[n].segment_ids.clone()).collect();
+        if !cut_ids.is_empty() {
+            ops.push(EditOp::CutSegments { segment_ids: cut_ids });
+        }
+        let proposed = editor.propose_ops(project_id, ops, "Story edit", source, None, false)?;
+        let added_s: f64 = proposed.added.iter().map(|c| c.end - c.start).sum();
+        let beats: Vec<ProposedBeat> = valid
+            .iter()
+            .map(|&n| ProposedBeat {
+                beat: n,
+                title: outline.beats[n].title.clone(),
+                start: outline.beats[n].start,
+                end: outline.beats[n].end,
+            })
+            .collect();
+        let listed: Vec<String> = beats
+            .iter()
+            .map(|b| format!("“{}” ({}–{})", b.title, clock(b.start), clock(b.end)))
+            .collect();
+        let summary = if proposed.added.is_empty() {
+            "The plan keeps every beat and found no dead air — nothing to cut.".to_string()
+        } else {
+            format!(
+                "Nothing is cut yet. Proposed {} cut{} ({}){}{} — they're marked in the transcript \
+                 and timeline. Play them, then Apply in the bar above the transcript, or say \
+                 \"apply\".",
+                proposed.added.len(),
+                if proposed.added.len() == 1 { "" } else { "s" },
+                crate::engine::fmt_seconds(added_s),
+                if listed.is_empty() { String::new() } else { format!(": {}", listed.join("; ")) },
+                if silences.is_empty() { String::new() } else { format!(", plus {} pause(s)", silences.len()) },
+            )
+        };
+        narrate(editor, project_id, 2, summary.clone());
+        return Ok(StoryEditOutcome {
+            actions: vec![],
+            summary,
+            before_s,
+            after_s: (before_s - added_s).max(0.0),
+            coherent: true,
+            issues_remaining: 0,
+            proposal: Some(StoryProposal {
+                cut_beats: valid.clone(),
+                beats,
+                cut_s: cut_duration,
+                rationale: plan.rationale.clone(),
+            }),
+        });
+    }
+
     // No length asked for and a big cut: propose it, change nothing.
     if !user_confirmed
         && target_s.is_none()

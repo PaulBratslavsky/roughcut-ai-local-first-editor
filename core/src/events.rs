@@ -75,6 +75,11 @@ pub enum CoreEvent {
     TranscriptChanged {
         project_id: Uuid,
     },
+    /// The project's cut proposal was made, changed, applied or discarded —
+    /// refetch the project (`Project.cut_proposal`).
+    CutProposalChanged {
+        project_id: Uuid,
+    },
     /// Saved clips or clip candidates changed (by any caller) — refetch them.
     ClipsChanged {
         project_id: Uuid,
@@ -145,6 +150,7 @@ impl CoreEvent {
             CoreEvent::ProjectsChanged {} => "projects-changed",
             CoreEvent::ProjectOpened { .. } => "project-opened",
             CoreEvent::TranscriptChanged { .. } => "transcript-changed",
+            CoreEvent::CutProposalChanged { .. } => "cut-proposal-changed",
             CoreEvent::ClipsChanged { .. } => "clips-changed",
             CoreEvent::ModelRoute { .. } => "model-route",
             CoreEvent::McpReady { .. } => "mcp-ready",

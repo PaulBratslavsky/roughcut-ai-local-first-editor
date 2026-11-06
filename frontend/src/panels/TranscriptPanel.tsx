@@ -13,6 +13,7 @@ import {
   useDismissSuggestion,
   useGenerateRoughCut,
   usePreferences,
+  useProject,
   useRestoreByTranscript,
   useRestoreRange,
   useRetimeWords,
@@ -25,17 +26,20 @@ import {
   removeFromClipDraft,
   seekTo,
   selectSegment,
+  setFocusedCut,
   setSelectedSegmentIds,
   viewStore,
 } from "../state/viewStore";
+import { CutReview, hearCut } from "./CutReview";
 import type { Range } from "../playback/time";
 import { ClipDraftBar } from "./ClipDraftBar";
 import { callTool, onAppEvent } from "../ipc/api";
-import type { CutSuggestion, ProgressEvent, TranscriptSegment, Word } from "../ipc/types";
+import type { CutSuggestion, ProgressEvent, ProposedCut, TranscriptSegment, Word } from "../ipc/types";
 import { errText } from "./clipUtil";
 import { setTranscribeError, transcribeErrors } from "../state/transcribeStore";
 
 const normalize = (w: string) => w.toLowerCase().replace(/[^a-z']/g, "");
+const NO_CUTS: ProposedCut[] = [];
 
 function WordSpan({
   word,
@@ -44,6 +48,7 @@ function WordSpan({
   cutWord,
   current,
   inClip,
+  proposed,
 }: {
   word: Word;
   isFiller: boolean;
@@ -52,10 +57,12 @@ function WordSpan({
   current: boolean;
   /** Part of the clip being assembled ("Add to clip"). */
   inClip: boolean;
+  /** In a proposed cut: "on", or "focus" when the review bar is on it. */
+  proposed: "" | "on" | "focus";
 }) {
   return (
     <span
-      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}${current ? " current" : ""}${inClip ? " inclip" : ""}`}
+      className={`word${isFiller ? " filler" : ""}${highlight ? " hit" : ""}${cutWord ? " cutw" : ""}${current ? " current" : ""}${inClip ? " inclip" : ""}${proposed ? " proposedw" : ""}${proposed === "focus" ? " focusw" : ""}`}
       data-wstart={word.start}
       data-wend={word.end}
       onClick={(e) => {
@@ -84,6 +91,9 @@ function SegmentBlock({
   silenceAfter,
   onRestoreRange,
   clipDraft,
+  proposedCuts,
+  pausesBefore,
+  focusedCut,
 }: {
   seg: TranscriptSegment;
   cut: boolean;
@@ -100,6 +110,12 @@ function SegmentBlock({
   silenceAfter?: { start: number; end: number; dur: number };
   onRestoreRange: (start: number, end: number) => void;
   clipDraft: Range[];
+  /** Proposed cuts (not skipped) that touch this segment. */
+  proposedCuts: ProposedCut[];
+  /** Proposed pause cuts, by the index of the word they come before (-1:
+   *  after the last word). */
+  pausesBefore?: Map<number, ProposedCut[]>;
+  focusedCut: number | null;
 }) {
   // Word under the playhead — selector returns an index, so this block only
   // re-renders when the spoken word changes (and only while it's active).
@@ -112,10 +128,28 @@ function SegmentBlock({
     return -1;
   });
 
+  const pauseChips = (cuts: ProposedCut[] | undefined) =>
+    cuts?.map((c) => (
+      <button
+        key={`p${c.id}`}
+        className={`proposed-pause${c.id === focusedCut ? " focus" : ""}`}
+        title="A pause the proposal would cut — click to hear it"
+        onClick={(e) => {
+          e.stopPropagation();
+          setFocusedCut(c.id);
+          hearCut(c);
+        }}
+      >
+        ⏸ {(c.end - c.start).toFixed(1)}s
+      </button>
+    ));
+  const proposedAt = (mid: number) => proposedCuts.find((c) => mid >= c.start && mid < c.end);
+
   if (seg.is_silence) {
+    const p = proposedAt((seg.start + seg.end) / 2);
     return (
       <div
-        className={`segment silence${cut ? " cut" : ""}${selected ? " selected" : ""}`}
+        className={`segment silence${cut ? " cut" : ""}${selected ? " selected" : ""}${p ? " proposed" : ""}`}
         data-segid={seg.id}
         onClick={(e) => selectSegment(seg.id, e.metaKey || e.ctrlKey)}
       >
@@ -163,18 +197,23 @@ function SegmentBlock({
           const mid = (w.start + w.end) / 2;
           const wordCut = !cut && excludedRanges.some(([a, b]) => mid >= a && mid < b);
           if (wordCut && !showCuts) return null;
+          const p = proposedAt(mid);
           return (
-            <WordSpan
-              key={i}
-              word={w}
-              isFiller={fillerSet.has(normalize(w.text))}
-              highlight={q.length > 0 && normalize(w.text).includes(q)}
-              cutWord={wordCut}
-              current={i === currentWordIdx}
-              inClip={clipDraft.some((r) => mid >= r.start && mid < r.end)}
-            />
+            <span key={i}>
+              {pauseChips(pausesBefore?.get(i))}
+              <WordSpan
+                word={w}
+                isFiller={fillerSet.has(normalize(w.text))}
+                highlight={q.length > 0 && normalize(w.text).includes(q)}
+                cutWord={wordCut}
+                current={i === currentWordIdx}
+                inClip={clipDraft.some((r) => mid >= r.start && mid < r.end)}
+                proposed={p ? (p.id === focusedCut ? "focus" : "on") : ""}
+              />
+            </span>
           );
         })}
+        {pauseChips(pausesBefore?.get(-1))}
       </p>
       {cut && (
         <button
@@ -211,6 +250,19 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
   const restoreByTranscript = useRestoreByTranscript();
   const roughCut = useGenerateRoughCut();
   const retime = useRetimeWords();
+  const { data: project } = useProject(projectId);
+  const proposal = project?.cut_proposal ?? null;
+  const focusedCut = useStore(viewStore, (s) => s.focusedCut);
+  // The rough cut's steps, as the core reports them.
+  const [roughStep, setRoughStep] = useState<string | null>(null);
+  useEffect(
+    () =>
+      onAppEvent<ProgressEvent>("progress", (p) => {
+        if (p.task !== "rough_cut" || (p.project_id && p.project_id !== projectId)) return;
+        setRoughStep(p.fraction >= 1 ? null : p.message);
+      }),
+    [projectId],
+  );
   const { data: suggestions } = useSuggestions(projectId);
   const acceptSuggestion = useAcceptSuggestion();
   const acceptAll = useAcceptAllSuggestions();
@@ -304,6 +356,34 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     }
     return m;
   }, [transcript, timeline]);
+
+  // Proposed cuts (not skipped), per segment they touch; and proposed pause
+  // cuts placed before the word that follows them (or after a segment's
+  // last word when nothing follows), so each shows as a chip in the text.
+  const { proposedBySeg, pausesBySeg } = useMemo(() => {
+    const bySeg = new Map<string, ProposedCut[]>();
+    const pauses = new Map<string, Map<number, ProposedCut[]>>();
+    const live = (proposal?.cuts ?? []).filter((c) => !c.skipped);
+    if (live.length === 0) return { proposedBySeg: bySeg, pausesBySeg: pauses };
+    const segs = [...segments].sort((a, b) => a.start - b.start);
+    for (const seg of segs) {
+      const touching = live.filter((c) => c.end > seg.start && c.start < seg.end);
+      if (touching.length) bySeg.set(seg.id, touching);
+    }
+    const words = segs
+      .filter((s) => !s.is_silence)
+      .flatMap((s) => s.words.map((w, i) => ({ seg: s.id, i, start: w.start })));
+    let wi = 0;
+    for (const c of live.filter((c) => c.kind === "pause").sort((a, b) => a.start - b.start)) {
+      while (wi < words.length && words[wi]!.start < c.end - 0.25) wi++;
+      const at = words[wi] ?? (words.length ? { ...words[words.length - 1]!, i: -1 } : null);
+      if (!at) continue;
+      const m = pauses.get(at.seg) ?? new Map<number, ProposedCut[]>();
+      m.set(at.i, [...(m.get(at.i) ?? []), c]);
+      pauses.set(at.seg, m);
+    }
+    return { proposedBySeg: bySeg, pausesBySeg: pauses };
+  }, [proposal, segments]);
 
   const fillerSet = useMemo(() => {
     const s = new Set(["um", "uh"]);
@@ -503,12 +583,18 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
     roughCut.mutate(
       { project_id: projectId, aggressiveness: prefs?.cut_aggressiveness ?? "natural" },
       {
-        onSuccess: (res) =>
+        onSuccess: (res) => {
+          setRoughStep(null);
           setRoughCutResult(
-            res.suggestions > 0
-              ? `${res.cut_count} cuts · ${res.suggestions} to review`
-              : `${res.cut_count} cuts made`,
-          ),
+            res.cut_count === 0
+              ? "nothing to cut: no pauses or filler words found"
+              : `${res.cut_count} cuts proposed — nothing is cut yet; review them below`,
+          );
+        },
+        onError: (err) => {
+          setRoughStep(null);
+          setRoughCutResult(`rough cut failed: ${errText(err)}`);
+        },
       },
     );
   };
@@ -544,8 +630,13 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <button className="primary-btn" onClick={onRoughCut} disabled={roughCut.isPending}>
-          {roughCut.isPending ? "Cutting…" : "Rough cut"}
+        <button
+          className="primary-btn"
+          onClick={onRoughCut}
+          disabled={roughCut.isPending}
+          title="Finds the pauses and filler words to cut and shows them for review. Nothing is cut until you Apply."
+        >
+          {roughCut.isPending ? "Analyzing…" : "Rough cut"}
         </button>
         {transcript && !transcript.words_aligned && (
           <button
@@ -557,10 +648,16 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
             {retime.isPending ? "Fixing…" : "Fix word timings"}
           </button>
         )}
-        {roughCutResult !== null && (
-          <span className="rough-cut-result">{roughCutResult}</span>
+        {roughCut.isPending && roughStep ? (
+          <span className="rough-cut-result">{roughStep}…</span>
+        ) : (
+          roughCutResult !== null && <span className="rough-cut-result">{roughCutResult}</span>
         )}
       </div>
+
+      {proposal && proposal.cuts.length > 0 && (
+        <CutReview projectId={projectId} proposal={proposal} onDone={setRoughCutResult} />
+      )}
 
       {(suggestions?.length ?? 0) > 0 && (
         <div className="suggest-review">
@@ -655,6 +752,9 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
                     silenceAfter={silenceAfter.get(seg.id)}
                     onRestoreRange={onRestoreRange}
                     clipDraft={clipDraft}
+                    proposedCuts={proposedBySeg.get(seg.id) ?? NO_CUTS}
+                    pausesBefore={pausesBySeg.get(seg.id)}
+                    focusedCut={focusedCut}
                   />
                 </div>
               );

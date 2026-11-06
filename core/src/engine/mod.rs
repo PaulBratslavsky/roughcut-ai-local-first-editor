@@ -16,12 +16,14 @@
 mod clips;
 mod confirm;
 mod edits;
+mod proposals;
 mod media;
 mod projects;
 pub mod route;
 mod semantic;
 
 pub use clips::{ClipChanges, ClipScan, ClipSource, FaceCrop};
+pub use proposals::{fmt_seconds, AppliedProposal, ProposeOutcome, RoughCutReport};
 
 use crate::adapters::{
     AutoTranscriber, AutoVideoEngine, Embedder, MockTranscriber,
@@ -73,8 +75,9 @@ pub struct Inner {
     confirms: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<bool>>>,
     /// Off in headless/test contexts (no UI to answer the prompt).
     require_confirm: std::sync::atomic::AtomicBool,
-    /// Transient: raw peaks staged by generate_rough_cut for the very next
-    /// apply (RoughCut refines silences against real energy). Consumed once.
+    /// Transient: raw peaks staged for the very next RoughCut apply (it
+    /// refines silences against real energy). Consumed once. The rough cut
+    /// itself now proposes, passing peaks directly (`propose_ops`).
     pub(crate) rough_cut_peaks: Mutex<Option<Vec<u8>>>,
     /// Projects with a `find_clips` run in flight (one at a time each).
     scans: Mutex<HashSet<Uuid>>,

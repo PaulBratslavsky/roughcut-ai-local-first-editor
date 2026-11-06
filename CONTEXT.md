@@ -89,6 +89,7 @@ Keep entries short. When a refactor names a new module, add the term here.
 
 ## AI-derived views (read models over the transcript)
 
+- **Cut proposal** (`model.rs::CutProposal`) — cuts worked out but not made: the Rough cut button and the in-app chat propose instead of cutting. Each **ProposedCut** is a `pause`, `filler` or `words` cut with the words it removes; the user plays the edit, keeps (skips) cuts or whole kinds, then applies them as one undoable edit (`apply_cut_proposal`) or discards them. One per project, on `Project.cut_proposal`. UI clicks and MCP clients still cut at once.
 - **CutSuggestion** (`model.rs`) — a Tier-2 flag (repeated take / repetition) for
   review, not yet applied: `{ id, segment_ids, start, end, reason, confidence,
   duplicate_of, preview }`. Output of `suggest_cuts`.

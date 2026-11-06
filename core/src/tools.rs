@@ -315,6 +315,72 @@ fn edit(editor: &Editor, project_id: Uuid, op: EditOp, source: ActionSource) -> 
     Ok(json!({ "action": outcome.action, "timeline": outcome.timeline }))
 }
 
+/// The in-app chat's cuts are proposed, not made: the user reviews and
+/// applies them (`apply_cut_proposal`). UI clicks and MCP clients cut at once.
+fn proposes(source: ActionSource) -> bool {
+    source == ActionSource::LocalAi
+}
+
+/// Propose `ops` (joining any pending proposal) and shape a lean receipt.
+fn propose(editor: &Editor, project_id: Uuid, ops: Vec<EditOp>, title: &str, source: ActionSource) -> Result<Value> {
+    let out = editor.propose_ops(project_id, ops, title, source, None, false)?;
+    Ok(proposal_receipt(editor, project_id, &out.added, out.proposal.as_ref()))
+}
+
+fn proposal_receipt(
+    editor: &Editor,
+    project_id: Uuid,
+    added: &[crate::model::ProposedCut],
+    proposal: Option<&crate::model::CutProposal>,
+) -> Value {
+    let added_s: f64 = added.iter().map(|c| c.end - c.start).sum();
+    let pending_s = proposal.map(|p| p.seconds()).unwrap_or(0.0);
+    let included = editor.get_timeline(project_id).map(|t| t.included_duration()).unwrap_or(0.0);
+    let round = |x: f64| (x * 10.0).round() / 10.0;
+    json!({
+        "proposed": added.len(),
+        "proposed_seconds": round(added_s),
+        "cuts": added.iter().take(12).map(lean_cut).collect::<Vec<_>>(),
+        "pending_cuts": proposal.map(|p| p.cuts.len()).unwrap_or(0),
+        "included_duration_after_s": round((included - pending_s).max(0.0)),
+        "note": if added.is_empty() {
+            "nothing new to cut there (already cut, or already proposed)"
+        } else {
+            "NOT cut yet: proposed. The cuts are marked in the transcript and timeline for the \
+             user to review and play. Tell them what you proposed; they press Apply, or say \
+             \"apply\" and you call apply_cut_proposal. Don't cut the same thing again."
+        },
+    })
+}
+
+fn lean_cut(c: &crate::model::ProposedCut) -> Value {
+    json!({
+        "id": c.id,
+        "start": (c.start * 100.0).round() / 100.0,
+        "end": (c.end * 100.0).round() / 100.0,
+        "kind": c.kind,
+        "text": c.text,
+        "skipped": c.skipped,
+    })
+}
+
+/// A chat restore means "keep this": drop proposed cuts there too, and only
+/// journal a restore when something there is actually cut.
+fn restore_for_chat(editor: &Editor, project_id: Uuid, ranges: &[(f64, f64)], op: EditOp, source: ActionSource) -> Result<Value> {
+    let mut dropped = 0;
+    for (s, e) in ranges {
+        dropped += editor.drop_proposed_cuts_in(project_id, *s, *e)?;
+    }
+    let tl = editor.get_timeline(project_id)?;
+    let cut_there = tl
+        .clips
+        .iter()
+        .any(|c| !c.included && ranges.iter().any(|(s, e)| c.source_out > *s && c.source_in < *e));
+    let mut out = if cut_there { edit(editor, project_id, op, source)? } else { json!({}) };
+    out["proposed_cuts_dropped"] = json!(dropped);
+    Ok(out)
+}
+
 // -------------------------------------------------------------- handlers
 
 macro_rules! handler {
@@ -372,6 +438,15 @@ handler!(h_remove_silences, |e, a, s| {
     // helper. Touches no words, fillers, takes, or order — the whole point
     // versus generate_rough_cut.
     let project_id = arg_uuid(a, "project_id")?;
+    if proposes(s) {
+        let ops = e
+            .confirmed_silences(project_id)
+            .await?
+            .into_iter()
+            .map(|r| EditOp::CutRange { start: r.start, end: r.end })
+            .collect();
+        return propose(e, project_id, ops, "Remove pauses", s);
+    }
     let actions = e.cut_confirmed_silences(project_id, s).await?;
     let tl = e.get_timeline(project_id)?;
     let note = if actions.is_empty() {
@@ -401,17 +476,88 @@ handler!(h_detect_takes, |e, a, _s| {
 });
 
 handler!(h_generate_rough_cut, |e, a, s| {
-    // `action` included so orchestrators (and the agent's undo accounting)
-    // see the rough cut as the edit it is. Tier 1 (silence + fillers) is
-    // applied; `suggestions` counts the Tier-2 flags now awaiting review.
-    let (action, timeline, cut_count, suggestion_count) = e
-        .generate_rough_cut(arg_uuid(a, "project_id")?, arg_aggressiveness(a), s)
+    // Proposes by default: the pauses and fillers are worked out and shown,
+    // nothing is cut until apply_cut_proposal (or `apply: true` here). The
+    // in-app chat always proposes. `suggestions` counts the Tier-2 flags.
+    let apply = a["apply"].as_bool().unwrap_or(false) && !proposes(s);
+    let report = e
+        .generate_rough_cut(arg_uuid(a, "project_id")?, arg_aggressiveness(a), apply, s)
         .await?;
+    let mut out = serde_json::to_value(&report)?;
+    out["note"] = json!(if report.cut_count == 0 {
+        "nothing to cut: no pauses or filler words found"
+    } else if report.applied {
+        "cut (one undoable edit)"
+    } else {
+        "NOT cut yet: proposed. The cuts are marked in the transcript and timeline for the user \
+         to review and play; they press Apply, or say \"apply\" and you call apply_cut_proposal."
+    });
+    Ok(out)
+});
+
+handler!(h_get_cut_proposal, |e, a, _s| {
+    let pid = arg_uuid(a, "project_id")?;
+    let limit = a["limit"].as_u64().unwrap_or(200).clamp(1, 1000) as usize;
+    Ok(match e.get_cut_proposal(pid)? {
+        None => json!({ "proposal": null }),
+        Some(p) => {
+            let report = crate::engine::RoughCutReport::from_cuts(
+                &p.cuts.iter().filter(|c| !c.skipped).cloned().collect::<Vec<_>>(),
+            );
+            json!({
+                "proposal": {
+                    "title": p.title,
+                    "created_at": p.created_at,
+                    "total": p.cuts.len(),
+                    "skipped": p.cuts.iter().filter(|c| c.skipped).count(),
+                    "to_apply": { "cuts": report.cut_count, "seconds": report.seconds,
+                                  "pauses": report.pauses, "fillers": report.fillers, "words": report.words },
+                    "cuts": p.cuts.iter().take(limit).map(lean_cut).collect::<Vec<_>>(),
+                }
+            })
+        }
+    })
+});
+
+handler!(h_apply_cut_proposal, |e, a, s| {
+    let pid = arg_uuid(a, "project_id")?;
+    let out = e.apply_cut_proposal(pid, s)?;
     Ok(json!({
-        "action": action,
-        "timeline": timeline,
-        "cut_count": cut_count,
-        "suggestions": suggestion_count,
+        "action": out.action,
+        "applied": out.applied,
+        "skipped": out.skipped,
+        "seconds": (out.seconds * 10.0).round() / 10.0,
+        "cut_count": out.timeline.cut_count,
+        "included_duration_s": (out.timeline.included_duration() * 10.0).round() / 10.0,
+    }))
+});
+
+handler!(h_discard_cut_proposal, |e, a, _s| {
+    Ok(json!({ "discarded": e.discard_cut_proposal(arg_uuid(a, "project_id")?)? }))
+});
+
+handler!(h_skip_proposed_cuts, |e, a, _s| {
+    let pid = arg_uuid(a, "project_id")?;
+    let ids: Option<Vec<u32>> = match &a["cut_ids"] {
+        Value::Null => None,
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|v| v.as_u64().map(|n| n as u32).ok_or_else(|| {
+                    CoreError::InvalidArg("'cut_ids' must be proposed cut numbers".into())
+                }))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        v => return Err(CoreError::InvalidArg(format!("'cut_ids' must be an array, got {}", json_kind(v)))),
+    };
+    let skip = a["skip"].as_bool().unwrap_or(true);
+    let (p, changed) = e.skip_proposed_cuts(pid, ids.as_deref(), a["kind"].as_str(), skip)?;
+    let left: Vec<_> = p.cuts.iter().filter(|c| !c.skipped).collect();
+    Ok(json!({
+        "changed": changed,
+        "to_apply": left.len(),
+        "skipped": p.cuts.len() - left.len(),
+        "seconds_to_apply": (p.seconds() * 10.0).round() / 10.0,
     }))
 });
 
@@ -447,6 +593,9 @@ handler!(h_cut_range, |e, a, s| {
         arg_f64(a, "end")?,
         a["snap"].as_str().unwrap_or("none"),
     )?;
+    if proposes(s) {
+        return propose(e, pid, vec![EditOp::CutRange { start, end }], "Chat", s);
+    }
     edit(e, pid, EditOp::CutRange { start, end }, s)
 });
 
@@ -490,37 +639,46 @@ handler!(h_cut_passage, |e, a, s| {
         Ok((words.iter().take(10).cloned().collect::<Vec<_>>().join(" "),
             words[n.saturating_sub(10)..].join(" ")))
     })?;
-    let mut out = edit(e, pid, EditOp::CutRange { start: cs, end: ce }, s)?;
+    let mut out = if proposes(s) {
+        propose(e, pid, vec![EditOp::CutRange { start: cs, end: ce }], "Chat", s)?
+    } else {
+        edit(e, pid, EditOp::CutRange { start: cs, end: ce }, s)?
+    };
     out["cut"] = json!({ "start": cs, "end": ce, "seconds": ((ce - cs) * 10.0).round() / 10.0,
                          "starts_with": first, "ends_with": last });
     Ok(out)
 });
 
 handler!(h_restore_range, |e, a, s| {
-    edit(
-        e,
-        arg_uuid(a, "project_id")?,
-        EditOp::RestoreRange { start: arg_f64(a, "start")?, end: arg_f64(a, "end")? },
-        s,
-    )
+    let pid = arg_uuid(a, "project_id")?;
+    let (start, end) = (arg_f64(a, "start")?, arg_f64(a, "end")?);
+    let op = EditOp::RestoreRange { start, end };
+    if proposes(s) {
+        return restore_for_chat(e, pid, &[(start, end)], op, s);
+    }
+    edit(e, pid, op, s)
 });
 
 handler!(h_cut_by_transcript, |e, a, s| {
-    edit(
-        e,
-        arg_uuid(a, "project_id")?,
-        EditOp::CutSegments { segment_ids: arg_uuid_vec(a, "segment_ids")? },
-        s,
-    )
+    let pid = arg_uuid(a, "project_id")?;
+    let op = EditOp::CutSegments { segment_ids: arg_uuid_vec(a, "segment_ids")? };
+    if proposes(s) {
+        return propose(e, pid, vec![op], "Chat", s);
+    }
+    edit(e, pid, op, s)
 });
 
 handler!(h_restore_by_transcript, |e, a, s| {
-    edit(
-        e,
-        arg_uuid(a, "project_id")?,
-        EditOp::RestoreSegments { segment_ids: arg_uuid_vec(a, "segment_ids")? },
-        s,
-    )
+    let pid = arg_uuid(a, "project_id")?;
+    let ids = arg_uuid_vec(a, "segment_ids")?;
+    if proposes(s) {
+        let ranges: Vec<(f64, f64)> = e.with_project(pid, |_, t| {
+            Ok(t.map(|t| ids.iter().filter_map(|id| t.segment(*id)).map(|seg| (seg.start, seg.end)).collect())
+                .unwrap_or_default())
+        })?;
+        return restore_for_chat(e, pid, &ranges, EditOp::RestoreSegments { segment_ids: ids }, s);
+    }
+    edit(e, pid, EditOp::RestoreSegments { segment_ids: ids }, s)
 });
 
 handler!(h_trim_clip, |e, a, s| {
@@ -712,6 +870,21 @@ handler!(h_plan_duration_cut, |e, a, s| {
     // apply: plan AND cut in one step — one undoable action, small receipt.
     // Crucial for small local models: a 400-id plan must never round-trip
     // through the model (it WILL get truncated or mangled).
+    if a["apply"].as_bool().unwrap_or(false) && !plan.segment_ids.is_empty() && proposes(s) {
+        let title = format!("Shorten to {}", crate::engine::fmt_seconds(plan.target_s));
+        let mut out = propose(
+            e,
+            project_id,
+            vec![EditOp::CutSegments { segment_ids: plan.segment_ids.clone() }],
+            &title,
+            s,
+        )?;
+        out["before_s"] = json!(plan.before_s);
+        out["target_s"] = json!(plan.target_s);
+        out["method"] = json!(plan.method);
+        out["notes"] = json!(plan.notes);
+        return Ok(out);
+    }
     if a["apply"].as_bool().unwrap_or(false) && !plan.segment_ids.is_empty() {
         let outcome = e.apply_edit(
             project_id,
@@ -825,13 +998,17 @@ handler!(h_apply_edits, |e, a, s| {
     // set_clips would wholesale-replace (wipe) the timeline, and rough_cut
     // through this path skips peak staging — both have real tools.
     for (i, op) in ops.iter().enumerate() {
-        if matches!(op, EditOp::SetClips { .. } | EditOp::RoughCut { .. }) {
+        if matches!(op, EditOp::SetClips { .. } | EditOp::RoughCut { .. } | EditOp::CutRanges { .. }) {
             return Err(CoreError::InvalidArg(format!(
                 "edit {i}: type '{}' is not allowed in apply_edits (use generate_rough_cut \
                  for rough cuts; set_clips is journal-internal)",
                 op.kind()
             )));
         }
+    }
+    // The chat's batches of cuts are proposed like its single cuts.
+    if proposes(s) && ops.iter().all(|op| matches!(op, EditOp::CutRange { .. } | EditOp::CutSegments { .. })) {
+        return propose(e, project_id, ops, "Chat", s);
     }
     let mut actions = vec![];
     let mut last: Option<crate::model::Timeline> = None;
@@ -1272,7 +1449,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("detect_silences", "PREVIEW dead-air ranges (read-only): word-gap candidates confirmed and boundary-snapped against actual audio energy (per-file adaptive thresholds). Each range carries source: confirmed | transcript_only. To actually remove them, use remove_silences.",
         || obj(json!({"project_id": pid_schema(), "min_duration_s": {"type": "number"}}), &["project_id"]),
         agent: true, meta: false, h_detect_silences),
-    tool!("remove_silences", "Remove ONLY dead air: deletes non-speech gaps confirmed by the actual audio waveform, in one undoable batch. Changes NOTHING about the words, their order, or which topics are kept — never touches fillers or takes. This is the silence-only tool; for filler/take removal use generate_rough_cut, for narrative restructuring use story_edit.",
+    tool!("remove_silences", "Remove ONLY dead air: deletes non-speech gaps confirmed by the actual audio waveform (from the in-app chat: proposes them instead — see get_cut_proposal). Changes NOTHING about the words, their order, or which topics are kept — never touches fillers or takes. This is the silence-only tool; for filler/take removal use generate_rough_cut, for narrative restructuring use story_edit.",
         || obj(json!({"project_id": pid_schema(), "min_duration_s": {"type": "number"}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_remove_silences),
     tool!("detect_fillers", "Flag filler words (um, uh, ...) in the transcript. Persists the flags.",
@@ -1293,19 +1470,31 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("dismiss_suggestion", "Discard one rough-cut suggestion (by id from get_suggestions) without cutting.",
         || obj(json!({"project_id": pid_schema(), "suggestion_id": {"type": "string"}}), &["project_id", "suggestion_id"]),
         agent: true, meta: false, h_dismiss_suggestion),
-    tool!("generate_rough_cut", "Full AI first pass: auto-cuts silences AND fillers (Tier 1), and FLAGS repeated takes + repetitive passages as suggestions for review (Tier 2 — see get_suggestions/accept_all_suggestions). Deterministic, no narrative restructuring. For silence ONLY use remove_silences. Returns timeline, cut_count, and suggestions (count).",
-        || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}}), &["project_id"]),
+    tool!("generate_rough_cut", "Full first pass: works out the pauses (checked against the audio) AND filler words to cut, and FLAGS repeated takes + repetitive passages as suggestions (Tier 2 — see get_suggestions). PROPOSES by default: nothing is cut; the cuts become the project's cut proposal (replacing any pending one), shown in the app for review — apply with apply_cut_proposal, or pass apply=true to cut at once (ignored for the in-app chat, which always proposes). Deterministic, no narrative restructuring. For silence ONLY use remove_silences. Returns { cut_count, seconds, pauses, pause_seconds, fillers, filler_seconds, words, word_seconds, suggestions, audio_checked, applied, action?, note }.",
+        || obj(json!({"project_id": pid_schema(), "aggressiveness": {"type": "string", "enum": ["natural", "aggressive"]}, "apply": {"type": "boolean", "description": "cut at once instead of proposing (default false)"}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_generate_rough_cut),
-    tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive. Pass snap=\"word\" or \"sentence\" to land the cut on clean word/sentence boundaries using the transcript's word timings, so it never clips mid-word — use this instead of parsing word timestamps yourself.",
+    tool!("get_cut_proposal", "The cuts proposed but not made yet (by generate_rough_cut, or by the in-app chat's cut tools): { proposal: null } or { proposal: { title, created_at, total, skipped, to_apply: { cuts, seconds, pauses, fillers, words }, cuts: [{ id, start, end, kind: pause|filler|words, text, skipped }] } }, cuts in source order. limit caps the list (default 200).",
+        || obj(json!({"project_id": pid_schema(), "limit": {"type": "integer", "description": "max cuts listed, default 200"}}), &["project_id"]),
+        agent: true, meta: false, h_get_cut_proposal),
+    tool!("apply_cut_proposal", "Make the proposed cuts that aren't skipped, as ONE undoable edit (an automatic checkpoint is taken first), and clear the proposal. Call this when the user says to apply / go ahead / yes to proposed cuts. Returns { action, applied, skipped, seconds, cut_count, included_duration_s }.",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, mutating: true, h_apply_cut_proposal),
+    tool!("discard_cut_proposal", "Drop the proposed cuts without cutting anything (the user said never mind / don't cut). Returns { discarded } (false when nothing was proposed).",
+        || obj(json!({"project_id": pid_schema()}), &["project_id"]),
+        agent: true, meta: false, h_discard_cut_proposal),
+    tool!("skip_proposed_cuts", "Leave proposed cuts out (skip=true, the default) or put them back (skip=false) before applying: by cut_ids (the numbers from get_cut_proposal), by kind (pause | filler | words — e.g. 'keep the pauses' = kind pause), both, or with neither every cut. Returns { changed, to_apply, skipped, seconds_to_apply }.",
+        || obj(json!({"project_id": pid_schema(), "cut_ids": {"type": "array", "items": {"type": "integer"}}, "kind": {"type": "string", "enum": ["pause", "filler", "words"]}, "skip": {"type": "boolean", "description": "true leaves them out (default), false puts them back"}}), &["project_id"]),
+        agent: true, meta: false, h_skip_proposed_cuts),
+    tool!("cut_range", "Exclude a source time range [start, end] (seconds) from the cut. Non-destructive. Pass snap=\"word\" or \"sentence\" to land the cut on clean word/sentence boundaries using the transcript's word timings, so it never clips mid-word — use this instead of parsing word timestamps yourself. From the in-app chat this PROPOSES instead (nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap the cut to clean boundaries (default none)"}}), &["project_id", "start", "end"]),
         agent: true, meta: false, mutating: true, h_cut_range),
-    tool!("cut_passage", "Cut ONE whole passage — 'the part where I demo the app', 'the tangent about my weekend' — in one call: pass the passage's first and last segment (from_segment_id, to_segment_id) or its start/end seconds. Everything between is cut, and both edges snap to the nearest sentence end or clear pause (within ~10 s) so the speech around the cut reads cleanly. Returns the cut range with its first and last words, so you can check it is the right passage. Use this instead of cutting scattered search hits.",
+    tool!("cut_passage", "Cut ONE whole passage — 'the part where I demo the app', 'the tangent about my weekend' — in one call: pass the passage's first and last segment (from_segment_id, to_segment_id) or its start/end seconds. Everything between is cut, and both edges snap to the nearest sentence end or clear pause (within ~10 s) so the speech around the cut reads cleanly. Returns the cut range with its first and last words, so you can check it is the right passage. Use this instead of cutting scattered search hits. From the in-app chat this PROPOSES instead (nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "from_segment_id": {"type": "string", "description": "first segment of the passage"}, "to_segment_id": {"type": "string", "description": "last segment of the passage"}, "start": {"type": "number", "description": "seconds, if not using segment ids"}, "end": {"type": "number"}}), &["project_id"]),
         agent: true, meta: false, mutating: true, h_cut_passage),
-    tool!("restore_range", "Re-include a previously cut source time range.",
+    tool!("restore_range", "Re-include a previously cut source time range. From the in-app chat it also drops proposed cuts there.",
         || obj(json!({"project_id": pid_schema(), "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "start", "end"]),
         agent: true, meta: false, mutating: true, h_restore_range),
-    tool!("cut_by_transcript", "Cut the video ranges covered by the given transcript segment ids.",
+    tool!("cut_by_transcript", "Cut the video ranges covered by the given transcript segment ids. From the in-app chat this PROPOSES instead (nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "segment_ids": {"type": "array", "items": {"type": "string"}}}), &["project_id", "segment_ids"]),
         agent: true, meta: false, mutating: true, h_cut_by_transcript),
     tool!("restore_by_transcript", "Restore the video ranges covered by the given transcript segment ids.",
@@ -1338,10 +1527,10 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("review_flow", "Re-read the EDITED transcript at every cut point and judge whether speech still flows: mid-sentence cuts, orphaned connectives, dangling references. Returns issues with severity and restore_segment_ids suggestions. ALWAYS run this after a batch of cuts, then restore what reads broken. Fast by default (instant deterministic checks, no model calls — safe for long videos); pass llm=true for a slower model pass per seam (on-device unless the user switched the app to Hosted).",
         || obj(json!({"project_id": pid_schema(), "llm": {"type": "boolean", "description": "a model pass per seam (slower; on-device unless the app is in Hosted mode); default false runs only the instant deterministic checks"}}), &["project_id"]),
         agent: true, meta: false, h_review_flow),
-    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Without target_duration_s, a plan that would cut more than a quarter of what is left is NOT applied: the result has a `proposal` (the beats it would cut) and nothing changes. Show it to the user; if they confirm, call story_edit again with the same instruction and cut_beats set to the proposal's numbers, which cuts exactly those. Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow.",
+    tool!("story_edit", "COHESIVE story-level edit in one call: outline the narrative -> choose whole beats to cut against the instruction -> apply (undoable) -> re-read every cut point -> restore what breaks the flow -> summarize. Long-running (several model calls). Without target_duration_s, a plan that would cut more than a quarter of what is left is NOT applied: the result has a `proposal` (the beats it would cut) and nothing changes. Show it to the user; if they confirm, call story_edit again with the same instruction and cut_beats set to the proposal's numbers, which cuts exactly those. Frontier orchestrators may prefer composing outline_transcript + apply_edits + review_flow. From the in-app chat it always PROPOSES (the beats and confirmed dead air become the cut proposal; nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "instruction": {"type": "string"}, "target_duration_s": {"type": "number", "description": "optional length target, seconds"}, "cut_beats": {"type": "array", "items": {"type": "integer"}, "description": "beat numbers from a proposal the user confirmed: cut exactly these"}}), &["project_id", "instruction"]),
         agent: true, meta: false, mutating: true, h_story_edit),
-    tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: groups still-included segments into whole sentences, ranks them by how central they are to the video, and cuts the least-central ones first, gathered into runs so cut points land between sentences (intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s and the passages it cut (times + opening words) — name the main ones in your reply. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'.",
+    tool!("plan_duration_cut", "Bring the video down to a TARGET DURATION: groups still-included segments into whole sentences, ranks them by how central they are to the video, and cuts the least-central ones first, gathered into runs so cut points land between sentences (intro/outro protected). With apply=true (recommended) it plans AND cuts in one undoable step and returns a small receipt with the new included_duration_s and the passages it cut (times + opening words) — name the main ones in your reply. With apply=false it returns the full segment_ids plan for review. THE tool for 'make this 20 minutes'. From the in-app chat this PROPOSES instead (nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "target_duration_s": {"type": "number", "description": "desired included duration, in seconds"}, "apply": {"type": "boolean", "description": "true: plan and cut in one step (recommended)"}}), &["project_id", "target_duration_s"]),
         agent: true, meta: false, mutating: true, h_plan_duration_cut),
     tool!("find_segments", "Hybrid search over the transcript: BM25 + local embeddings fused by reciprocal rank. Natural-language or keyword queries both work. Returns matching segments with ids, times, and scores — use this instead of reading the whole transcript.",
@@ -1350,7 +1539,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("read_transcript", "Read the transcript in pages: lean segments (text, times, flags; no word arrays unless include_words). With include_words each segment carries words: [{text, start, end, confidence}] (key is `text`). Use offset/limit for long videos instead of get_transcript.",
         || obj(json!({"project_id": pid_schema(), "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "max 200, default 50"}, "include_words": {"type": "boolean"}}), &["project_id"]),
         agent: true, meta: false, h_read_transcript),
-    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds, optional snap=\"word\"|\"sentence\" to land on clean boundaries; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call.",
+    tool!("apply_edits", "POWER TOOL for orchestrators: apply a BATCH of edit operations in one call. Each edit is {\"type\": \"cut_range\"|\"restore_range\"|\"cut_segments\"|\"restore_segments\"|\"trim_clip\"|\"split_clip\"|\"set_global_padding\", ...fields} (cut_range: start,end seconds, optional snap=\"word\"|\"sentence\" to land on clean boundaries; cut_segments: segment_ids; trim_clip: clip_id,new_source_in,new_source_out; split_clip: clip_id,at_time; set_global_padding: start_s,end_s,linked). Every edit is recorded separately and undoable. Plan with find_segments/read_transcript, then land all cuts in one call. From the in-app chat, a batch of only cuts PROPOSES instead (nothing is cut until apply_cut_proposal).",
         || obj(json!({"project_id": pid_schema(), "edits": {"type": "array", "items": {"oneOf": [
             {"type": "object", "properties": {"type": {"const": "cut_range"}, "start": {"type": "number"}, "end": {"type": "number"}, "snap": {"type": "string", "enum": ["none", "word", "sentence"], "description": "snap to clean word/sentence boundaries (default none)"}}, "required": ["type", "start", "end"]},
             {"type": "object", "properties": {"type": {"const": "restore_range"}, "start": {"type": "number"}, "end": {"type": "number"}}, "required": ["type", "start", "end"]},

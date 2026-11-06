@@ -771,6 +771,101 @@ function mockAutoCenter(projectId: string, clip: { crop_x: number }): void {
   }, 900);
 }
 
+// ---- Cut proposals (mirrors core/src/engine/proposals.rs) -------------------
+
+const MOCK_FILLERS = new Set(["um", "uh", "uhm", "er", "ah", "hmm", "mhm", "erm"]);
+
+/** Ranges of `ranges` the timeline still keeps and no pending cut covers. */
+function mockNewCuts(p: Project, ranges: { start: number; end: number }[]): { start: number; end: number }[] {
+  const taken = [
+    ...p.timeline.clips.filter((c) => !c.included).map((c) => ({ start: c.source_in, end: c.source_out })),
+    ...(p.cut_proposal?.cuts ?? []).map((c) => ({ start: c.start, end: c.end })),
+  ].sort((a, b) => a.start - b.start);
+  const out: { start: number; end: number }[] = [];
+  for (const r of [...ranges].sort((a, b) => a.start - b.start)) {
+    let pieces = [{ ...r }];
+    for (const t of taken) {
+      pieces = pieces.flatMap((x) => {
+        if (t.end <= x.start || t.start >= x.end) return [x];
+        const left = t.start > x.start ? [{ start: x.start, end: t.start }] : [];
+        const right = t.end < x.end ? [{ start: t.end, end: x.end }] : [];
+        return [...left, ...right];
+      });
+    }
+    for (const x of pieces) {
+      const last = out[out.length - 1];
+      if (last && x.start <= last.end + 1e-6) last.end = Math.max(last.end, x.end);
+      else if (x.end - x.start >= 0.04) out.push(x);
+    }
+  }
+  return out;
+}
+
+function mockDescribe(start: number, end: number): { kind: string; text: string } {
+  const words = (state.transcript?.segments ?? [])
+    .filter((s) => !s.is_silence)
+    .flatMap((s) => s.words)
+    .filter((w) => {
+      const mid = (w.start + w.end) / 2;
+      return mid >= start && mid < end;
+    })
+    .map((w) => w.text.trim())
+    .filter(Boolean);
+  if (words.length === 0) return { kind: "pause", text: "" };
+  const filler = words.every((w) => MOCK_FILLERS.has(w.toLowerCase().replace(/[^a-z]/g, "")));
+  const text = words.join(" ");
+  return { kind: filler ? "filler" : "words", text: text.length > 120 ? `${text.slice(0, 120)}…` : text };
+}
+
+/** Propose cutting `ranges`: replace the pending proposal or join it. */
+function mockPropose(p: Project, ranges: { start: number; end: number }[], title: string, replace: boolean, source: EditAction["source"] = "local_ai") {
+  if (replace) p.cut_proposal = null;
+  const pending = p.cut_proposal;
+  const cuts = [...(pending?.cuts ?? [])];
+  let next = Math.max(0, ...cuts.map((c) => c.id)) + 1;
+  const added = mockNewCuts(p, ranges).map((r) => ({ id: next++, ...r, ...mockDescribe(r.start, r.end), skipped: false }));
+  cuts.push(...added);
+  cuts.sort((a, b) => a.start - b.start);
+  p.cut_proposal = cuts.length === 0 ? null : {
+    id: pending?.id ?? `proposal-${Date.now()}`,
+    title: pending && added.length && !pending.title.split(" + ").includes(title) ? `${pending.title} + ${title}` : pending?.title ?? title,
+    source: pending?.source ?? source,
+    created_at: pending?.created_at ?? new Date().toISOString(),
+    cuts,
+  };
+  emit("cut-proposal-changed", { project_id: p.id });
+  return added;
+}
+
+function mockProposalReceipt(p: Project, added: { id: number; start: number; end: number; kind: string; text: string; skipped: boolean }[]) {
+  const pending = p.cut_proposal?.cuts.filter((c) => !c.skipped) ?? [];
+  const included = p.timeline.clips.filter((c) => c.included).reduce((a, c) => a + c.source_out - c.source_in, 0);
+  return {
+    proposed: added.length,
+    proposed_seconds: added.reduce((a, c) => a + c.end - c.start, 0),
+    cuts: added.slice(0, 12),
+    pending_cuts: p.cut_proposal?.cuts.length ?? 0,
+    included_duration_after_s: Math.max(0, included - pending.reduce((a, c) => a + c.end - c.start, 0)),
+    note: added.length ? "NOT cut yet: proposed." : "nothing new to cut there",
+  };
+}
+
+function mockReport(cuts: { start: number; end: number; kind: string }[]) {
+  const sum = (k?: string) => cuts.filter((c) => !k || c.kind === k).reduce((a, c) => a + c.end - c.start, 0);
+  return {
+    cut_count: cuts.length,
+    seconds: sum(),
+    pauses: cuts.filter((c) => c.kind === "pause").length,
+    pause_seconds: sum("pause"),
+    fillers: cuts.filter((c) => c.kind === "filler").length,
+    filler_seconds: sum("filler"),
+    words: cuts.filter((c) => c.kind === "words").length,
+    word_seconds: sum("words"),
+  };
+}
+
+const MOCK_YES = new Set(["apply", "apply it", "apply them", "apply the cuts", "yes", "do it", "go ahead", "ok", "okay", "confirm"]);
+
 async function emitProgress(task: ProgressEvent["task"], projectId: string, steps: string[], totalMs: number) {
   for (let i = 0; i < steps.length; i++) {
     emit("progress", {
@@ -1064,6 +1159,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       checkpoints: [],
       saved_clips: [],
       clip_candidates: [],
+      cut_proposal: null,
     };
     state.undoStack = [];
     state.redoStack = [];
@@ -1426,19 +1522,24 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   },
 
   async generate_rough_cut(args) {
+    // Proposes, like the core: nothing is cut until apply_cut_proposal.
     const p = requireProject(args.project_id);
     const aggressiveness = args.aggressiveness === "aggressive" ? "aggressive" : "natural";
-    await emitProgress("rough_cut", p.id, ["Detecting silences…", "Detecting fillers…", "Assembling cut…"], 900);
-
-    const action = recordEdit(p, "generate_rough_cut", `Generated ${aggressiveness} rough cut`);
-    const cuttable = new Set(
-      state.transcript?.segments.filter((s) => s.is_filler || s.is_silence).map((s) => s.id) ?? [],
+    await emitProgress(
+      "rough_cut",
+      p.id,
+      ["finding filler words and repeated takes", "reading the audio", "finding pauses and checking each cut against the audio", "looking for repeated takes"],
+      900,
     );
-    for (const clip of p.timeline.clips) {
-      if (clip.linked_segment_ids.some((id) => cuttable.has(id))) clip.included = false;
-      if (aggressiveness === "aggressive" && clip.source_out - clip.source_in < 3.5) clip.included = false;
+    const ranges = (state.transcript?.segments ?? [])
+      .filter((s) => s.is_filler || s.is_silence)
+      .map((s) => ({ start: s.start, end: s.end }));
+    if (aggressiveness === "aggressive") {
+      for (const c of p.timeline.clips) {
+        if (c.included && c.source_out - c.source_in < 3.5) ranges.push({ start: c.source_in, end: c.source_out });
+      }
     }
-    refreshTimeline(p);
+    mockPropose(p, ranges, aggressiveness === "aggressive" ? "Rough cut (aggressive)" : "Rough cut", true, "ui");
     // Flag a couple of still-included speech segments as Tier-2 suggestions
     // (repeated take + repetition) so the review UI is exercised in-browser.
     const speech = (state.transcript?.segments ?? []).filter(
@@ -1454,12 +1555,76 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       duplicate_of: speech[0]?.id ?? null,
       preview: s.text.slice(0, 80),
     }));
+    const report = { ...mockReport(p.cut_proposal?.cuts ?? []), suggestions: p.suggestions.length, audio_checked: false, applied: false };
+    if (args.apply === true && p.cut_proposal) {
+      const applied = tools.apply_cut_proposal!({ project_id: p.id }) as { action: EditAction };
+      return { ...report, applied: true, action: applied.action, note: "cut (one undoable edit)" };
+    }
+    return { ...report, note: report.cut_count ? "NOT cut yet: proposed." : "nothing to cut" };
+  },
+
+  get_cut_proposal(args) {
+    const p = requireProject(args.project_id);
+    const pr = p.cut_proposal;
+    if (!pr) return { proposal: null };
+    const live = pr.cuts.filter((c) => !c.skipped);
+    const r = mockReport(live);
     return {
-      action,
-      timeline: clone(p.timeline),
-      cut_count: p.timeline.cut_count,
-      suggestions: p.suggestions.length,
+      proposal: {
+        title: pr.title,
+        created_at: pr.created_at,
+        total: pr.cuts.length,
+        skipped: pr.cuts.length - live.length,
+        to_apply: { cuts: r.cut_count, seconds: r.seconds, pauses: r.pauses, fillers: r.fillers, words: r.words },
+        cuts: clone(pr.cuts).slice(0, Number(args.limit ?? 200)),
+      },
     };
+  },
+
+  apply_cut_proposal(args) {
+    const p = requireProject(args.project_id);
+    const pr = p.cut_proposal;
+    if (!pr) throw { code: "invalid_arg", message: "invalid argument: no proposed cuts are waiting to be applied" };
+    const live = pr.cuts.filter((c) => !c.skipped);
+    const seconds = live.reduce((a, c) => a + c.end - c.start, 0);
+    let action: EditAction | null = null;
+    if (live.length) {
+      tools.create_checkpoint!({ project_id: p.id, name: `Before ${pr.title}` });
+      action = recordEdit(p, "ai_batch", `${pr.title}: ${live.length} cut${live.length === 1 ? "" : "s"} (${seconds.toFixed(1)}s)`);
+      for (const c of live) setRangeIncluded(p, c.start, c.end, false);
+      refreshTimeline(p);
+    }
+    p.cut_proposal = null;
+    emit("cut-proposal-changed", { project_id: p.id });
+    const included = p.timeline.clips.filter((c) => c.included).reduce((a, c) => a + c.source_out - c.source_in, 0);
+    return { action, applied: live.length, skipped: pr.cuts.length - live.length, seconds, cut_count: p.timeline.cut_count, included_duration_s: included };
+  },
+
+  discard_cut_proposal(args) {
+    const p = requireProject(args.project_id);
+    const had = !!p.cut_proposal;
+    p.cut_proposal = null;
+    if (had) emit("cut-proposal-changed", { project_id: p.id });
+    return { discarded: had };
+  },
+
+  skip_proposed_cuts(args) {
+    const p = requireProject(args.project_id);
+    const pr = p.cut_proposal;
+    if (!pr) throw { code: "invalid_arg", message: "invalid argument: no proposed cuts are waiting" };
+    const ids = Array.isArray(args.cut_ids) ? (args.cut_ids as number[]) : null;
+    const kind = typeof args.kind === "string" ? args.kind : null;
+    const skip = args.skip !== false;
+    let changed = 0;
+    for (const c of pr.cuts) {
+      if ((!ids || ids.includes(c.id)) && (!kind || c.kind === kind) && c.skipped !== skip) {
+        c.skipped = skip;
+        changed += 1;
+      }
+    }
+    emit("cut-proposal-changed", { project_id: p.id });
+    const live = pr.cuts.filter((c) => !c.skipped);
+    return { changed, to_apply: live.length, skipped: pr.cuts.length - live.length, seconds_to_apply: live.reduce((a, c) => a + c.end - c.start, 0) };
   },
 
   // ---- Editing ---------------------------------------------------------------
@@ -1786,10 +1951,25 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
     const actions: EditAction[] = [];
     let summary: string;
+    // The chat proposes its cuts; a plain "apply" makes them (the core does
+    // this without a model turn too).
+    const segRanges = (ids: string[]) =>
+      (state.transcript?.segments ?? []).filter((s) => ids.includes(s.id)).map((s) => ({ start: s.start, end: s.end }));
+    const waiting = () => {
+      const live = p.cut_proposal?.cuts.filter((c) => !c.skipped) ?? [];
+      const secs = live.reduce((a, c) => a + c.end - c.start, 0);
+      return `[Proposed ${live.length} cut${live.length === 1 ? "" : "s"} (${secs.toFixed(1)}s) — marked in the transcript and timeline. Nothing is cut until you press Apply or say “apply”.]`;
+    };
     try {
       const restore = lower.includes("restore") || lower.includes("bring back") || lower.includes("undo");
+      const yes = MOCK_YES.has(lower.replace(/[^a-z ]/g, "").trim());
 
-      if (restore) {
+      if (yes && p.cut_proposal) {
+        say({ kind: "tool_call", tool: "apply_cut_proposal", args: {} });
+        const res = tools.apply_cut_proposal!({ project_id: p.id }) as { action: EditAction | null; applied: number; seconds: number };
+        if (res.action) actions.push(res.action);
+        summary = `Applied ${res.applied} cut${res.applied === 1 ? "" : "s"} (${res.seconds.toFixed(1)}s) — one undoable edit.`;
+      } else if (restore) {
         run.next();
         say({ kind: "tool_call", tool: "undo", args: { project_id: p.id } });
         await sleep(350);
@@ -1805,12 +1985,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         say({ kind: "tool_result", tool: "detect_silences", result: { count: det.segments.length } });
         const ids = state.transcript?.segments.filter((s) => s.is_silence).map((s) => s.id) ?? [];
         run.next();
-        say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: ids } });
+        say({ kind: "tool_call", tool: "remove_silences", args: { project_id: p.id } });
         await sleep(400);
-        const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: ids }) as { action: EditAction };
-        say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
-        actions.push(res.action);
-        summary = `Cut ${ids.length} silence gap(s) from the timeline.`;
+        const added = mockPropose(p, segRanges(ids), "Remove pauses", false);
+        say({ kind: "tool_result", tool: "remove_silences", result: mockProposalReceipt(p, added) });
+        summary = `Found ${added.length} pause(s) to cut.\n\n${waiting()}`;
       } else if (lower.includes("filler") || lower.includes("um") || lower.includes("uh")) {
         run.next();
         say({ kind: "tool_call", tool: "detect_fillers", args: { project_id: p.id } });
@@ -1820,10 +1999,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         run.next();
         say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: det.segment_ids } });
         await sleep(400);
-        const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: det.segment_ids }) as { action: EditAction };
-        say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
-        actions.push(res.action);
-        summary = `Removed ${det.segment_ids.length} filler segment(s).`;
+        const added = mockPropose(p, segRanges(det.segment_ids), "Chat", false);
+        say({ kind: "tool_result", tool: "cut_by_transcript", result: mockProposalReceipt(p, added) });
+        summary = `Found ${added.length} filler word(s) to cut.\n\n${waiting()}`;
       } else {
         // Generic path: try to find matching segments and cut them.
         const keyword = lower.replace(/(cut|remove|delete|the|all|parts?|about|where i say)/g, " ").trim().split(/\s+/)[0] ?? "";
@@ -1837,10 +2015,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
           run.next();
           say({ kind: "tool_call", tool: "cut_by_transcript", args: { project_id: p.id, segment_ids: ids } });
           await sleep(400);
-          const res = tools.cut_by_transcript!({ project_id: p.id, segment_ids: ids }) as { action: EditAction };
-          say({ kind: "tool_result", tool: "cut_by_transcript", result: { description: res.action.description } });
-          actions.push(res.action);
-          summary = `Found ${found.segments.length} segment(s) mentioning “${keyword}” and cut ${ids.length}.`;
+          const added = mockPropose(p, segRanges(ids), "Chat", false);
+          say({ kind: "tool_result", tool: "cut_by_transcript", result: mockProposalReceipt(p, added) });
+          summary = `Found ${found.segments.length} segment(s) mentioning “${keyword}” and proposed cutting ${ids.length}.\n\n${waiting()}`;
         } else {
           summary = "I could not map that instruction to an edit. Try “remove the filler words” or “cut the silences”.";
         }
