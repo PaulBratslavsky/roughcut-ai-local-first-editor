@@ -99,8 +99,10 @@ def make_rough_draft(file_path):
     print("       %d segments in %.0fs" % (len(transcript.get("segments", [])), time.time() - t0))
 
     print("[3/4] AI rough cut (silences, fillers, duplicate takes)…")
-    rough = call_tool(url, token, "generate_rough_cut", {"project_id": pid})
-    timeline = rough.get("timeline", {})
+    # apply: make the cuts. Without it the rough cut is only proposed (for
+    # review in the app) and the export below would be the uncut source.
+    rough = call_tool(url, token, "generate_rough_cut", {"project_id": pid, "apply": True})
+    timeline = call_tool(url, token, "get_timeline", {"project_id": pid})
     cut_count = rough.get("cut_count", 0)
     included = sum(
         c["source_out"] - c["source_in"] for c in timeline.get("clips", []) if c.get("included")
