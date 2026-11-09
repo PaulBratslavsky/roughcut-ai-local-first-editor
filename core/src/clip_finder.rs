@@ -226,7 +226,12 @@ pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) ->
         };
         let mut tally = Tally::default();
         let picked = pick_all(editor, project_id, inference.as_ref(), &ctx, &windows, &mut tally).await;
-        step.count("topics", tally.topics).count("topics_failed", tally.failed);
+        step.count("topics", tally.topics)
+            .count("topics_failed", tally.failed)
+            .count("topics_retried", tally.retried)
+            .count("picks_too_long", tally.too_long)
+            .count("picks_too_short", tally.too_short)
+            .count("picks_bad_lines", tally.bad_lines);
         for m in &tally.models {
             step.model(m);
         }
@@ -348,8 +353,8 @@ fn progress(editor: &Editor, project_id: Uuid, fraction: f64, message: impl Into
 // ------------------------------------------------------------- sentences
 
 /// The transcript as sentences. Each segment is split at sentence
-/// punctuation (times from its word timings, or by character position when
-/// those don't line up with the text) and a sentence that runs on into the
+/// punctuation (each boundary in a gap between two words: `split_segment`)
+/// and a sentence that runs on into the
 /// next segment is joined to it — unless the edit keeps one segment and cuts
 /// the other (a false start must not leak into the kept take). A filler or
 /// throwaway segment is a line of its own; a pause of `PAUSE_BREAK_S` or a
@@ -373,7 +378,7 @@ fn sentences(speech: &[TranscriptSegment], main: &Timeline) -> Vec<Sentence> {
             }
         }
         if solo {
-            let (start, end) = (seg.start, seg.end.max(seg.start));
+            let (start, end) = seg_span(seg);
             out.push(Sentence { start, end, text: seg.text.trim().to_string(), seg_first: si, seg_last: si, filler: true });
             continue;
         }
@@ -409,40 +414,75 @@ fn sentences(speech: &[TranscriptSegment], main: &Timeline) -> Vec<Sentence> {
     out
 }
 
+/// A segment's span, never cutting into its own first or last word (after
+/// word alignment a segment's end can sit a little before its last word's).
+fn seg_span(seg: &TranscriptSegment) -> (f64, f64) {
+    let words = || seg.words.iter().filter(|w| !w.text.trim().is_empty());
+    let start = words().map(|w| w.start).fold(seg.start, f64::min);
+    let end = words().map(|w| w.end).fold(seg.end, f64::max);
+    (start, end.max(start))
+}
+
 /// One segment's pieces at sentence punctuation: (start, end, text).
+///
+/// Every boundary falls in the gap between two words. The sentence's last
+/// word is found by letters and digits: the cleaned-up text has punctuation
+/// and capitals the word list doesn't ("together. I could" vs "together i
+/// could"). When the clean-up changed the words themselves, it is the word
+/// nearest the same share of the letters. Without word timings, by position.
 fn split_segment(seg: &TranscriptSegment) -> Vec<(f64, f64, String)> {
     let text = seg.text.trim();
-    let seg_end = seg.end.max(seg.start);
+    let (seg_start, seg_end) = seg_span(seg);
     let cuts = sentence_ends(text);
     if cuts.is_empty() {
-        return vec![(seg.start, seg_end, text.to_string())];
+        return vec![(seg_start, seg_end, text.to_string())];
     }
-    let nonspace = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
-    let total = nonspace(text).max(1);
+    let letters = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).count();
+    let total = letters(text).max(1);
     let words: Vec<&crate::model::Word> = seg.words.iter().filter(|w| !w.text.trim().is_empty()).collect();
-    // Whisper's word tokens spell the segment's text: then a boundary's time
-    // is the token it falls after. Otherwise, by character position.
-    let aligned = !words.is_empty() && words.iter().map(|w| nonspace(&w.text)).sum::<usize>() == total;
-    let at = |k: usize| -> (f64, f64) {
-        if aligned {
-            let mut cum = 0;
-            for (t, w) in words.iter().enumerate() {
-                cum += nonspace(&w.text);
-                if cum >= k {
-                    let next = words.get(t + 1).map(|n| n.start).unwrap_or(seg_end);
-                    return (w.end, next);
-                }
-            }
-            (seg_end, seg_end)
+    // Letters spoken up to and including each word.
+    let through: Vec<usize> = words
+        .iter()
+        .scan(0, |n, w| {
+            *n += letters(&w.text);
+            Some(*n)
+        })
+        .collect();
+    let spelled = through.last().copied().unwrap_or(0);
+    // The word sentence `i` ends on: never before the last one's, and
+    // leaving a word for each sentence still to come.
+    let last_word = |k: usize, i: usize, after: Option<usize>| -> usize {
+        let t = if spelled == total {
+            through.iter().position(|&n| n >= k).unwrap_or(words.len() - 1)
         } else {
-            let t = seg.start + (seg_end - seg.start) * k as f64 / total as f64;
-            (t, t)
+            let want = k as f64 * spelled as f64 / total as f64;
+            (0..words.len())
+                .min_by(|&a, &b| {
+                    (through[a] as f64 - want).abs().partial_cmp(&(through[b] as f64 - want).abs()).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0)
+        };
+        // A punctuation token after the word ("job" ".") ends with it.
+        let mut t = t;
+        while t + 1 < words.len() && letters(&words[t + 1].text) == 0 {
+            t += 1;
         }
+        let lo = after.map_or(0, |a| a + 1);
+        let hi = (words.len() - 1).saturating_sub(cuts.len() - i);
+        t.min(hi).max(lo).min(words.len() - 1)
     };
     let mut out = vec![];
-    let (mut from, mut start) = (0usize, seg.start);
-    for &c in &cuts {
-        let (end, next) = at(nonspace(&text[..c]));
+    let (mut from, mut start) = (0usize, seg_start);
+    let mut prev: Option<usize> = None;
+    for (i, &c) in cuts.iter().enumerate() {
+        let (end, next) = if spelled == 0 {
+            let t = seg_start + (seg_end - seg_start) * letters(&text[..c]) as f64 / total as f64;
+            (t, t)
+        } else {
+            let t = last_word(letters(&text[..c]), i, prev);
+            prev = Some(t);
+            (words[t].end, words.get(t + 1).map_or(seg_end, |n| n.start))
+        };
         let end = end.clamp(start, seg_end);
         let piece = text[from..c].trim();
         if !piece.is_empty() {
@@ -876,9 +916,15 @@ impl Region {
 struct Tally {
     /// Topics the model was asked about.
     topics: usize,
-    /// Topics whose request failed or whose picks were all unusable: they
-    /// keep their rule-scored windows.
+    /// Topics whose request failed or whose picks were all unusable, even
+    /// on the second try: they keep their rule-scored windows.
     failed: usize,
+    /// Topics asked a second time (the first answer failed or was unusable).
+    retried: usize,
+    /// Picks rejected, by why.
+    too_long: usize,
+    too_short: usize,
+    bad_lines: usize,
     /// The models that answered.
     models: Vec<String>,
 }
@@ -911,17 +957,24 @@ async fn pick_all(
             format!("picking shorts with {label} — topic {}/{total}", n + 1),
         );
         let fallback = || windows.iter().filter(|w| region.contains(w)).cloned();
-        match pick_shorts(inference, &model, ctx, region, tally).await {
-            Ok(Some(picks)) => out.extend(picks),
-            Ok(None) => {
-                tally.failed += 1;
-                out.extend(fallback());
-            }
+        let mut answer = pick_shorts(inference, &model, ctx, region, None, tally).await;
+        // One more try, told what was wrong with the first answer.
+        let note = match &answer {
+            Ok(Picked::Unusable(note)) => Some(note.clone()),
+            Err(e) if !e.is_fatal_model_error() => Some(String::new()),
+            _ => None,
+        };
+        if let Some(note) = note {
+            tally.retried += 1;
+            answer = pick_shorts(inference, &model, ctx, region, Some(&note).filter(|n| !n.is_empty()).map(String::as_str), tally).await;
+        }
+        match answer {
+            Ok(Picked::Usable(picks)) => out.extend(picks),
             // An account problem stops the scan (the stored candidates stay
             // as they were); anything else about this topic keeps its
             // heuristic windows and the rest still count.
             Err(e) if e.is_fatal_model_error() => return Err(e),
-            Err(_) => {
+            Ok(Picked::Unusable(_)) | Err(_) => {
                 tally.failed += 1;
                 out.extend(fallback());
             }
@@ -1108,9 +1161,9 @@ fn check_pick(
     first: usize,
     last: usize,
     opts: &FindOptions,
-) -> Option<(usize, usize, f64)> {
+) -> std::result::Result<(usize, usize, f64), Reject> {
     if first == 0 || first > last || last > lines.len() {
-        return None;
+        return Err(Reject::Lines);
     }
     let (mut a, mut b) = (first - 1, last - 1);
     while a < b && sents[lines[a]].filler {
@@ -1121,10 +1174,69 @@ fn check_pick(
     }
     let (a, b) = (lines[a], lines[b]);
     if sents[a].filler || sents[b].filler {
-        return None;
+        return Err(Reject::Filler);
     }
     let duration = main.included_within(sents[a].start, sents[b].end);
-    (duration <= opts.max_s && duration >= opts.min_s - 1.0).then_some((a, b, duration))
+    if duration > opts.max_s {
+        Err(Reject::TooLong(duration))
+    } else if duration < opts.min_s - 1.0 {
+        Err(Reject::TooShort(duration))
+    } else {
+        Ok((a, b, duration))
+    }
+}
+
+/// Why a pick can't be used: told to the model when it tries again, and
+/// counted in the app log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Reject {
+    /// Line numbers out of range or backwards.
+    Lines,
+    /// Nothing but filler.
+    Filler,
+    TooLong(f64),
+    TooShort(f64),
+}
+
+/// One topic's answer.
+enum Picked {
+    Usable(Vec<Window>),
+    /// Every pick was rejected: what to tell the model on its second try.
+    Unusable(String),
+}
+
+impl Picked {
+    #[cfg(test)]
+    fn usable(self) -> Option<Vec<Window>> {
+        match self {
+            Picked::Usable(p) => Some(p),
+            Picked::Unusable(_) => None,
+        }
+    }
+}
+
+/// What to tell the model about picks that couldn't be used.
+fn retry_note(rejected: &[(usize, usize, Reject)], lines: usize, opts: &FindOptions) -> String {
+    let what: Vec<String> = rejected
+        .iter()
+        .map(|&(first, last, why)| {
+            let picked = format!("lines {first}-{last}");
+            match why {
+                Reject::Lines => format!("{picked}: not a run of this topic's lines 1-{lines}"),
+                Reject::Filler => format!("{picked}: only filler"),
+                Reject::TooLong(s) => format!("{picked}: runs {s:.0} s, too long"),
+                Reject::TooShort(s) => format!("{picked}: runs {s:.0} s, too short"),
+            }
+        })
+        .collect();
+    format!(
+        "\nYour previous answer for this topic couldn't be used: {}. A short runs from its first \
+         line's time to the time of the line after its last, and must be {:.0}-{:.0} seconds. Pick \
+         again, or reply [] if nothing here works.",
+        what.join("; "),
+        opts.min_s,
+        opts.max_s
+    )
 }
 
 /// A line number from a reply: an integer, or a whole number written as a
@@ -1158,10 +1270,14 @@ async fn pick_shorts(
     model: &str,
     ctx: &PickContext<'_>,
     region: &Region,
+    retry: Option<&str>,
     tally: &mut Tally,
-) -> Result<Option<Vec<Window>>> {
+) -> Result<Picked> {
     let PickContext { sents, main, beats, beat_of, relevance, opts } = *ctx;
-    let (lines, user) = pick_prompt(sents, main, region);
+    let (lines, mut user) = pick_prompt(sents, main, region);
+    if let Some(note) = retry {
+        user.push_str(note);
+    }
     let system = pick_system(opts, opts.theme.as_deref());
     let schema = short_picks_schema();
     let (replies, served): (Vec<serde_json::Value>, _) =
@@ -1173,13 +1289,22 @@ async fn pick_shorts(
     }
     let scorer = served.map(|s| scorer_name(&s));
     let mut picks = vec![];
+    let mut rejected: Vec<(usize, usize, Reject)> = vec![];
+    let mut off_theme = 0;
     for p in &replies {
-        let (Some(first), Some(last)) = (p.get("first").and_then(line_number), p.get("last").and_then(line_number))
-        else {
+        let (first, last) = (p.get("first").and_then(line_number), p.get("last").and_then(line_number));
+        let (Some(first), Some(last)) = (first, last) else {
+            if p.is_object() {
+                rejected.push((first.unwrap_or(0), last.unwrap_or(0), Reject::Lines));
+            }
             continue;
         };
-        let Some((first, last, duration)) = check_pick(sents, main, &lines, first, last, opts) else {
-            continue;
+        let (first, last, duration) = match check_pick(sents, main, &lines, first, last, opts) {
+            Ok(ok) => ok,
+            Err(why) => {
+                rejected.push((first, last, why));
+                continue;
+            }
         };
         let text = |key: &str| p.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
         let mut w = Window {
@@ -1203,15 +1328,33 @@ async fn pick_shorts(
         w.signals = signals;
         if let Some(rel) = relevance {
             if !on_theme(rel, &mut w) {
+                off_theme += 1;
                 continue;
             }
         }
         picks.push(w);
     }
-    let usable = replies.is_empty() || !picks.is_empty();
+    for &(_, _, why) in &rejected {
+        match why {
+            Reject::TooLong(_) => tally.too_long += 1,
+            Reject::TooShort(_) => tally.too_short += 1,
+            Reject::Lines | Reject::Filler => tally.bad_lines += 1,
+        }
+    }
+    if picks.is_empty() && !replies.is_empty() {
+        return Ok(Picked::Unusable(if !rejected.is_empty() {
+            retry_note(&rejected, lines.len(), opts)
+        } else if off_theme > 0 {
+            "\nYour previous picks for this topic weren't about the theme: pick only moments about \
+             it, or reply [] if this topic has none."
+                .into()
+        } else {
+            "\nYour previous answer for this topic couldn't be read: reply with ONLY the JSON array.".into()
+        }));
+    }
     picks.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     picks.truncate(PICKS_PER_REGION);
-    Ok(usable.then_some(picks))
+    Ok(Picked::Usable(picks))
 }
 
 /// How a candidate names the model that picked it: "Claude Opus 5.5", or
@@ -1371,6 +1514,37 @@ mod tests {
         assert!((c[0].end - 5.0).abs() < 0.6 && (c[1].start - 5.0).abs() < 0.6, "{c:?}");
         // Abbreviations, decimals and initials don't end a sentence.
         assert_eq!(sents_of(&[seg(0.0, 5.0, "Dr. Smith paid 3.5 dollars, e.g. a coffee. Done.")]).len(), 2);
+    }
+
+    fn words(list: &[(&str, f64, f64)]) -> Vec<Word> {
+        list.iter().map(|(t, s, e)| Word { text: t.to_string(), start: *s, end: *e, confidence: 1.0 }).collect()
+    }
+
+    #[test]
+    fn sentence_edges_fall_between_words_when_the_text_was_cleaned_up() {
+        // The clean-up added punctuation and capitals the word list doesn't have.
+        let mut a = seg(10.0, 14.0, "Added together. I could also, uh, ask it.");
+        a.words = words(&[
+            ("added", 10.0, 10.3), ("together", 10.3, 10.9), ("i", 11.4, 11.5), ("could", 11.5, 11.8),
+            ("also", 11.8, 12.1), ("uh", 12.2, 12.4), ("ask", 12.5, 12.8), ("it", 12.8, 13.9),
+        ]);
+        let s = sents_of(&[a]);
+        assert_eq!(s.len(), 2);
+        // "together" ends at 10.9 and "i" starts at 11.4: both edges in that gap.
+        assert!((10.9..=11.4).contains(&s[0].end) && (10.9..=11.4).contains(&s[1].start), "{s:?}");
+        // The clean-up changed a word ("can 't" became "can"): still between words.
+        let mut b = seg(20.0, 24.0, "What I can do now. In weeks, that took a year.");
+        b.words = words(&[
+            ("what", 20.0, 20.2), ("i", 20.2, 20.3), ("can", 20.3, 20.5), ("'t", 20.5, 20.6), ("do", 20.6, 20.8),
+            ("now", 20.8, 21.2), ("in", 21.6, 21.7), ("weeks", 21.7, 22.1), ("that", 22.2, 22.4),
+            ("took", 22.4, 22.7), ("a", 22.7, 22.8), ("year", 22.8, 23.6),
+        ]);
+        let s = sents_of(&[b]);
+        assert!((21.2..=21.6).contains(&s[0].end) && (21.2..=21.6).contains(&s[1].start), "{s:?}");
+        // A segment that ends before its last word does keeps the whole word.
+        let mut c = seg(30.0, 31.0, "That's my point.");
+        c.words = words(&[("that", 30.0, 30.3), ("'s", 30.3, 30.4), ("my", 30.4, 30.6), ("point", 30.6, 31.3)]);
+        assert!(sents_of(&[c])[0].end >= 31.3);
     }
 
     #[test]
@@ -1698,15 +1872,15 @@ mod tests {
         let main = Timeline::new(60.0);
         let lines: Vec<usize> = (0..sents.len()).collect();
         let o = opts(10.0, 20.0);
-        assert_eq!(check_pick(&sents, &main, &lines, 1, 2, &o).map(|p| (p.0, p.1)), Some((0, 1)));
+        assert_eq!(check_pick(&sents, &main, &lines, 1, 2, &o).map(|p| (p.0, p.1)), Ok((0, 1)));
         // Line 3 is the filler "um": an edge on it moves inward.
-        assert_eq!(check_pick(&sents, &main, &lines, 3, 5, &o).map(|p| (p.0, p.1)), Some((3, 4)));
-        assert_eq!(check_pick(&sents, &main, &lines, 0, 2, &o), None, "line numbers start at 1");
-        assert_eq!(check_pick(&sents, &main, &lines, 2, 1, &o), None);
-        assert_eq!(check_pick(&sents, &main, &lines, 1, 11, &o), None, "no such line");
-        assert_eq!(check_pick(&sents, &main, &lines, 1, 5, &o), None, "30s is over the 20s limit");
-        assert!(check_pick(&sents, &main, &lines, 1, 1, &opts(6.5, 20.0)).is_some(), "a second short is fine");
-        assert_eq!(check_pick(&sents, &main, &lines, 1, 1, &o), None, "6s is under 10s");
+        assert_eq!(check_pick(&sents, &main, &lines, 3, 5, &o).map(|p| (p.0, p.1)), Ok((3, 4)));
+        assert_eq!(check_pick(&sents, &main, &lines, 0, 2, &o), Err(Reject::Lines), "line numbers start at 1");
+        assert_eq!(check_pick(&sents, &main, &lines, 2, 1, &o), Err(Reject::Lines));
+        assert_eq!(check_pick(&sents, &main, &lines, 1, 11, &o), Err(Reject::Lines), "no such line");
+        assert_eq!(check_pick(&sents, &main, &lines, 1, 5, &o), Err(Reject::TooLong(30.0)), "30s is over the 20s limit");
+        assert!(check_pick(&sents, &main, &lines, 1, 1, &opts(6.5, 20.0)).is_ok(), "a second short is fine");
+        assert_eq!(check_pick(&sents, &main, &lines, 1, 1, &o), Err(Reject::TooShort(6.0)), "6s is under 10s");
         assert_eq!(rubric_score([1.0, 1.0, 1.0, 1.0]), 0.0);
         assert_eq!(rubric_score([5.0, 5.0, 5.0, 5.0]), 100.0);
         assert_eq!(rubric_score([9.0, 0.0, 3.0, 3.0]), 50.0, "ratings are clamped to 1-5");
@@ -1751,14 +1925,62 @@ mod tests {
         let o = opts(10.0, 20.0);
         let ctx = PickContext { sents: &sents, main: &main, beats: &[], beat_of: &beat_of, relevance: None, opts: &o };
         let region = Region { first: 0, last: sents.len() - 1 };
-        let picks = pick_shorts(&Picker, "m", &ctx, &region, &mut Tally::default()).await.unwrap().expect("usable");
+        let picks = pick_shorts(&Picker, "m", &ctx, &region, None, &mut Tally::default()).await.unwrap().usable().expect("usable");
         assert_eq!(picks.len(), 2, "the out-of-range pick is dropped");
         let best = diversify(picks, 1).remove(0);
         assert_eq!((best.first, best.last), (0, 1));
         assert_eq!(best.title.as_deref(), Some("The big mistake"));
         assert!(best.judged && best.score > 70.0, "{}", best.score);
         // Nothing usable: the caller keeps the heuristic windows instead.
-        assert!(pick_shorts(&Nonsense, "m", &ctx, &region, &mut Tally::default()).await.unwrap().is_none());
+        assert!(pick_shorts(&Nonsense, "m", &ctx, &region, None, &mut Tally::default()).await.unwrap().usable().is_none());
+    }
+
+    /// A model whose first answer runs too long and whose second is fine. It
+    /// keeps what it was asked.
+    #[derive(Default)]
+    struct SecondTry {
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl InferenceClient for SecondTry {
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            let user = request.messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.clone());
+            let mut asked = self.asked.lock().unwrap();
+            asked.push(user.unwrap_or_default());
+            let (last, title) = if asked.len() == 1 { (5, "Too long") } else { (2, "Just right") };
+            let replies = serde_json::json!([
+                {"first": 1, "last": last, "hook": 5, "standalone": 5, "payoff": 5, "ending": 5, "title": title, "reason": "x"}
+            ]);
+            Ok(ChatResponse::new(ChatMessage::assistant(&replies.to_string())))
+        }
+        async fn healthy(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_answer_is_asked_again_with_what_was_wrong() {
+        let editor = Editor::test_instance();
+        let sents = sents_of(&speech());
+        let main = Timeline::new(60.0);
+        let beat_of = vec![0; sents.len()];
+        let o = FindOptions { scan: true, ..opts(10.0, 20.0) };
+        let ctx = PickContext { sents: &sents, main: &main, beats: &[], beat_of: &beat_of, relevance: None, opts: &o };
+        let windows = candidate_windows(&sents, Some(&beat_of), &main, &o);
+        let model = SecondTry::default();
+        let mut tally = Tally::default();
+        let picks = pick_all(&editor, Uuid::new_v4(), &model, &ctx, &windows, &mut tally).await.unwrap().unwrap();
+        assert_eq!((tally.topics, tally.retried, tally.failed, tally.too_long), (1, 1, 0, 1));
+        assert_eq!(picks.iter().filter(|w| w.judged).filter_map(|w| w.title.as_deref()).collect::<Vec<_>>(), vec!["Just right"]);
+        let asked = model.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2);
+        assert!(!asked[0].contains("previous answer"));
+        assert!(asked[1].contains("lines 1-5: runs 30 s, too long") && asked[1].contains("10-20 seconds"), "{}", asked[1]);
+        // Unusable twice: the topic keeps its rule-scored windows (and with no
+        // judged pick anywhere, the caller falls back to them all).
+        let mut tally = Tally::default();
+        assert!(pick_all(&editor, Uuid::new_v4(), &Nonsense, &ctx, &windows, &mut tally).await.unwrap().is_none());
+        assert_eq!((tally.retried, tally.failed, tally.bad_lines), (1, 1, 2));
     }
 
     #[test]
@@ -1823,7 +2045,7 @@ mod tests {
         let beat_of = vec![0; sents.len()];
         let o = opts(10.0, 20.0);
         let ctx = PickContext { sents: &sents, main: &main, beats: &[], beat_of: &beat_of, relevance: None, opts: &o };
-        let picks = pick_shorts(&Messy, "m", &ctx, &Region { first: 0, last: sents.len() - 1 }, &mut Tally::default()).await.unwrap().unwrap();
+        let picks = pick_shorts(&Messy, "m", &ctx, &Region { first: 0, last: sents.len() - 1 }, None, &mut Tally::default()).await.unwrap().usable().unwrap();
         let titles: Vec<&str> = picks.iter().filter_map(|w| w.title.as_deref()).collect();
         assert_eq!(titles, vec!["Strings", "Good", "Mid"], "the best three, best first");
     }
@@ -1838,7 +2060,7 @@ mod tests {
         let mut rel = vec![0.0; sents.len()];
         rel[8] = 1.0;
         let ctx = PickContext { sents: &sents, main: &main, beats: &[], beat_of: &beat_of, relevance: Some(&rel), opts: &o };
-        let picks = pick_shorts(&Picker, "m", &ctx, &Region { first: 0, last: sents.len() - 1 }, &mut Tally::default()).await.unwrap().unwrap();
+        let picks = pick_shorts(&Picker, "m", &ctx, &Region { first: 0, last: sents.len() - 1 }, None, &mut Tally::default()).await.unwrap().usable().unwrap();
         assert_eq!(picks.iter().map(|w| (w.first, w.last)).collect::<Vec<_>>(), vec![(7, 8)]);
         assert!(picks[0].signals.contains(&"on theme"));
     }

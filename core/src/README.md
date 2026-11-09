@@ -175,8 +175,12 @@ in `docs/tool-api.md`.
   (`Editor::begin_clip_scan`; a second run errors), clamps `count` to 1–60
   (`MAX_COUNT`) and `min_s` to at least 3 s (`max_s` to at least `min_s` + 1).
   It re-cuts the transcript into sentences (`sentences`: whisper's
-  segments split at sentence punctuation, timed from their word tokens or
-  by character position, and joined where a sentence runs on, but never
+  segments split at sentence punctuation, each boundary in the gap between
+  two words: the sentence's last word is found by letters and digits, since
+  the cleaned-up text has punctuation and capitals the word list doesn't, or
+  by share of the letters when the clean-up changed words; by character
+  position only without word timings; a segment never ends inside its own
+  last word (`seg_span`). Sentences are joined where one runs on, but never
   across a cut in the edit; a filler or throwaway segment, a pause of 1 s or
   a run-on past 20 s also ends one).
   It builds windows that start and end on a usable (kept, non-filler)
@@ -197,7 +201,9 @@ in `docs/tool-api.md`.
   + 0.2 × the heuristic; with a theme, a pick the search never hit is
   dropped and the rest are ranked on theme first (`on_theme`). A region
   keeps at most its best 3. A region whose request fails, or whose picks are
-  all unusable, keeps its heuristic windows, and so do regions a plain run
+  all unusable, is asked once more, told what was wrong (`retry_note`: each
+  rejected pick's lines and why, e.g. "runs 74 s, too long"); if that fails
+  too it keeps its heuristic windows, and so do regions a plain run
   didn't ask about; they rank after the picks. `[]` is an answer, but when
   the model picks nothing usable anywhere the run falls back to the
   heuristic list. With no model, the heuristic pool is `max(24, count)`

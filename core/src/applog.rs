@@ -1095,8 +1095,10 @@ mod tests {
         let topics = picks[0]["topics"].as_u64().unwrap();
         assert!(topics >= 1, "{text}");
         assert_eq!(picks[0]["topics_failed"], topics - 1, "{text}");
+        assert_eq!(picks[0]["topics_retried"], topics - 1, "{text}");
         assert_eq!(picks[0]["models"][0], "claude-opus-5-5");
-        assert_eq!(find("ai_request", "short_picks").len() as u64, topics);
+        // A failed topic is asked twice.
+        assert_eq!(find("ai_request", "short_picks").len() as u64, topics + (topics - 1));
         // The chat: Hosted went offline (one model_route line), local answered.
         let routes: Vec<_> = lines.iter().filter(|l| l["event"] == "model_route").collect();
         assert_eq!(routes.len(), 1, "{text}");
