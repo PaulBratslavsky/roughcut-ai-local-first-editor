@@ -6,7 +6,7 @@ import { useStore } from "@tanstack/react-store";
 import { useQueryClient } from "@tanstack/react-query";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { callTool, isTauri } from "../ipc/api";
-import { useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
+import { useProject, useProjects, useRedo, useRestoreProject, useUndo } from "../ipc/queries";
 import { setProjectId, setScreen, viewStore, type AppScreen } from "../state/viewStore";
 import { newProjectFromDialog } from "../newProject";
 import { errText } from "./clipUtil";
@@ -33,6 +33,7 @@ export function TopBar({
   const redo = useRedo();
   const restoreProject = useRestoreProject();
   const projects = useProjects();
+  const { data: project } = useProject(projectId);
   const queryClient = useQueryClient();
   const [showSetup, setShowSetup] = useState(false);
   const [theme, setTheme] = useState(currentTheme());
@@ -192,7 +193,15 @@ export function TopBar({
             <path d="M13.5 6.5H6a3.5 3.5 0 0 0 0 7h3" />
           </svg>
         </button>
-        <ExportMenu projectId={projectId} projectName={projectName} />
+        <ExportMenu
+          projectId={projectId}
+          projectName={projectName}
+          blocked={
+            project?.clip_session
+              ? "You're editing a clip: save or cancel it first (export the clip from the Clips screen)"
+              : undefined
+          }
+        />
       </div>
     </header>
   );

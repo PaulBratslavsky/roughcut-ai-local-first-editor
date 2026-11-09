@@ -206,6 +206,10 @@ fn mmss(s: f64) -> String {
 /// its text. When the transcript doesn't fit, the rest is listed as a map
 /// (time ranges with their opening words) so the model knows it exists and
 /// can page it in with read_transcript.
+/// With a clip open in the Editor, the chat sees this much transcript either
+/// side of it ("add the sentence before").
+const CLIP_MARGIN_S: f64 = 30.0;
+
 fn project_context(editor: &Editor, project_id: Uuid) -> Result<String> {
     let budget = if editor.hosted_likely() { CONTEXT_HOSTED } else { CONTEXT_LOCAL };
     project_context_with(editor, project_id, budget)
@@ -223,6 +227,22 @@ fn project_context_with(editor: &Editor, project_id: Uuid, budget: usize) -> Res
             tl.included_duration(),
             mmss(tl.included_duration()),
         );
+        // A clip open in the Editor: the timeline is the clip's, and only the
+        // transcript around it is shown (the whole video's lines before it
+        // could use up the budget).
+        let window = p.clip_session.as_ref().and_then(|s| {
+            let mut kept = tl.included_clips();
+            let first = kept.next()?.source_in;
+            let last = tl.included_clips().last().map(|c| c.source_out).unwrap_or(first);
+            out.push_str(&format!(
+                "You are editing the saved clip “{}”, not the whole video: everything outside it is cut. \
+                 Cuts and restores change only this clip (restoring a line just before or after it extends \
+                 it). The user saves or cancels it from the bar at the top. Shown: its lines and {CLIP_MARGIN_S:.0} s \
+                 either side.\n",
+                s.title
+            ));
+            Some((first - CLIP_MARGIN_S, last + CLIP_MARGIN_S))
+        });
         let Some(t) = t else {
             out.push_str("No transcript yet — call transcribe-like tools via the UI first.\n");
             return Ok(out);
@@ -232,8 +252,13 @@ fn project_context_with(editor: &Editor, project_id: Uuid, budget: usize) -> Res
              removed from the edit, PART = partly removed, filler, best-take / alt-take. \
              Segments are speech-recognition chunks that often start or end mid-sentence.\n",
         );
-        let speech: Vec<(usize, &crate::model::TranscriptSegment)> =
-            t.segments.iter().enumerate().filter(|(_, s)| !s.is_silence).collect();
+        let speech: Vec<(usize, &crate::model::TranscriptSegment)> = t
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_silence)
+            .filter(|(_, s)| window.is_none_or(|(a, b)| s.end > a && s.start < b))
+            .collect();
         let mut shown = 0;
         for (i, s) in &speech {
             let mut flags = vec![];
@@ -1318,6 +1343,33 @@ mod tests {
         assert!(small.contains("(transcript truncated)"), "{small}");
         assert!(small.contains("read_transcript offset="), "{small}");
         assert!(small.lines().any(|l| l.contains("… | ")), "a map line for the rest:\n{small}");
+    }
+
+    #[tokio::test]
+    async fn with_a_clip_open_the_context_is_the_clip_and_its_surroundings() {
+        let (editor, pid) = transcribed().await;
+        let t = editor.get_transcript(pid).unwrap().unwrap();
+        let speech: Vec<_> = t.segments.iter().filter(|s| !s.is_silence).collect();
+        let (first, last) = (speech.first().unwrap(), speech.last().unwrap());
+        assert!(last.start - first.end > 2.0 * super::CLIP_MARGIN_S + 10.0, "the demo is long enough for this test");
+        // A clip over the last speech segment only.
+        let clip = editor
+            .create_clip(
+                pid,
+                crate::engine::ClipSource::Ranges(vec![crate::model::SourceRange { start: last.start, end: last.end }]),
+                Some("Ending"),
+                None,
+            )
+            .unwrap();
+        editor.begin_clip_edit(pid, clip.id).unwrap();
+        let ctx = project_context_with(&editor, pid, 1_000_000).unwrap();
+        assert!(ctx.contains("editing the saved clip “Ending”"), "{ctx}");
+        let line_of = |text: &str| format!("| {text}\n");
+        assert!(ctx.contains(&line_of(&last.text)), "the clip's own line:\n{ctx}");
+        assert!(!ctx.contains(&line_of(&first.text)), "not the far start of the video:\n{ctx}");
+        editor.end_clip_edit(pid, false).unwrap();
+        let ctx = project_context_with(&editor, pid, 1_000_000).unwrap();
+        assert!(!ctx.contains("editing the saved clip") && ctx.contains(&line_of(&first.text)));
     }
 
     #[test]

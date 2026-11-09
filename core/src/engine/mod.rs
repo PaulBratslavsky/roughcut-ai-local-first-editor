@@ -9,10 +9,12 @@
 //! - [`media`] — import, transcription, transcript text updates
 //! - [`edits`] — THE mutation seam: apply_edit, journal, undo/redo
 //! - [`clips`] — saved clips + candidate storage, one scan per project, face crop
+//! - [`clip_session`] — a saved clip open in the Editor (main edit set aside)
 //! - [`semantic`] — embedding index + cosine search
 //! - [`confirm`] — user approval of externally-driven destructive ops
 //! - [`route`] — the LOCAL / HOSTED switch: which inference client a run gets
 
+mod clip_session;
 mod clips;
 mod confirm;
 mod edits;
@@ -22,6 +24,7 @@ mod projects;
 pub mod route;
 mod semantic;
 
+pub use clip_session::pieces_after_edit;
 pub use clips::{ClipChanges, ClipScan, ClipSource, FaceCrop};
 pub use proposals::{fmt_seconds, AppliedProposal, ProposeOutcome, RoughCutReport};
 

@@ -26,6 +26,7 @@ import { InspectorPanel } from "./panels/InspectorPanel";
 import { MetadataPanel } from "./panels/MetadataPanel";
 import { Timeline } from "./timeline/Timeline";
 import { TransportBar } from "./timeline/TransportBar";
+import { ClipEditBar } from "./panels/ClipEditBar";
 
 /** `?` opens the keymap; Esc or `?` again closes. The app is keyboard-first
  *  but the bindings were only discoverable from the statusline. */
@@ -85,6 +86,7 @@ function Editor({ projectId }: { projectId: string }) {
   return (
     <div className="app-shell">
       <TopBar projectId={projectId} projectName={project?.name ?? "…"} />
+      <ClipEditBar projectId={projectId} />
       <main className="main-row">
         <section className="left-panel card light">
           <TranscriptPanel projectId={projectId} />

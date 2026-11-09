@@ -94,7 +94,7 @@ checklist item 8.
 | B18 | Recording races: stop-during-pause drops the last take; concurrent starts orphan an ffmpeg holding the camera. **Resolved: the recorder was removed (ADR-0008).** | `record.rs:464-508, 677-688` |
 | F2 | Errors render as `[object Object]` on desktop: Tauri rejects `{error:{code,message}}`, the mock `{code,message}`; 11 sites unwrap the wrong one. | `HistoryPanel.tsx:34` et al. |
 | F3 | Panel-local copies of core state survive a project switch (`<Editor>` not keyed) — Apply writes project A's padding into B. | `App.tsx:232`, `InspectorPanel.tsx:273-280` |
-| F4 | Transcript "segment is cut" is inferred from `linked_segment_ids`, which are provenance, not current state — wrong after partial restores. | `TranscriptPanel.tsx:251-257` |
+| F4 | Transcript "segment is cut" is inferred from `linked_segment_ids`, which are provenance, not current state — wrong after partial restores. **Resolved 2026-11-08: a segment is cut when (almost) none of it plays (`cutIds` from the included clips' coverage); found again when a saved clip opened in the Editor hid lines that play.** | `TranscriptPanel.tsx:251-257` |
 | F5 | "Screen only" recording opens the webcam anyway. **Resolved: the recorder was removed (ADR-0008).** | `RecorderPanel.tsx:339` |
 | F6 | `set_audio_offset`, `set_preferences`, `attach_screen_media` emit no event → MCP-driven changes never reach the UI; re-transcribe leaves a stale suggestions banner. | `projects.rs:185-218`, `queries.ts:109-114` |
 

@@ -140,6 +140,9 @@ This package depends on the following crate modules but does not own them:
 | `update_clip(id, clip_id, ClipChanges)`, `delete_clip(id, clip_id)`                 | New ranges re-snapshot the current main cut.                                           |
 | `async center_clip_on_face(id, clip_id) -> Result<FaceCrop>`                        | Face pass that always applies the crop it finds.                                       |
 | `auto_center_clip(id, clip_id)`                                                     | Fire-and-forget face pass that uses compare-and-set on the clip's framing.             |
+| `begin_clip_edit(id, clip_id) -> Result<(ClipEditSession, Timeline)>` (`clip_session.rs`) | Opens a saved clip in the Editor: sets the main edit (timeline, proposal, checkpoints, suggestions, undo, redo) aside under the `clip-session-main:{id}` key, puts the clip's timeline in `Project.timeline`, sets `Project.clip_session`. |
+| `end_clip_edit(id, save) -> Result<(Option<SavedClipSummary>, Timeline)>`           | Saves (timeline + `pieces_after_edit`) or drops the clip's edit, then restores the main edit and clears the key. |
+| `clip_session(id)`, `require_no_clip_session(id, what)`                             | The open clip, if any; the refusal whole-video entry points call first.                |
 
 ### Semantic index and search (`semantic.rs`)
 

@@ -535,6 +535,65 @@ let actionCounter = 0;
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
+// ---- Clip edit session (mirrors core/src/engine/clip_session.rs) -----------
+
+/** The main edit, set aside while a saved clip is open in the Editor. */
+let mockMainEdit: {
+  timeline: Timeline;
+  cut_proposal: Project["cut_proposal"];
+  checkpoints: Project["checkpoints"];
+  suggestions: Project["suggestions"];
+  undo: Snapshot[];
+  redo: Snapshot[];
+} | null = null;
+
+/** The core's refusal for whole-video work while a clip is open. */
+function refuseInClipSession(p: Project, what: string): void {
+  if (p.clip_session) {
+    throw {
+      code: "invalid_arg",
+      message: `you're editing the clip “${p.clip_session.title}” in the Editor: save or cancel it before ${what}`,
+    };
+  }
+}
+
+/** The core's pieces_after_edit: each playing stretch joins the piece it
+ *  overlaps most (else the nearest); pieces become spans, empty ones drop,
+ *  touching ones merge. */
+function piecesAfterEdit(old: SourceRange[], tl: Timeline): SourceRange[] {
+  const plays = tl.clips.filter((c) => c.included && c.source_out - c.source_in > 1e-6).map((c) => [c.source_in, c.source_out] as const);
+  if (plays.length === 0) return [];
+  const pieces = old.length > 0 ? old : [{ start: plays[0]![0], end: plays[plays.length - 1]![1] }];
+  const spans: ([number, number] | null)[] = pieces.map(() => null);
+  for (const [a, b] of plays) {
+    const dist = (r: SourceRange) => {
+      const overlap = Math.min(b, r.end) - Math.max(a, r.start);
+      return overlap > 0 ? -overlap : Math.max(r.start - b, a - r.end);
+    };
+    let k = 0;
+    pieces.forEach((r, i) => {
+      if (dist(r) < dist(pieces[k]!)) k = i;
+    });
+    const s = spans[k];
+    spans[k] = s ? [Math.min(s[0], a), Math.max(s[1], b)] : [a, b];
+  }
+  const out = spans.filter((s): s is [number, number] => s !== null).map(([start, end]) => ({ start, end }));
+  out.sort((x, y) => x.start - y.start);
+  const merged: SourceRange[] = [];
+  for (const r of out) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end + 1e-6) last.end = Math.max(last.end, r.end);
+    else merged.push({ ...r });
+  }
+  return merged;
+}
+
+function clipSessionEvents(projectId: string): void {
+  emit("timeline-changed", { project_id: projectId });
+  emit("clips-changed", { project_id: projectId });
+  emit("cut-proposal-changed", { project_id: projectId });
+}
+
 function requireProject(projectId?: unknown): Project {
   const p = state.project;
   if (!p) throw { code: "not_found", message: "No project open" };
@@ -1175,7 +1234,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       saved_clips: [],
       clip_candidates: [],
       cut_proposal: null,
+      clip_session: null,
     };
+    mockMainEdit = null;
     state.undoStack = [];
     state.redoStack = [];
     state.transcript = null;
@@ -1906,6 +1967,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   async story_edit(args): Promise<unknown> {
     const p = requireProject(args.project_id);
+    refuseInClipSession(p, "a story edit of the whole video");
     // A conversation: outline, plan, flow review — one model throughout.
     const run = new MockRun("conversation", true);
     for (let request = 0; request < 3; request++) {
@@ -2093,6 +2155,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   async find_clips(args): Promise<unknown> {
     const p = requireProject(args.project_id);
+    refuseInClipSession(p, "scanning for shorts");
     const t = state.transcript;
     if (!t) throw { code: "invalid_arg", message: "no transcript; transcribe first" };
     if (mockScans.has(p.id)) {
@@ -2109,6 +2172,70 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
   get_clip_candidates(args): unknown {
     const p = requireProject(args.project_id);
     return { candidates: clone(p.clip_candidates ?? []) };
+  },
+
+  begin_clip_edit(args): unknown {
+    const p = requireProject(args.project_id);
+    if (p.clip_session) {
+      if (p.clip_session.clip_id === args.clip_id) return { session: clone(p.clip_session), timeline: clone(p.timeline) };
+      throw { code: "invalid_arg", message: `the clip “${p.clip_session.title}” is open in the Editor: save or cancel it first` };
+    }
+    const c = (p.saved_clips ?? []).find((x) => x.id === args.clip_id);
+    if (!c) throw { code: "not_found", message: `clip ${String(args.clip_id)}` };
+    mockMainEdit = {
+      timeline: clone(p.timeline),
+      cut_proposal: clone(p.cut_proposal),
+      checkpoints: clone(p.checkpoints ?? []),
+      suggestions: clone(p.suggestions ?? []),
+      undo: state.undoStack,
+      redo: state.redoStack,
+    };
+    p.timeline = clone(c.timeline);
+    p.cut_proposal = null;
+    p.checkpoints = [];
+    p.suggestions = [];
+    p.clip_session = { clip_id: c.id, title: c.title, started_at: new Date().toISOString() };
+    state.undoStack = [];
+    state.redoStack = [];
+    clipSessionEvents(p.id);
+    return { session: clone(p.clip_session), timeline: clone(p.timeline) };
+  },
+
+  end_clip_edit(args): unknown {
+    const p = requireProject(args.project_id);
+    if (typeof args.save !== "boolean") {
+      throw { code: "invalid_arg", message: "save is required: true keeps the clip's edit, false drops it" };
+    }
+    if (!p.clip_session || !mockMainEdit) throw { code: "invalid_arg", message: "no clip is open in the Editor" };
+    let saved: SavedClipSummary | null = null;
+    if (args.save) {
+      if (p.cut_proposal) {
+        throw { code: "invalid_arg", message: "apply or discard the proposed cuts first, then save the clip" };
+      }
+      const c = (p.saved_clips ?? []).find((x) => x.id === p.clip_session!.clip_id);
+      if (c) {
+        const pieces = piecesAfterEdit(c.ranges, p.timeline);
+        const plays = includedWithin(p.timeline, 0, p.timeline.duration);
+        if (pieces.length === 0 || plays < 1) {
+          throw { code: "invalid_arg", message: "under 1 s of the clip would play: restore some of it, or cancel" };
+        }
+        c.ranges = pieces;
+        c.start = pieces[0]!.start;
+        c.end = pieces[pieces.length - 1]!.end;
+        c.timeline = clone(p.timeline);
+        saved = clipSummary(c);
+      }
+    }
+    p.timeline = mockMainEdit.timeline;
+    p.cut_proposal = mockMainEdit.cut_proposal;
+    p.checkpoints = mockMainEdit.checkpoints;
+    p.suggestions = mockMainEdit.suggestions;
+    state.undoStack = mockMainEdit.undo;
+    state.redoStack = mockMainEdit.redo;
+    p.clip_session = null;
+    mockMainEdit = null;
+    clipSessionEvents(p.id);
+    return { clip: saved, timeline: clone(p.timeline) };
   },
 
   frame_candidate(args): unknown {
@@ -2131,6 +2258,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   create_clip(args): unknown {
     const p = requireProject(args.project_id);
+    refuseInClipSession(p, "making a clip");
     const format = argFormat(args);
     const byRank = args.rank != null ? p.clip_candidates?.[Number(args.rank) - 1]?.id : undefined;
     const candidateId = args.candidate_id ?? byRank;
@@ -2179,6 +2307,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
    *  returning, like the core (make_clips progress, "framing 2/6"). */
   async create_clips(args): Promise<unknown> {
     const p = requireProject(args.project_id);
+    refuseInClipSession(p, "making shorts");
     const ids = Array.isArray(args.candidate_ids) ? (args.candidate_ids as unknown[]).map(String) : [];
     if (ids.length === 0) {
       throw { code: "invalid_arg", message: "candidate_ids is empty: pass the ids of the candidates to make" };
@@ -2235,6 +2364,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     if (!c) throw { code: "not_found", message: `clip ${String(args.clip_id)}` };
     const format = argFormat(args);
     const ranges = argRanges(args);
+    if (ranges) refuseInClipSession(p, "changing a clip's pieces");
     if (ranges) {
       c.ranges = normalizeRanges(p, ranges);
       c.start = c.ranges[0]!.start;
@@ -2273,6 +2403,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   delete_clip(args): unknown {
     const p = requireProject(args.project_id);
+    if (p.clip_session?.clip_id === args.clip_id) refuseInClipSession(p, "deleting it");
     p.saved_clips = (p.saved_clips ?? []).filter((x) => x.id !== args.clip_id);
     return { deleted: true };
   },
@@ -2341,6 +2472,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
 
   async export(args) {
     const p = requireProject(args.project_id);
+    refuseInClipSession(p, "exporting the whole video (export the clip from the Clips screen)");
     await emitProgress("export", p.id, ["Resolving timeline…", "Writing file…"], 700);
     return { path: String(args.out_path ?? "~/Downloads/export.xml") };
   },

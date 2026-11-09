@@ -15,6 +15,9 @@ impl Editor {
         project_id: Option<Uuid>,
         file_path: &str,
     ) -> Result<Media> {
+        if let Some(pid) = project_id {
+            self.require_no_clip_session(pid, "importing a video")?;
+        }
         let mut media = self.inner.video.probe(file_path).await?;
         if let Some(pid) = project_id {
             self.ensure_loaded(pid)?;
@@ -331,6 +334,7 @@ impl super::Editor {
     /// Inputs must match codec/resolution (stream copy) — mismatches refuse.
     pub async fn append_media(&self, project_id: uuid::Uuid, file_path: &str) -> crate::error::Result<crate::model::Media> {
         use crate::error::CoreError;
+        self.require_no_clip_session(project_id, "adding a video")?;
         let current = self.with_project(project_id, |p, _| {
             p.media.clone().ok_or_else(|| CoreError::InvalidArg("project has no media".into()))
         })?;
@@ -385,6 +389,7 @@ impl super::Editor {
 impl super::Editor {
     /// Attach a screen file that started with the camera file (probed; offset 0).
     pub async fn attach_screen_media(&self, project_id: uuid::Uuid, file_path: &str) -> crate::error::Result<()> {
+        self.require_no_clip_session(project_id, "adding a screen recording")?;
         let media = self.video().probe(file_path).await?;
         self.ensure_loaded(project_id)?;
         let mut state = self.inner.state.lock().unwrap();

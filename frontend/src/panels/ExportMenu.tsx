@@ -23,9 +23,12 @@ export const EXPORT_TARGETS: { target: ExportTarget; label: string; ext: string 
 export function ExportMenu({
   projectId,
   projectName,
+  blocked,
 }: {
   projectId: string;
   projectName: string;
+  /** Why the whole video can't be exported right now (a clip is open). */
+  blocked?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<{
@@ -139,7 +142,12 @@ export function ExportMenu({
           )}
         </span>
       )}
-      <button className="export-btn" onClick={() => setOpen((v) => !v)}>
+      <button
+        className="export-btn"
+        onClick={() => setOpen((v) => !v)}
+        disabled={!!blocked}
+        title={blocked}
+      >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M8 10V2M5 5l3-3 3 3M3 10v3h10v-3" />
         </svg>

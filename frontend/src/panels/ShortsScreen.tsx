@@ -45,6 +45,7 @@ import { TaskLine } from "./TaskLine";
 import { TopBar } from "./TopBar";
 import { setScreen } from "../state/viewStore";
 import { transcribeErrors } from "../state/transcribeStore";
+import { ClipEditBar } from "./ClipEditBar";
 
 /** "Scan for shorts" (count and threshold are starting values to tune). */
 const SCAN = { scan: true, count: 40, min_score: 40, multi_moment: true } as const;
@@ -120,6 +121,7 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
   return (
     <div className="app-shell">
       <TopBar projectId={projectId} projectName={project?.name ?? "…"} />
+      <ClipEditBar projectId={projectId} />
       <main className="shorts-row">
         <section className="shorts-player">
           <PreviewPanel projectId={projectId} shortsGuide />

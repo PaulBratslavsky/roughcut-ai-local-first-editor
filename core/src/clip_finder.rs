@@ -130,6 +130,8 @@ pub struct Found {
 
 /// Find, rank, and persist clip candidates for the project's current cut.
 pub async fn find_clips(editor: &Editor, project_id: Uuid, opts: FindOptions) -> Result<Found> {
+    // The main cut is set aside while a clip is open in the Editor.
+    editor.require_no_clip_session(project_id, "scanning for shorts")?;
     // One run per project at a time: a second one would race the first to
     // write the list.
     let _scan = editor.begin_clip_scan(project_id)?;

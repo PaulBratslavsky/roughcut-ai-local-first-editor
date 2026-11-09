@@ -63,8 +63,8 @@ examples in [`core/examples/`](../examples/README.md).
 | `demo.rs` | Fixture transcript for demo mode and tests | `fixture_transcript` |
 | `secrets.rs` | The Hosted API key in the OS key store (Keychain / Credential Manager / kernel keyring) | `SecretStore`, `KeyringStore`, `MemoryStore`, `remove_legacy_plaintext` |
 
-The registry (`tools.rs:REGISTRY`) has 72 rows. `Caller::can_use` shows the UI
-all 72, MCP clients 71 (every row except the one `meta` row,
+The registry (`tools.rs:REGISTRY`) has 74 rows. `Caller::can_use` shows the UI
+all 74, MCP clients 73 (every row except the one `meta` row,
 `apply_instruction`), and the agent loop the 33 rows marked `agent`. 21 rows
 are `mutating`. The LOCAL / HOSTED switch and its key are not registry rows:
 they are Tauri commands (ADR-0004, ADR-0007). The names and contracts are documented

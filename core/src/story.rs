@@ -744,6 +744,8 @@ pub async fn story_edit(
     confirmed_beats: Option<Vec<usize>>,
     source: ActionSource,
 ) -> Result<StoryEditOutcome> {
+    // A whole-video plan: not while a clip's timeline stands in for the edit.
+    editor.require_no_clip_session(project_id, "a story edit of the whole video")?;
     // One `story_plan` line in the app log for the whole edit.
     let mut step = applog::Step::start(editor, "story_plan", Some(project_id));
     let result =

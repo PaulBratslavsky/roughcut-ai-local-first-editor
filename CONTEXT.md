@@ -81,7 +81,10 @@ Keep entries short. When a refactor names a new module, add the term here.
   `SavedClipSummary` is the lean listing view. Exports run the normal writers over
   it. **Not** the timeline's `Clip` (a partition piece of the main edit, which
   `trim_clip` / `split_clip` operate on). `create_clips` makes several from
-  candidates at once and frames each vertical one before it returns;
+  candidates at once and frames each vertical one before it returns.
+  A clip can be **opened in the Editor** (a **clip edit session**,
+  `begin_clip_edit` / `end_clip_edit`): its timeline stands in for the main
+  edit, which is set aside until Save or Cancel;
   `export_clips` writes several into one folder as `NN-<title>.<ext>`.
 - **PlaySpan** (`model.rs`) — one stretch of source that plays, in output order
   `{ source_in, source_out }`. `Timeline::play_spans()` lists the main cut's;

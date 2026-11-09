@@ -5,6 +5,7 @@
 // wheel to zoom around the playhead / horizontal scroll.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useStore } from "@tanstack/react-store";
 import { useCutRange, useMediaAssets, useProject, useRestoreRange, useSplitClip, useTimeline, useTrimClip } from "../ipc/queries";
 import type { Clip } from "../ipc/types";
 import { loadTimelineAssets, type TimelineAssets } from "./assets";
@@ -77,15 +78,20 @@ export function Timeline({ projectId }: { projectId: string }) {
 
   // Auto-fit: when a project's duration first becomes known, zoom so the
   // whole video spans the lane — a 1:40 short fills the width instead of
-  // huddling at default zoom. Once per project; manual zoom wins afterwards.
+  // huddling at default zoom. Once per timeline (a project's, or a saved
+  // clip's while it is open in the Editor, then the project's again); manual
+  // zoom wins afterwards. With cut material hidden, it fits what plays.
   const fittedRef = useRef<string | null>(null);
+  const fitNonce = useStore(viewStore, (s) => s.fitNonce);
   useEffect(() => {
     const dur = timeline?.duration ?? 0;
     const w = wrapRef.current?.clientWidth ?? 0;
-    if (!dur || !w || fittedRef.current === projectId) return;
-    fittedRef.current = projectId;
-    fitTimelineToWidth(dur, w);
-  }, [projectId, timeline?.duration]);
+    const key = `${projectId}:${timeline?.id ?? ""}:${fitNonce}`;
+    if (!dur || !w || fittedRef.current === key) return;
+    fittedRef.current = key;
+    const plays = (timeline?.clips ?? []).filter((c) => c.included).reduce((a, c) => a + c.source_out - c.source_in, 0);
+    fitTimelineToWidth(viewStore.state.showCuts || plays <= 0 ? dur : plays, w);
+  }, [projectId, timeline?.id, timeline?.duration, timeline?.clips, fitNonce]);
 
   // Real waveform peaks + thumbnails: fetched over the asset protocol once
   // the core reports them; the renderer falls back to synthetic bars until then.

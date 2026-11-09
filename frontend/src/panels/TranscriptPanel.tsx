@@ -317,13 +317,28 @@ export function TranscriptPanel({ projectId }: { projectId: string }) {
 
   const segments = useMemo(() => transcript?.segments ?? [], [transcript]);
 
+  // A segment is cut when (almost) none of it plays. Not "linked to a cut
+  // clip": a cut that was partly restored, or a saved clip's own timeline
+  // (everything outside it cut), can link a segment that still mostly plays,
+  // which then showed as cut, or vanished with cuts hidden.
   const cutIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const clip of timeline?.clips ?? []) {
-      if (!clip.included) for (const id of clip.linked_segment_ids) ids.add(id);
+    const plays = (timeline?.clips ?? [])
+      .filter((c) => c.included)
+      .map((c) => [c.source_in, c.source_out] as const)
+      .sort((a, b) => a[0] - b[0]);
+    let k = 0;
+    for (const seg of segments) {
+      while (k > 0 && plays[k - 1]![1] > seg.start) k--;
+      while (k < plays.length && plays[k]![1] <= seg.start) k++;
+      let kept = 0;
+      for (let j = k; j < plays.length && plays[j]![0] < seg.end; j++) {
+        kept += Math.min(seg.end, plays[j]![1]) - Math.max(seg.start, plays[j]![0]);
+      }
+      if (kept < Math.max(0.05, 0.02 * (seg.end - seg.start))) ids.add(seg.id);
     }
     return ids;
-  }, [timeline]);
+  }, [timeline, segments]);
 
   // Excluded source ranges, for word-accurate strikethrough (range cuts made
   // via right-click don't link whole segments).

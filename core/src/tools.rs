@@ -1274,6 +1274,19 @@ handler!(h_update_clip, |e, a, _s| {
     Ok(json!({ "clip": clip }))
 });
 
+handler!(h_begin_clip_edit, |e, a, _s| {
+    let (session, timeline) = e.begin_clip_edit(arg_uuid(a, "project_id")?, arg_uuid(a, "clip_id")?)?;
+    Ok(json!({ "session": session, "timeline": timeline }))
+});
+
+handler!(h_end_clip_edit, |e, a, _s| {
+    let save = a["save"]
+        .as_bool()
+        .ok_or_else(|| CoreError::InvalidArg("save is required: true keeps the clip's edit, false drops it".into()))?;
+    let (clip, timeline) = e.end_clip_edit(arg_uuid(a, "project_id")?, save)?;
+    Ok(json!({ "clip": clip, "timeline": timeline }))
+});
+
 handler!(h_center_clip_on_face, |e, a, _s| {
     let found = e.center_clip_on_face(arg_uuid(a, "project_id")?, arg_uuid(a, "clip_id")?).await?;
     Ok(serde_json::to_value(found)?)
@@ -1617,6 +1630,12 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("update_clip", "Change a saved clip: title; format (landscape | vertical); its 9:16 framing (vertical only): crop_x across (0 = crop the left of the frame, 0.5 = centre, 1 = right), crop_zoom (1 = the full frame height, up to 3 = a third of it, closer), crop_y up and down when zoomed (0 = top, 1 = bottom); or its pieces (segment_ids / ranges / start+end — re-snapshots the CURRENT main cut inside them).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}, "crop_x": {"type": "number"}, "crop_y": {"type": "number"}, "crop_zoom": {"type": "number", "description": "1-3"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_update_clip),
+    tool!("begin_clip_edit", "Open a saved clip in the Editor to edit it like the main video: its own timeline becomes the project's timeline, so cut_range, restore_range, the rough cut, proposals, undo and checkpoints all work on the clip (restoring material just outside it extends it). The main edit — its timeline, undo history, checkpoints, proposed cuts and suggestions — is set aside until end_clip_edit. While a clip is open, export of the whole project, find_clips, create_clip(s), update_clip with new pieces, deleting that clip, adding media and story_edit are refused. Opening the clip that's already open is a no-op; another one is an error. open_project shows it as clip_session. Returns {session: {clip_id, title, started_at}, timeline}.",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
+        agent: false, meta: false, h_begin_clip_edit),
+    tool!("end_clip_edit", "Close the clip open in the Editor (begin_clip_edit). save: true makes the edit the clip's (its pieces follow what now plays; refused while proposed cuts are pending — apply or discard them — or when under 1 s would play); save: false drops the changes. Either way the main edit comes back as it was. Returns {clip (the saved clip, null on cancel), timeline (the main one)}.",
+        || obj(json!({"project_id": pid_schema(), "save": {"type": "boolean"}}), &["project_id", "save"]),
+        agent: false, meta: false, h_end_clip_edit),
     tool!("center_clip_on_face", "Frame a clip's 9:16 crop on the speaker: samples frames across the clip, finds faces on-device (Apple Vision), and moves the crop to centre the median speaker position (keeping its zoom; zoomed in, the face sits a little above the middle). Returns {clip, crop_x and crop_y (null = no confident face, crop unchanged), frames_sampled, frames_with_face}. Runs by itself when a clip is created as, or switched to, vertical. Not for projects that composite a screen recording (set crop_x instead).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_center_clip_on_face),

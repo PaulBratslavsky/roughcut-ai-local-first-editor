@@ -100,6 +100,8 @@ impl Editor {
         title: Option<&str>,
         format: Option<ClipFormat>,
     ) -> Result<SavedClipSummary> {
+        // A new clip snapshots the main cut, which is set aside meanwhile.
+        self.require_no_clip_session(project_id, "making a clip")?;
         self.update_project_meta(project_id, |p| {
             let (mut clip, from_candidate) = match from {
                 ClipSource::Candidate(id) => {
@@ -139,6 +141,7 @@ impl Editor {
         candidate_ids: &[Uuid],
         format: Option<ClipFormat>,
     ) -> Result<(Vec<SavedClipSummary>, Vec<ClipBatchError>)> {
+        self.require_no_clip_session(project_id, "making shorts")?;
         let (made, errors, framed) = self.update_project_meta(project_id, |p| {
             let mut made: Vec<SavedClipSummary> = vec![];
             let mut errors: Vec<ClipBatchError> = vec![];
@@ -212,6 +215,10 @@ impl Editor {
         clip_id: Uuid,
         changes: ClipChanges,
     ) -> Result<SavedClipSummary> {
+        if changes.ranges.is_some() {
+            // New pieces re-snapshot the main cut, set aside meanwhile.
+            self.require_no_clip_session(project_id, "changing a clip's pieces")?;
+        }
         self.update_project_meta(project_id, |p| {
             let idx = p
                 .saved_clips
@@ -242,6 +249,9 @@ impl Editor {
     }
 
     pub fn delete_clip(&self, project_id: Uuid, clip_id: Uuid) -> Result<()> {
+        if self.clip_session(project_id)?.is_some_and(|s| s.clip_id == clip_id) {
+            self.require_no_clip_session(project_id, "deleting it")?;
+        }
         self.update_project_meta(project_id, |p| {
             let before = p.saved_clips.len();
             p.saved_clips.retain(|c| c.id != clip_id);

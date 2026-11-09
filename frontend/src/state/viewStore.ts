@@ -44,12 +44,13 @@ function loadPrefs(): PersistedPrefs {
   return defaults;
 }
 
-function savePrefs(s: PersistedPrefs): void {
+function savePrefs(s: PersistedPrefs & { clipEditShowCuts?: boolean | null }): void {
   try {
     localStorage.setItem(
       PERSIST_KEY,
       JSON.stringify({
-        showCuts: s.showCuts,
+        // While a clip is open, cuts are hidden for it: keep the user's own setting.
+        showCuts: s.clipEditShowCuts ?? s.showCuts,
         skipCuts: s.skipCuts,
         previewCollapsed: s.previewCollapsed,
         shortsDrawerOpen: s.shortsDrawerOpen,
@@ -108,6 +109,13 @@ export interface ViewState {
   /** Shorts screen: the scan candidate whose 9:16 crop the preview shows
    *  (the last one played), until "done". */
   cropCandidateId: string | null;
+  /** A saved clip is open in the Editor and the view follows it (cut
+   *  material hidden): the "show cuts" setting from before, to put back
+   *  when it closes. Null when no clip is open. */
+  clipEditShowCuts: boolean | null;
+  /** Bumped to ask the timeline to fit its width again (a clip opened or
+   *  closed: what plays changed completely). */
+  fitNonce: number;
   /** The proposed cut the review bar is on (its number), shown in the
    *  transcript and timeline. */
   focusedCut: number | null;
@@ -132,6 +140,8 @@ export const viewStore = new Store<ViewState>({
   clipDraft: [],
   cropClipId: null,
   cropCandidateId: null,
+  clipEditShowCuts: null,
+  fitNonce: 0,
   focusedCut: null,
   ...loadPrefs(),
 });
@@ -166,6 +176,34 @@ export function setProjectId(projectId: string | null): void {
 }
 /** Show (or hide, with null) a saved clip's 9:16 crop over the preview. */
 export const setCropClip = (cropClipId: string | null) => patch({ cropClipId });
+/** A saved clip opened in the Editor: hide cut material (so the transcript
+ *  and timeline show just the clip) and jump to its start. Not saved as a
+ *  preference: `leaveClipEditView` puts the setting back. */
+export function enterClipEditView(start: number | null): void {
+  viewStore.setState((s) =>
+    s.clipEditShowCuts !== null
+      ? s
+      : { ...s, clipEditShowCuts: s.showCuts, showCuts: false, fitNonce: s.fitNonce + 1 },
+  );
+  if (start !== null) seekTo(start);
+}
+
+/** The clip closed: the view as it was before it opened. */
+export function leaveClipEditView(): void {
+  viewStore.setState((s) =>
+    s.clipEditShowCuts === null
+      ? s
+      : {
+          ...s,
+          showCuts: s.clipEditShowCuts,
+          clipEditShowCuts: null,
+          cropClipId: null,
+          focusedCut: null,
+          fitNonce: s.fitNonce + 1,
+        },
+  );
+}
+
 /** Show (or hide, with null) a scan candidate's 9:16 crop over the preview. */
 export const setCropCandidate = (cropCandidateId: string | null) => patch({ cropCandidateId });
 export const setScreen = (screen: AppScreen) => patch({ screen });
@@ -264,7 +302,8 @@ export const setFocusedCut = (focusedCut: number | null) => patch({ focusedCut }
 export const togglePlaying = () => patch({ playing: !viewStore.state.playing });
 export const setPlaybackRate = (playbackRate: number) => patch({ playbackRate });
 export const setShowCuts = (showCuts: boolean) => {
-  patch({ showCuts });
+  // Toggled by hand while a clip is open: that's the setting to keep after.
+  patch(viewStore.state.clipEditShowCuts === null ? { showCuts } : { showCuts, clipEditShowCuts: showCuts });
   savePrefs(viewStore.state);
 };
 export const setSkipCuts = (skipCuts: boolean) => {

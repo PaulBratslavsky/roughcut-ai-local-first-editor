@@ -106,6 +106,8 @@ fn expand_tilde(path: &str) -> String {
 impl Editor {
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
+        // The project's timeline is the clip's while one is open.
+        self.require_no_clip_session(project_id, "exporting the whole video (export the clip from the Clips screen)")?;
         let (project, transcript) = self.snapshot(project_id)?;
         let pieces = vec![project.timeline.play_spans()];
         self.write_export(&project, transcript.as_ref(), target, out_path, &pieces, None, &self.sink()).await

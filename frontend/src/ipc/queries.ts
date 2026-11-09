@@ -29,6 +29,7 @@ import type {
   MediaAssets,
   ClipBatchError,
   ClipCandidate,
+  ClipEditSession,
   ClipExportResult,
   ClipFormat,
   SavedClipSummary,
@@ -518,6 +519,24 @@ export function useUpdateClip() {
     },
     { clip: SavedClipSummary }
   >("update_clip", ["clips"]);
+}
+
+/** Open a saved clip in the Editor: its timeline stands in for the main
+ *  edit (set aside in the core) until `end_clip_edit`. */
+export function useBeginClipEdit() {
+  return useEditMutation<
+    { project_id: string; clip_id: string },
+    { session: ClipEditSession; timeline: Timeline }
+  >("begin_clip_edit", ["timeline", "project", "history", "suggestions", "clips"]);
+}
+
+/** Close the open clip: `save` keeps its edit, otherwise it's dropped. The
+ *  main edit comes back either way. */
+export function useEndClipEdit() {
+  return useEditMutation<
+    { project_id: string; save: boolean },
+    { clip: SavedClipSummary | null; timeline: Timeline }
+  >("end_clip_edit", ["timeline", "project", "history", "suggestions", "clips"]);
 }
 
 /** Frame a scan candidate's 9:16 crop before it's made (or `reset` to frame

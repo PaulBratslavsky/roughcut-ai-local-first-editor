@@ -2414,3 +2414,42 @@ input, select { font: inherit; }
 }
 .proposed-pause.focus { border-style: solid; background: color-mix(in srgb, var(--danger) 14%, transparent); }
 .segment.silence.proposed .silence-chip { color: var(--danger); border-color: var(--danger); text-decoration: line-through; }
+
+/* A saved clip open in the Editor: the bar under the top bar, on every
+   screen, until Save or Cancel. Inverted (text-colored) so it can't be
+   mistaken for the main edit. */
+.clip-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  background: var(--text);
+  color: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.clip-edit-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid currentColor;
+  padding: 1px 6px;
+}
+.clip-edit-title {
+  font-weight: 700;
+  max-width: 34ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clip-edit-len { font-variant-numeric: tabular-nums; }
+.clip-edit-note { opacity: 0.7; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.clip-edit-spacer { flex: 1; }
+.clip-edit-error { color: var(--danger); font-weight: 600; }
+.clip-edit-bar .ghost-btn,
+.clip-edit-bar .primary-btn { padding: 3px 12px; font-size: 12px; }
+.clip-edit-bar .ghost-btn { color: var(--bg); border-color: color-mix(in srgb, var(--bg) 45%, transparent); }
+.clip-edit-bar .primary-btn { background: var(--bg); color: var(--text); border-color: var(--bg); }

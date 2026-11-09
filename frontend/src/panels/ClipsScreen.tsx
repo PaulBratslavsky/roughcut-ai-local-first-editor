@@ -41,6 +41,7 @@ import { PreviewPanel } from "./PreviewPanel";
 import { SavedClipRow } from "./SavedClipRow";
 import { TaskLine } from "./TaskLine";
 import { TopBar } from "./TopBar";
+import { ClipEditBar } from "./ClipEditBar";
 
 // A hook-level callback: it still runs if the screen is gone by then.
 const EXPORT_RUN: RunOptions<ExportClipsArgs, ExportClipsResult> = {
@@ -113,6 +114,7 @@ export function ClipsScreen({ projectId }: { projectId: string }) {
   return (
     <div className="app-shell">
       <TopBar projectId={projectId} projectName={project?.name ?? "…"} />
+      <ClipEditBar projectId={projectId} />
       <main className="shorts-row">
         <section className="shorts-player">
           <PreviewPanel projectId={projectId} />

@@ -1,13 +1,14 @@
 // One saved clip (a 16:9 cut-down or a 9:16 short): rename, switch format,
-// frame the crop over the preview, export, delete. Shown on the Clips screen,
+// frame the crop over the preview, open it in the Editor to edit it, export,
+// delete. Shown on the Clips screen,
 // with a checkbox each for batch export.
 
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "@tanstack/react-store";
 import { revealPath } from "../ipc/api";
-import { useDeleteClip, useExportClip, useUpdateClip } from "../ipc/queries";
+import { useBeginClipEdit, useDeleteClip, useExportClip, useProject, useUpdateClip } from "../ipc/queries";
 import type { ExportTarget, SavedClipSummary } from "../ipc/types";
-import { previewRanges, seekTo, setCropClip, togglePreviewCollapsed, viewStore } from "../state/viewStore";
+import { previewRanges, seekTo, setCropClip, setScreen, togglePreviewCollapsed, viewStore } from "../state/viewStore";
 import { clock, errText, FORMAT_LABEL, slugify } from "./clipUtil";
 import { EXPORT_TARGETS } from "./ExportMenu";
 
@@ -86,6 +87,25 @@ export function SavedClipRow({
 
   const pieces = clip.ranges.length;
   const framing = useStore(viewStore, (s) => s.cropClipId === clip.id);
+  const { data: project } = useProject(projectId);
+  const openClip = project?.clip_session ?? null;
+  const begin = useBeginClipEdit();
+
+  // Open it in the Editor: the core swaps its timeline in (ClipEditBar then
+  // hides cut material and jumps to it); a 9:16 one shows its crop.
+  const editInEditor = () => {
+    setStatus(null);
+    begin.mutate(
+      { project_id: projectId, clip_id: clip.id },
+      {
+        onSuccess: () => {
+          setCropClip(clip.format === "vertical" ? clip.id : null);
+          setScreen("editor");
+        },
+        onError: (e) => setStatus({ text: errText(e) }),
+      },
+    );
+  };
 
   // Show this short's 9:16 window over the preview, on one of its frames.
   const toggleCrop = () => {
@@ -159,6 +179,18 @@ export function SavedClipRow({
       <div className="clip-actions" ref={menuRef}>
         <button className="ghost-btn" onClick={() => previewRanges(clip.ranges)} title="Play the clip">
           ▶
+        </button>
+        <button
+          className={`ghost-btn${openClip?.clip_id === clip.id ? " active" : ""}`}
+          onClick={editInEditor}
+          disabled={begin.isPending || (openClip !== null && openClip.clip_id !== clip.id)}
+          title={
+            openClip && openClip.clip_id !== clip.id
+              ? `“${openClip.title}” is open in the Editor: save or cancel it first`
+              : "Open this clip in the Editor: cut words, restore, rough cut, chat — then save it back"
+          }
+        >
+          {openClip?.clip_id === clip.id ? "editing" : "edit"}
         </button>
         {clip.format === "vertical" && (
           <button

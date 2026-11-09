@@ -1880,3 +1880,40 @@ async fn the_chat_proposes_its_cuts_and_a_restore_takes_them_back() {
     assert_eq!(newest["source"], "local_ai");
     assert!(newest["description"].as_str().unwrap().starts_with("Chat: 1 cut"), "{newest}");
 }
+
+#[tokio::test]
+async fn a_saved_clip_opens_in_the_editor_through_the_registry() {
+    let editor = Editor::test_instance();
+    let project = call(&editor, "create_project", json!({ "name": "clip-edit", "file_path": "/demo/footage.mp4" })).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": 2.0, "end": 4.0 })).await;
+    let clip = call(&editor, "create_clip", json!({ "project_id": pid, "start": 30.0, "end": 60.0, "title": "Mine" })).await;
+    let cid = clip["clip"]["id"].as_str().unwrap().to_string();
+
+    // Open it: the project's timeline is the clip's now, and get_project says so.
+    let opened = call(&editor, "begin_clip_edit", json!({ "project_id": pid, "clip_id": cid })).await;
+    assert_eq!(opened["session"]["title"], "Mine");
+    let p = call(&editor, "open_project", json!({ "project_id": pid })).await;
+    assert_eq!(p["clip_session"]["clip_id"], json!(cid));
+
+    // The same edit tools work on it; whole-video ones refuse, for every caller.
+    call(&editor, "cut_range", json!({ "project_id": pid, "start": 55.0, "end": 60.0 })).await;
+    for (tool, args) in [
+        ("find_clips", json!({ "project_id": pid })),
+        ("export", json!({ "project_id": pid, "target": "txt", "out_path": "/tmp/roughcut-e2e-clip-edit.txt" })),
+        ("delete_clip", json!({ "project_id": pid, "clip_id": cid })),
+    ] {
+        let err = tools::dispatch(&editor, tool, &args, Caller::Ui).await.unwrap_err();
+        assert!(err.to_string().contains("you're editing the clip “Mine”"), "{tool}: {err}");
+    }
+    assert!(tools::dispatch(&editor, "end_clip_edit", &json!({ "project_id": pid }), Caller::Ui).await.is_err(), "save is required");
+
+    // Save: the clip follows the edit; the main edit is back with its one cut.
+    let closed = call(&editor, "end_clip_edit", json!({ "project_id": pid, "save": true })).await;
+    assert_eq!(closed["clip"]["ranges"], json!([{ "start": 30.0, "end": 55.0 }]));
+    assert_eq!(closed["timeline"]["cut_count"], 1);
+    let p = call(&editor, "open_project", json!({ "project_id": pid })).await;
+    assert!(p["clip_session"].is_null());
+    let history = call(&editor, "get_history", json!({ "project_id": pid })).await;
+    assert_eq!(history["entries"].as_array().unwrap().len(), 1, "only the main edit's cut");
+}

@@ -784,6 +784,26 @@ pub struct Project {
     /// time; see [`CutProposal`].
     #[serde(default)]
     pub cut_proposal: Option<CutProposal>,
+    /// A saved clip open in the Editor: `timeline` is then the clip's, and
+    /// the main edit is set aside until Save or Cancel. See
+    /// [`ClipEditSession`].
+    #[serde(default)]
+    pub clip_session: Option<ClipEditSession>,
+}
+
+/// A saved clip open in the Editor ("edit" on the Clips screen). While it is
+/// open, `Project.timeline` is the clip's own timeline, so every edit tool,
+/// the chat and undo work on the clip; the main edit (its timeline, undo
+/// history, checkpoints, proposed cuts and suggestions) is set aside until
+/// `end_clip_edit` saves the clip or drops the changes.
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipEditSession {
+    pub clip_id: Uuid,
+    /// The clip's title when it was opened (for the bar and messages).
+    pub title: String,
+    pub started_at: DateTime<Utc>,
 }
 
 /// Cuts worked out but not made yet. The Rough cut button and the in-app
@@ -1243,6 +1263,7 @@ impl Project {
             saved_clips: vec![],
             clip_candidates: vec![],
             cut_proposal: None,
+            clip_session: None,
         }
     }
 
