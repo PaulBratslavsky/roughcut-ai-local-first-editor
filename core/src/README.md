@@ -63,8 +63,8 @@ examples in [`core/examples/`](../examples/README.md).
 | `demo.rs` | Fixture transcript for demo mode and tests | `fixture_transcript` |
 | `secrets.rs` | The Hosted API key in the OS key store (Keychain / Credential Manager / kernel keyring) | `SecretStore`, `KeyringStore`, `MemoryStore`, `remove_legacy_plaintext` |
 
-The registry (`tools.rs:REGISTRY`) has 71 rows. `Caller::can_use` shows the UI
-all 71, MCP clients 70 (every row except the one `meta` row,
+The registry (`tools.rs:REGISTRY`) has 72 rows. `Caller::can_use` shows the UI
+all 72, MCP clients 71 (every row except the one `meta` row,
 `apply_instruction`), and the agent loop the 33 rows marked `agent`. 21 rows
 are `mutating`. The LOCAL / HOSTED switch and its key are not registry rows:
 they are Tauri commands (ADR-0004, ADR-0007). The names and contracts are documented
@@ -106,7 +106,8 @@ in `docs/tool-api.md`.
 - Saved files stay loadable through serde defaults and aliases on `Project`
   (`saved_clips` accepts `shorts`, `clip_candidates` accepts
   `short_candidates`) and `SavedClip` (`format` defaults to `Vertical`,
-  `crop_x` to 0.5). `Project::upgrade`, called by `SqliteStore::load_project`,
+  `crop_x` and `crop_y` to 0.5, `crop_zoom` to 1); a `ClipCandidate`'s
+  `framing` defaults to none. `Project::upgrade`, called by `SqliteStore::load_project`,
   turns a legacy single-range clip into one piece.
 - A `SavedClip` is not a timeline `Clip`: it is a standalone edit with its own
   `Timeline` (`Timeline::restricted_to` over its `ranges`).

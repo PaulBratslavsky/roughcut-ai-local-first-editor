@@ -9,7 +9,7 @@ import { useMediaAssets, useProject, useTimeline } from "../ipc/queries";
 import { registerAudibleElement } from "../playback/meter";
 import { usePlaybackEngine } from "../playback/engine";
 import { excludedRanges, excludedTotal, toEditedTime, type Range } from "../playback/time";
-import { CropGuide } from "./CropGuide";
+import { CandidateCropGuide, CropGuide } from "./CropGuide";
 import {
   seekTo,
   setPlaybackRate,
@@ -31,8 +31,8 @@ export function PreviewPanel({
   shortsGuide = false,
 }: {
   projectId: string;
-  /** Shorts screen: while a scan candidate plays, a centred 9:16 window over
-   *  the picture (where its short starts before face framing). */
+  /** Shorts screen: the played scan candidate's 9:16 window over the
+   *  picture, to frame (drag, zoom) before it's made. */
   shortsGuide?: boolean;
 }) {
   const { data: project } = useProject(projectId);
@@ -44,10 +44,6 @@ export function PreviewPanel({
   const playhead = useStore(viewStore, (s) => s.playhead);
   const skipCuts = useStore(viewStore, (s) => s.skipCuts);
   const collapsed = useStore(viewStore, (s) => s.previewCollapsed);
-  const candidatePlaying = useStore(
-    viewStore,
-    (s) => s.audition !== null && s.auditionIsCandidate && s.cropClipId === null,
-  );
 
   const duration = timeline?.duration ?? project?.media?.duration ?? 0;
   // Some sources can't stream in a <video> tag (more than 2 audio channels, an
@@ -292,7 +288,7 @@ export function PreviewPanel({
 
         {/* A 9:16 clip's crop, when one is being framed (Clips ▸ crop). */}
         <CropGuide projectId={projectId} frameW={w} frameH={h} />
-        {shortsGuide && candidatePlaying && <CentredGuide frameW={w} frameH={h} />}
+        {shortsGuide && <CandidateCropGuide projectId={projectId} frameW={w} frameH={h} />}
 
         {/* Big center affordance while paused */}
         {!playing && (
@@ -382,19 +378,6 @@ export function PreviewPanel({
         >
           {collapsed ? "▸ show video" : "▾ hide video"}
         </button>
-      </div>
-    </div>
-  );
-}
-
-/** A fixed, centred 9:16 window (nothing to drag): where a short made from
- *  a candidate starts before face framing moves its crop. */
-function CentredGuide({ frameW, frameH }: { frameW: number; frameH: number }) {
-  const win = Math.min(1, (frameH * 9) / 16 / Math.max(1, frameW));
-  return (
-    <div className="crop-guide passive" aria-hidden>
-      <div className="crop-window" style={{ left: `${((1 - win) / 2) * 100}%`, width: `${win * 100}%` }}>
-        <span className="crop-label">9:16</span>
       </div>
     </div>
   );

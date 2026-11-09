@@ -124,8 +124,8 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
         <section className="shorts-player">
           <PreviewPanel projectId={projectId} shortsGuide />
           <p className="clips-note shorts-player-note">
-            Click a card's picture to play it here · Space plays / pauses. While a card plays, the centred 9:16
-            window shows where its short starts; making it frames the crop on the speaker.
+            Click a card's picture to play it here · Space plays / pauses. The 9:16 window shows its short's
+            frame: drag it to move it, drag a corner to zoom in. Left alone, making it frames the crop on the speaker.
           </p>
           <PlayerDrawer projectId={projectId} />
         </section>
@@ -144,7 +144,7 @@ export function ShortsScreen({ projectId }: { projectId: string }) {
               className="ghost-btn primary"
               onClick={runMake}
               disabled={chosen.length === 0 || making}
-              title="Make the ticked cards into 9:16 shorts, framed on the speaker"
+              title="Make the ticked cards into 9:16 shorts, framed on the speaker (a card you framed keeps your framing)"
             >
               {making
                 ? "making…"

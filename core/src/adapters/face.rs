@@ -103,20 +103,40 @@ pub fn subject(faces: &[FaceBox]) -> Option<&FaceBox> {
 /// a stray background face can't yank the crop. None when under a quarter of
 /// the frames show a face: too little to trust.
 pub fn crop_x_for_faces(frames: &[Vec<FaceBox>], frame_w: u32, frame_h: u32) -> Option<f64> {
-    let mut centres: Vec<f64> = frames.iter().filter_map(|f| subject(f)).map(|f| f.cx).collect();
-    if centres.is_empty() || centres.len() * 4 < frames.len() {
+    crop_for_faces(frames, frame_w, frame_h, 1.0).map(|(x, _)| x)
+}
+
+/// [`crop_x_for_faces`] for a window zoomed in `zoom` times (1/zoom of the
+/// frame height): `(crop_x, crop_y)`. Across, the speaker is centred; up and
+/// down, their face sits a little above the middle (`EYE_LINE`), leaving
+/// room for the shoulders. At zoom 1, `crop_y` is 0.5 (nothing to move).
+pub fn crop_for_faces(frames: &[Vec<FaceBox>], frame_w: u32, frame_h: u32, zoom: f64) -> Option<(f64, f64)> {
+    let faces: Vec<&FaceBox> = frames.iter().filter_map(|f| subject(f)).collect();
+    if faces.is_empty() || faces.len() * 4 < frames.len() {
         return None;
     }
-    centres.sort_by(f64::total_cmp);
-    let mid = centres.len() / 2;
-    let median = if centres.len() % 2 == 0 { (centres[mid - 1] + centres[mid]) / 2.0 } else { centres[mid] };
-    let window = (frame_h as f64 * 9.0 / 16.0) / frame_w.max(1) as f64;
-    if window >= 1.0 {
-        // Already 9:16 or narrower: the crop spans the whole width.
-        return Some(0.5);
-    }
-    Some(((median - window / 2.0) / (1.0 - window)).clamp(0.0, 1.0))
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        let mid = v.len() / 2;
+        if v.len().is_multiple_of(2) {
+            (v[mid - 1] + v[mid]) / 2.0
+        } else {
+            v[mid]
+        }
+    };
+    let cx = median(faces.iter().map(|f| f.cx).collect());
+    let cy = median(faces.iter().map(|f| f.cy).collect());
+    let zoom = if zoom.is_finite() { zoom.max(1.0) } else { 1.0 };
+    let tall = 1.0 / zoom;
+    let wide = (frame_h as f64 * tall * 9.0 / 16.0) / frame_w.max(1) as f64;
+    // Already 9:16 or narrower: the crop spans the whole width.
+    let x = if wide >= 1.0 { 0.5 } else { ((cx - wide / 2.0) / (1.0 - wide)).clamp(0.0, 1.0) };
+    let y = if tall >= 1.0 { 0.5 } else { ((cy - EYE_LINE * tall) / (1.0 - tall)).clamp(0.0, 1.0) };
+    Some((x, y))
 }
+
+/// Where a zoomed-in crop puts the face's centre: this far down the window.
+const EYE_LINE: f64 = 0.4;
 
 /// Source times to look at: evenly spaced through the kept footage
 /// (`(source_in, source_out)` spans in play order), one per ~2 s of playable
@@ -216,6 +236,26 @@ mod tests {
     fn vertical_source_needs_no_pan() {
         let frames = vec![vec![face(0.2, 0.2)]; 6];
         assert_eq!(crop_x_for_faces(&frames, 1080, 1920), Some(0.5));
+    }
+
+    #[test]
+    fn a_zoomed_crop_centres_the_face_across_and_puts_it_a_little_high() {
+        // A face right of centre, a little above the middle of a 1920x1080 frame.
+        let frames = vec![vec![FaceBox { cx: 0.7, cy: 0.4, w: 0.1, h: 0.15, confidence: 0.99 }]; 6];
+        let (x, y) = crop_for_faces(&frames, 1920, 1080, 2.0).unwrap();
+        // At 2x the window is 1/2 the height and 0.158 of the width.
+        let (wide, tall) = (1080.0 / 2.0 * 9.0 / 16.0 / 1920.0, 0.5);
+        let left = x * (1.0 - wide);
+        assert!((left + wide / 2.0 - 0.7).abs() < 1e-9, "face centred across: {x}");
+        let top = y * (1.0 - tall);
+        assert!((top + EYE_LINE * tall - 0.4).abs() < 1e-9, "face at the eye line: {y}");
+        // Unzoomed: the same across position as before, and nothing to move up or down.
+        let (x1, y1) = crop_for_faces(&frames, 1920, 1080, 1.0).unwrap();
+        assert_eq!(Some(x1), crop_x_for_faces(&frames, 1920, 1080));
+        assert_eq!(y1, 0.5);
+        // A face at the very top: the window stops at the frame's edge.
+        let top_face = vec![vec![FaceBox { cx: 0.5, cy: 0.05, w: 0.1, h: 0.1, confidence: 0.99 }]; 6];
+        assert_eq!(crop_for_faces(&top_face, 1920, 1080, 3.0).unwrap().1, 0.0);
     }
 
     #[test]

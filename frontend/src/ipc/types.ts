@@ -29,6 +29,7 @@ export type { ThumbnailRef } from "./generated/ThumbnailRef";
 export type { SavedClip } from "./generated/SavedClip";
 export type { SavedClipSummary } from "./generated/SavedClipSummary";
 export type { ClipCandidate } from "./generated/ClipCandidate";
+export type { ClipFraming } from "./generated/ClipFraming";
 export type { ClipFormat } from "./generated/ClipFormat";
 export type { SourceRange } from "./generated/SourceRange";
 export type { PlaySpan } from "./generated/PlaySpan";

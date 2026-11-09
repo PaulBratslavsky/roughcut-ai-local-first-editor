@@ -932,6 +932,14 @@ pub struct SavedClip {
     /// (0 = left edge, 0.5 = centred, 1 = right edge).
     #[serde(default = "centred")]
     pub crop_x: f64,
+    /// Vertical only, when zoomed in: where the crop sits up and down
+    /// (0 = top, 0.5 = centred, 1 = bottom).
+    #[serde(default = "centred")]
+    pub crop_y: f64,
+    /// Vertical only: how far the crop zooms in. 1 = the full frame height;
+    /// 2 = half the height, twice as close (up to [`ClipFraming::MAX_ZOOM`]).
+    #[serde(default = "unzoomed")]
+    pub crop_zoom: f64,
     /// The overall span (first piece's start → last piece's end).
     pub start: f64,
     pub end: f64,
@@ -949,6 +957,44 @@ fn centred() -> f64 {
     0.5
 }
 
+fn unzoomed() -> f64 {
+    1.0
+}
+
+/// How a 9:16 short is cut from the source frame: where the window sits and
+/// how far it zooms in. A window always keeps 9:16; at zoom 1 it is the full
+/// frame height (so `crop_y` doesn't matter).
+#[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts-bindings", ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipFraming {
+    /// Across the frame: 0 = left edge, 0.5 = centred, 1 = right edge.
+    pub crop_x: f64,
+    /// Up and down: 0 = top, 0.5 = centred, 1 = bottom.
+    pub crop_y: f64,
+    /// 1 = the full frame height; 2 = half of it.
+    pub crop_zoom: f64,
+}
+
+impl ClipFraming {
+    /// The closest a crop zooms in: a third of the frame height (a 1080p
+    /// source then gives 360 rows for the 1920-row short).
+    pub const MAX_ZOOM: f64 = 3.0;
+
+    pub const CENTRED: ClipFraming = ClipFraming { crop_x: 0.5, crop_y: 0.5, crop_zoom: 1.0 };
+
+    /// Positions in 0..1, zoom in 1..MAX_ZOOM (a non-finite value takes the
+    /// centred default).
+    pub fn clamped(self) -> Self {
+        let fit = |v: f64, lo: f64, hi: f64, default: f64| if v.is_finite() { v.clamp(lo, hi) } else { default };
+        ClipFraming {
+            crop_x: fit(self.crop_x, 0.0, 1.0, 0.5),
+            crop_y: fit(self.crop_y, 0.0, 1.0, 0.5),
+            crop_zoom: fit(self.crop_zoom, 1.0, Self::MAX_ZOOM, 1.0),
+        }
+    }
+}
+
 /// The lean saved-clip view for listings (no clip dump).
 #[cfg_attr(feature = "ts-bindings", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-bindings", ts(export))]
@@ -959,6 +1005,8 @@ pub struct SavedClipSummary {
     pub ranges: Vec<SourceRange>,
     pub format: ClipFormat,
     pub crop_x: f64,
+    pub crop_y: f64,
+    pub crop_zoom: f64,
     pub start: f64,
     pub end: f64,
     /// Playable seconds (cuts inside the pieces don't count).
@@ -993,6 +1041,17 @@ impl SavedClip {
         self.piece_spans().into_iter().flatten().collect()
     }
 
+    /// Its 9:16 framing.
+    pub fn framing(&self) -> ClipFraming {
+        ClipFraming { crop_x: self.crop_x, crop_y: self.crop_y, crop_zoom: self.crop_zoom }
+    }
+
+    /// Set its 9:16 framing (clamped).
+    pub fn set_framing(&mut self, f: ClipFraming) {
+        let f = f.clamped();
+        (self.crop_x, self.crop_y, self.crop_zoom) = (f.crop_x, f.crop_y, f.crop_zoom);
+    }
+
     pub fn summary(&self) -> SavedClipSummary {
         SavedClipSummary {
             id: self.id,
@@ -1000,6 +1059,8 @@ impl SavedClip {
             ranges: self.ranges.clone(),
             format: self.format,
             crop_x: self.crop_x,
+            crop_y: self.crop_y,
+            crop_zoom: self.crop_zoom,
             start: self.start,
             end: self.end,
             duration: self.timeline.included_duration(),
@@ -1042,6 +1103,10 @@ pub struct ClipCandidate {
     /// name); None for a rule-based score.
     #[serde(default)]
     pub scorer: Option<String>,
+    /// The 9:16 framing the user set on the Shorts screen before making it.
+    /// None: making it frames the short on the speaker.
+    #[serde(default)]
+    pub framing: Option<ClipFraming>,
 }
 
 /// A named, self-contained snapshot of the timeline — a "save point" the
@@ -1327,6 +1392,8 @@ mod tests {
             ranges: ranges.clone(),
             format: ClipFormat::Vertical,
             crop_x: 0.5,
+            crop_y: 0.5,
+            crop_zoom: 1.0,
             start: 10.0,
             end: 60.0,
             timeline: main.restricted_to(&ranges),

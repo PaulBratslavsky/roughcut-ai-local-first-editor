@@ -507,15 +507,40 @@ export function useCreateClips(projectId: string, run?: RunOptions<CreateClipsAr
 
 export function useUpdateClip() {
   return useEditMutation<
-    { project_id: string; clip_id: string; title?: string; format?: ClipFormat; crop_x?: number },
+    {
+      project_id: string;
+      clip_id: string;
+      title?: string;
+      format?: ClipFormat;
+      crop_x?: number;
+      crop_y?: number;
+      crop_zoom?: number;
+    },
     { clip: SavedClipSummary }
   >("update_clip", ["clips"]);
 }
 
-/** What a face pass found: `crop_x` null = no confident face, crop unchanged. */
+/** Frame a scan candidate's 9:16 crop before it's made (or `reset` to frame
+ *  it on the speaker when made). */
+export function useFrameCandidate() {
+  return useEditMutation<
+    {
+      project_id: string;
+      candidate_id: string;
+      crop_x?: number;
+      crop_y?: number;
+      crop_zoom?: number;
+      reset?: boolean;
+    },
+    { candidate: ClipCandidate }
+  >("frame_candidate", ["clip-candidates"]);
+}
+
+/** What a face pass found: `crop_x`/`crop_y` null = no confident face, crop unchanged. */
 export interface FaceCropResult {
   clip: SavedClipSummary;
   crop_x: number | null;
+  crop_y: number | null;
   frames_sampled: number;
   frames_with_face: number;
 }

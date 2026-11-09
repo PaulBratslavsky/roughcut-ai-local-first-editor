@@ -164,7 +164,7 @@ export function SavedClipRow({
           <button
             className={`ghost-btn${framing ? " active" : ""}`}
             onClick={toggleCrop}
-            title="Frame the 9:16 crop over the preview: drag it, or centre it on the speaker"
+            title="Frame the 9:16 crop over the preview: drag it, drag a corner to zoom, or centre it on the speaker"
           >
             crop
           </button>

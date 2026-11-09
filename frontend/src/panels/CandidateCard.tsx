@@ -49,7 +49,7 @@ export function CandidateCard({
     (s) => s.playing && s.auditionIsCandidate && s.audition !== null && s.audition[0]?.start === at,
   );
 
-  const preview = () => previewRanges(pieces, { candidate: true });
+  const preview = () => previewRanges(pieces, { candidate: c.id });
   const score = Math.round(c.score);
 
   return (
@@ -101,6 +101,12 @@ export function CandidateCard({
           <span className="clip-meta">
             {clock(c.start)}–{clock(c.end)} · {Math.round(c.duration)}s
             {pieces.length > 1 && ` · ${pieces.length} pieces`}
+            {c.framing && (
+              <span title="You framed this short's 9:16 crop; making it keeps that framing">
+                {" "}
+                · framed{c.framing.crop_zoom > 1.005 && ` ${c.framing.crop_zoom.toFixed(1)}×`}
+              </span>
+            )}
           </span>
           <button className="ghost-btn" onClick={preview} aria-label={`Preview “${c.title}”`}>
             ▶ preview

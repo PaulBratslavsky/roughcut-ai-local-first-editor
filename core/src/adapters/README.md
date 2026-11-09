@@ -59,14 +59,15 @@ receive results or file paths.
 - `pub struct FfmpegCli`: production `VideoEngine`.
 - `pub struct MockVideoEngine`: demo `VideoEngine`.
 - `pub struct AutoVideoEngine`: per-call selector between the two.
-- `pub struct RenderJob<'a> { media, pieces: &[Vec<PlaySpan>], out_path, audio_offset_s, screen: Option<(&Media, &crate::model::Layout)>, vertical_crop_x: Option<f64> }`:
+- `pub struct RenderJob<'a> { media, pieces: &[Vec<PlaySpan>], out_path, audio_offset_s, screen: Option<(&Media, &crate::model::Layout)>, vertical_crop: Option<crate::model::ClipFraming> }`:
   `pieces` is what plays, grouped by piece, in output order (the main cut is
   one piece: `Timeline::play_spans()`; a saved clip is
   `SavedClip::piece_spans()`); `screen` is the project's screen file (one that
   starts with the camera file, `project.screen_media`) and its layout, for
   compositing;
-  `vertical_crop_x` renders 9:16 at 1080×1920 (0 = left, 0.5 = centre, 1 =
-  right).
+  `vertical_crop` renders 9:16 at 1080×1920 from a 9:16 window of the frame
+  (`crop_zoom` 1 = full height … 3 = a third of it; `crop_x` 0 = left, 0.5 =
+  centre, 1 = right; `crop_y` 0 = top … 1 = bottom when zoomed).
 - `pub struct MediaAssets { peaks_path: Option<String>, peaks_per_second: u32, thumbnails: Vec<ThumbnailRef>, playback_path: Option<String>, playback_error: Option<String> }`
   and `pub struct ThumbnailRef { time: f64, path: String }`. `playback_error`
   is why building the playable copy failed in this run; it is set only when
@@ -162,7 +163,9 @@ receive results or file paths.
   **Blocking**; call it from `spawn_blocking`.
 - `pub fn subject(faces: &[FaceBox]) -> Option<&FaceBox>`: the speaker in one frame.
 - `pub fn crop_x_for_faces(frames: &[Vec<FaceBox>], frame_w: u32, frame_h: u32) -> Option<f64>`:
-  the render's `vertical_crop_x`.
+  `crop_for_faces` at zoom 1, across only.
+- `pub fn crop_for_faces(frames: &[Vec<FaceBox>], frame_w: u32, frame_h: u32, zoom: f64) -> Option<(f64, f64)>`:
+  the render's `crop_x` and `crop_y` for a window zoomed `zoom` times.
 - `pub fn sample_times(kept: &[(f64, f64)], max: usize) -> Vec<f64>`: source
   times to sample across the kept `(source_in, source_out)` spans.
 - `pub fn png_size(path: &Path) -> Result<(u32, u32)>`: reads the size from
@@ -277,9 +280,10 @@ There are no child directories with contracts.
   `layout.size.clamp(0.10, 0.45)`, minimum 64 px, `"round"` or rounded-rect
   mask, 3% inset, and the corner is chosen by whether `layout.corner`
   contains `l` / `t`.
-- `vertical_crop_x` applies one crop after the concat:
-  `w = trunc(ih*9/16/2)*2`, `x = (iw-ow)*clamp(x,0,1)`, then
-  `scale=1080:1920`.
+- `vertical_crop` (clamped by `ClipFraming::clamped`) applies one crop after
+  the concat. Unzoomed: `w = trunc(ih*9/16/2)*2`, `h = ih`, `x = (iw-ow)*x`,
+  `y = 0`. Zoomed: `w = trunc(ih/zoom*9/16/2)*2`, `h = trunc(ih/zoom/2)*2`,
+  `x = (iw-ow)*x`, `y = (ih-oh)*y`. Then `scale=1080:1920:flags=lanczos`.
 - Progress fraction is capped at `0.99` until ffmpeg exits successfully. Then
   `1.0` ("render complete") is emitted.
 
@@ -421,10 +425,12 @@ There are no child directories with contracts.
 
 - `subject` only considers faces with `confidence >= 0.6` (`MIN_CONFIDENCE`)
   and `h >= 0.04` (`MIN_FACE_H`). The largest `w*h` wins.
-- `crop_x_for_faces` returns `None` when no frame has a subject, or when fewer
-  than a quarter of the frames do. It uses the **median** subject `cx`, and
-  returns `Some(0.5)` when the source is already 9:16 or narrower. Otherwise
-  the result is clamped to `0..=1`.
+- `crop_for_faces` (and `crop_x_for_faces`) returns `None` when no frame has a
+  subject, or when fewer than a quarter of the frames do. It uses the
+  **median** subject `cx` and `cy`. Across, the window centres on `cx`
+  (`0.5` when the window spans the whole width: a source already 9:16 or
+  narrower). Up and down, a zoomed window puts `cy` 40% of the way down
+  (`EYE_LINE`); unzoomed, `crop_y` is `0.5`. Both are clamped to `0..=1`.
 - `sample_times` returns about one sample per 2 s of kept time, with
   `n.clamp(min(6, max), max)`, taken at midpoints and mapped back to source
   time in play order. It is empty when the total kept time is `<= 0` or

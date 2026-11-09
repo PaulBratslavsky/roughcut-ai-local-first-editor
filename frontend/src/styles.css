@@ -1129,8 +1129,6 @@ input, select { font: inherit; }
 }
 .crop-window {
   position: absolute;
-  top: 0;
-  bottom: 0;
   box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.6);
   outline: 1px solid rgba(255, 255, 255, 0.9);
   outline-offset: -1px;
@@ -1138,6 +1136,21 @@ input, select { font: inherit; }
   touch-action: none;
 }
 .crop-window.dragging { cursor: grabbing; outline-color: #fff; }
+/* Corner handles: drag one to zoom (the opposite corner stays put). */
+.crop-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  touch-action: none;
+}
+/* Inside the corners: at full height the top ones sit under the crop bar,
+   and the bottom ones would be cut off by the frame's edge. */
+.crop-corner.nw { left: 0; top: 0; cursor: nwse-resize; }
+.crop-corner.se { right: 0; bottom: 0; cursor: nwse-resize; }
+.crop-corner.ne { right: 0; top: 0; cursor: nesw-resize; }
+.crop-corner.sw { left: 0; bottom: 0; cursor: nesw-resize; }
 .crop-label {
   position: absolute;
   left: 6px;
@@ -2224,10 +2237,6 @@ input, select { font: inherit; }
 .tick-box:focus-visible { outline: 1px solid var(--text); outline-offset: 2px; }
 .clip-row .tick-box { margin-top: 3px; }
 
-/* The Shorts screen's fixed, centred 9:16 window: nothing to drag. */
-.crop-guide.passive { pointer-events: none; }
-.crop-guide.passive .crop-window { cursor: default; }
-.crop-guide.passive .crop-label { top: 6px; }
 
 /* LOCAL / HOSTED model chip: a top-bar button. LOCAL is the plain outline;
    HOSTED is inverted (ink), so the mode reads at a glance without a new

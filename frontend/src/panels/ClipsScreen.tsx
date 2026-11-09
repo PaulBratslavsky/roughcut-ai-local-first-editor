@@ -117,8 +117,8 @@ export function ClipsScreen({ projectId }: { projectId: string }) {
         <section className="shorts-player">
           <PreviewPanel projectId={projectId} />
           <p className="clips-note shorts-player-note">
-            ▶ plays a clip here · Space plays / pauses. "crop" frames a 9:16 clip over the picture: drag it, or
-            centre it on the speaker.
+            ▶ plays a clip here · Space plays / pauses. "crop" frames a 9:16 clip over the picture: drag it, drag a
+            corner to zoom in, or centre it on the speaker.
           </p>
           <PlayerDrawer projectId={projectId} />
         </section>

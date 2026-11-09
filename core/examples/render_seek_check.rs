@@ -98,7 +98,7 @@ async fn main() {
     let t = Instant::now();
     let job = RenderJob {
         media: &media, pieces: &late, out_path: &out1.to_string_lossy(), audio_offset_s: 0.0,
-        screen: None, vertical_crop_x: None,
+        screen: None, vertical_crop: None,
     };
     engine.render_mp4(&job, &sink).await.expect("render late");
     let seeked = t.elapsed().as_secs_f64();
@@ -131,7 +131,7 @@ async fn main() {
     let out2 = dir.join("reversed.mp4");
     let job = RenderJob {
         media: &media, pieces: &reversed, out_path: &out2.to_string_lossy(), audio_offset_s: 0.0,
-        screen: None, vertical_crop_x: None,
+        screen: None, vertical_crop: None,
     };
     engine.render_mp4(&job, &sink).await.expect("render reversed");
     check((duration(&out2) - 40.0).abs() < 0.15, &format!("reversed pieces are 40 s (got {:.2})", duration(&out2)));
@@ -145,7 +145,7 @@ async fn main() {
         let out = dir.join(format!("{name}.mp4"));
         let job = RenderJob {
             media: &media, pieces: &reversed, out_path: &out.to_string_lossy(), audio_offset_s: offset,
-            screen: None, vertical_crop_x: crop,
+            screen: None, vertical_crop: crop.map(|x| roughcut_core::model::ClipFraming { crop_x: x, ..roughcut_core::model::ClipFraming::CENTRED }),
         };
         let r = engine.render_mp4(&job, &sink).await;
         check(r.is_ok(), &format!("{name} renders ({:?})", r.err()));
@@ -177,7 +177,7 @@ async fn main() {
         let out = dir.join(format!("composite-{mode}.mp4"));
         let job = RenderJob {
             media: &media, pieces: &reversed, out_path: &out.to_string_lossy(), audio_offset_s: 0.0,
-            screen: Some((&screen, &layout)), vertical_crop_x: None,
+            screen: Some((&screen, &layout)), vertical_crop: None,
         };
         let r = engine.render_mp4(&job, &sink).await;
         check(r.is_ok(), &format!("composite {mode} renders ({:?})", r.err()));
@@ -212,7 +212,7 @@ async fn main() {
     let out6 = dir.join("frame-exact.mp4");
     let job = RenderJob {
         media: &media30, pieces: &exact, out_path: &out6.to_string_lossy(), audio_offset_s: 0.0,
-        screen: None, vertical_crop_x: None,
+        screen: None, vertical_crop: None,
     };
     engine.render_mp4(&job, &sink).await.expect("render frame-exact");
     // Grab a little before each frame's own timestamp: accurate seek takes
@@ -234,7 +234,7 @@ async fn main() {
     let out7 = dir.join("screen-tail.mp4");
     let job = RenderJob {
         media: &media, pieces: &tail, out_path: &out7.to_string_lossy(), audio_offset_s: 0.0,
-        screen: Some((&screen, &layout)), vertical_crop_x: None,
+        screen: Some((&screen, &layout)), vertical_crop: None,
     };
     let r = engine.render_mp4(&job, &sink).await;
     check(r.is_ok(), &format!("a short past the screen's end renders ({:?})", r.err()));

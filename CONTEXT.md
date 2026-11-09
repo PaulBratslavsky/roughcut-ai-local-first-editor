@@ -70,9 +70,11 @@ Keep entries short. When a refactor names a new module, add the term here.
 - **SavedClip** (`model.rs`; "clip" in the UI and tools) — a standalone edit cut
   from the long-form video: one or more **pieces** (`SourceRange`s, played back to
   back in source order) in a **format** — `landscape` (16:9, the source frame) or
-  `vertical` (9:16 short, a full-height crop at `crop_x`, framed on the speaker
-  by `center_clip_on_face` — Apple Vision over sampled frames — when it becomes
-  vertical; a hand-set crop wins). Its **own Timeline**:
+  `vertical` (9:16 short, cut from a 9:16 window of the frame — its
+  **framing**: `crop_x` across, `crop_zoom` 1 = full height … 3, `crop_y` up and
+  down when zoomed — framed on the speaker by `center_clip_on_face` — Apple
+  Vision over sampled frames — when it becomes vertical; a hand-set framing
+  wins, including one set on its candidate with `frame_candidate`). Its **own Timeline**:
   the main cut restricted to the pieces (`Timeline::restricted_to`), so removed
   silences/fillers stay removed. Snapshotted at save and when the pieces change;
   main-cut edits and undo never move it. Project metadata, not journaled.

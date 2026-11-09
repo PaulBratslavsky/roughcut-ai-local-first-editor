@@ -56,9 +56,10 @@ pub struct RenderJob<'a> {
     pub audio_offset_s: f64,
     /// Dual-capture compositing: the synced screen file + how to frame it.
     pub screen: Option<(&'a Media, &'a crate::model::Layout)>,
-    /// Render 9:16 (1080×1920): a full-height crop of the frame, positioned
-    /// across it at this fraction (0 = left, 0.5 = centred, 1 = right).
-    pub vertical_crop_x: Option<f64>,
+    /// Render 9:16 (1080×1920): a 9:16 window of the frame, `crop_zoom`
+    /// times closer than the full height, positioned at `crop_x` across
+    /// (0 = left, 0.5 = centred, 1 = right) and `crop_y` down.
+    pub vertical_crop: Option<crate::model::ClipFraming>,
 }
 
 #[async_trait]
@@ -1013,13 +1014,22 @@ fn render_plan(job: &RenderJob<'_>) -> Result<RenderPlan> {
     for i in 0..n {
         filter.push_str(&format!("[v{i}][a{i}]"));
     }
-    if let Some(x) = job.vertical_crop_x {
-        // Reframe once, after the cuts: one crop for the whole clip.
+    if let Some(f) = job.vertical_crop {
+        // Reframe once, after the cuts: one crop for the whole clip. Unzoomed
+        // it is the full height; zoomed, 1/zoom of it, placed up and down too.
+        let f = f.clamped();
+        let crop = if f.crop_zoom <= 1.0 {
+            format!("crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*{x:.4}:y=0", x = f.crop_x)
+        } else {
+            format!(
+                "crop=w=trunc(ih/{z:.4}*9/16/2)*2:h=trunc(ih/{z:.4}/2)*2:x=(iw-ow)*{x:.4}:y=(ih-oh)*{y:.4}",
+                z = f.crop_zoom,
+                x = f.crop_x,
+                y = f.crop_y,
+            )
+        };
         filter.push_str(&format!(
-            "concat=n={n}:v=1:a=1[vcat][a];\
-             [vcat]crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*{x:.4}:y=0,\
-             scale=1080:1920,setsar=1[v]",
-            x = x.clamp(0.0, 1.0),
+            "concat=n={n}:v=1:a=1[vcat][a];[vcat]{crop},scale=1080:1920:flags=lanczos,setsar=1[v]"
         ));
     } else {
         filter.push_str(&format!("concat=n={n}:v=1:a=1[v][a]"));
@@ -1155,7 +1165,7 @@ mod tests {
     }
 
     fn job<'a>(m: &'a Media, pieces: &'a [Vec<PlaySpan>], offset: f64) -> RenderJob<'a> {
-        RenderJob { media: m, pieces, out_path: "/tmp/out.mp4", audio_offset_s: offset, screen: None, vertical_crop_x: None }
+        RenderJob { media: m, pieces, out_path: "/tmp/out.mp4", audio_offset_s: offset, screen: None, vertical_crop: None }
     }
 
     #[test]
@@ -1206,7 +1216,7 @@ mod tests {
         let pieces = vec![vec![span(100.0, 110.0)], vec![span(10.0, 20.0)]];
         let mut j = job(&m, &pieces, 0.0);
         j.screen = Some((&scr, &layout));
-        j.vertical_crop_x = Some(0.5);
+        j.vertical_crop = Some(crate::model::ClipFraming::CENTRED);
         let plan = render_plan(&j).unwrap();
         let files: Vec<&str> = plan.inputs.iter().map(|i| i.1.as_str()).collect();
         assert_eq!(files, vec!["/cam.mp4", "/cam.mp4", "/screen.mp4", "/screen.mp4"]);
@@ -1214,7 +1224,28 @@ mod tests {
         assert!(plan.filter.contains("[2:v]scale=") && plan.filter.contains("[3:v]scale="));
         assert!(plan.filter.contains("[scr0][cam0]overlay") && plan.filter.contains("[scr1][cam1]overlay"));
         assert!(plan.filter.contains("[cc1_0]trim="));
-        assert!(plan.filter.contains("crop=w=trunc(ih*9/16/2)*2"));
+        assert!(plan.filter.contains("crop=w=trunc(ih*9/16/2)*2:h=ih:x=(iw-ow)*0.5000:y=0,scale=1080:1920"));
+    }
+
+    #[test]
+    fn a_zoomed_vertical_crop_takes_a_smaller_window_placed_both_ways() {
+        let m = media("/cam.mp4");
+        let pieces = vec![vec![span(10.0, 20.0)]];
+        let mut j = job(&m, &pieces, 0.0);
+        j.vertical_crop = Some(crate::model::ClipFraming { crop_x: 0.25, crop_y: 0.1, crop_zoom: 2.0 });
+        let plan = render_plan(&j).unwrap();
+        assert!(
+            plan.filter.contains(
+                "[vcat]crop=w=trunc(ih/2.0000*9/16/2)*2:h=trunc(ih/2.0000/2)*2:x=(iw-ow)*0.2500:y=(ih-oh)*0.1000,\
+                 scale=1080:1920:flags=lanczos,setsar=1[v]"
+            ),
+            "{}",
+            plan.filter
+        );
+        // Out-of-range framing is clamped, not passed to ffmpeg.
+        j.vertical_crop = Some(crate::model::ClipFraming { crop_x: 7.0, crop_y: -1.0, crop_zoom: 9.0 });
+        let plan = render_plan(&j).unwrap();
+        assert!(plan.filter.contains("crop=w=trunc(ih/3.0000*9/16/2)*2") && plan.filter.contains("x=(iw-ow)*1.0000:y=(ih-oh)*0.0000"));
     }
 
     #[test]

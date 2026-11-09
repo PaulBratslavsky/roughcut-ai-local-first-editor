@@ -1130,6 +1130,28 @@ handler!(h_get_clip_candidates, |e, a, _s| {
     Ok(json!({ "candidates": e.get_clip_candidates(arg_uuid(a, "project_id")?)? }))
 });
 
+handler!(h_frame_candidate, |e, a, _s| {
+    let project_id = arg_uuid(a, "project_id")?;
+    let candidate_id = arg_uuid(a, "candidate_id")?;
+    let framing = if a["reset"].as_bool().unwrap_or(false) {
+        None
+    } else {
+        let now = e
+            .get_clip_candidates(project_id)?
+            .into_iter()
+            .find(|c| c.id == candidate_id)
+            .ok_or_else(|| CoreError::NotFound(format!("clip candidate {candidate_id}")))?
+            .framing
+            .unwrap_or(crate::model::ClipFraming::CENTRED);
+        Some(crate::model::ClipFraming {
+            crop_x: arg_f64_opt(a, "crop_x")?.unwrap_or(now.crop_x),
+            crop_y: arg_f64_opt(a, "crop_y")?.unwrap_or(now.crop_y),
+            crop_zoom: arg_f64_opt(a, "crop_zoom")?.unwrap_or(now.crop_zoom),
+        })
+    };
+    Ok(json!({ "candidate": e.frame_candidate(project_id, candidate_id, framing)? }))
+});
+
 /// Optional clip format arg: "landscape" (16:9) | "vertical" (9:16).
 fn arg_clip_format(args: &Value) -> Result<Option<crate::model::ClipFormat>> {
     match args["format"].as_str() {
@@ -1202,8 +1224,15 @@ handler!(h_create_clip, |e, a, _s| {
             }
         },
     };
+    // A candidate the user framed on the Shorts screen keeps that framing.
+    let framed = match &from {
+        crate::engine::ClipSource::Candidate(id) => {
+            e.get_clip_candidates(project_id)?.iter().any(|c| c.id == *id && c.framing.is_some())
+        }
+        crate::engine::ClipSource::Ranges(_) => false,
+    };
     let clip = e.create_clip(project_id, from, a["title"].as_str(), arg_clip_format(a)?)?;
-    if clip.format == crate::model::ClipFormat::Vertical {
+    if clip.format == crate::model::ClipFormat::Vertical && !framed {
         // Frame the short on the speaker; the crop updates when it lands.
         e.auto_center_clip(project_id, clip.id);
     }
@@ -1231,10 +1260,12 @@ handler!(h_update_clip, |e, a, _s| {
         ranges: arg_clip_ranges(e, project_id, a)?,
         format: arg_clip_format(a)?,
         crop_x: arg_f64_opt(a, "crop_x")?,
+        crop_y: arg_f64_opt(a, "crop_y")?,
+        crop_zoom: arg_f64_opt(a, "crop_zoom")?,
     };
     let clip_id = arg_uuid(a, "clip_id")?;
     let was_vertical = e.get_clip(project_id, clip_id)?.format == crate::model::ClipFormat::Vertical;
-    let crop_given = changes.crop_x.is_some();
+    let crop_given = changes.reframes();
     let clip = e.update_clip(project_id, clip_id, changes)?;
     // Newly 9:16 with the crop never moved: frame it on the speaker.
     if !was_vertical && !crop_given && clip.format == crate::model::ClipFormat::Vertical && clip.crop_x == 0.5 {
@@ -1571,25 +1602,28 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("get_clip_candidates", "The candidates from the latest find_clips run, best first (no recompute).",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_get_clip_candidates),
+    tool!("frame_candidate", "Frame a find_clips candidate's 9:16 crop before it's made into a short (the Shorts screen's drag): crop_x across (0 = left, 0.5 = centre, 1 = right), crop_zoom (1 = the full frame height, up to 3 = a third of it, closer), crop_y up and down when zoomed (0 = top, 1 = bottom). Arguments left out keep their current value. create_clip / create_clips then keep this framing instead of framing the short on the speaker; reset: true goes back to that. Returns {candidate}.",
+        || obj(json!({"project_id": pid_schema(), "candidate_id": {"type": "string"}, "crop_x": {"type": "number"}, "crop_y": {"type": "number"}, "crop_zoom": {"type": "number", "description": "1-3"}, "reset": {"type": "boolean", "description": "forget the framing: frame the short on the speaker when it's made"}}), &["project_id", "candidate_id"]),
+        agent: false, meta: false, h_frame_candidate),
     tool!("create_clip", "Save a CLIP — a standalone edit made of one or more pieces of the video, played back to back, in format landscape (16:9, default for picked pieces) or vertical (9:16 short, default for candidates). Pieces from: rank (1 = top find_clips candidate) or candidate_id; OR segment_ids (whole transcript sentences, any number, from anywhere); OR ranges [{start, end}] in seconds; OR start + end. The clip keeps the current cut's removals inside its pieces, and later main-cut edits don't change it. (Not to be confused with the main timeline's clips that trim_clip / split_clip edit.)",
         || obj(json!({"project_id": pid_schema(), "rank": {"type": "integer", "description": "position in the latest find_clips list, 1 = best"}, "candidate_id": {"type": "string"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id"]),
         agent: true, meta: false, h_create_clip),
-    tool!("create_clips", "Make several find_clips candidates into saved clips at once (vertical 9:16 shorts unless format says otherwise), then frame each short's crop on the speaker before returning. Returns {clips: [SavedClipSummary], errors: [{candidate_id, message}]}: a candidate whose material was cut from the main edit since the scan stays listed and is reported in errors; the rest are still made.",
+    tool!("create_clips", "Make several find_clips candidates into saved clips at once (vertical 9:16 shorts unless format says otherwise), then frame each short's crop on the speaker before returning (a candidate framed with frame_candidate keeps that framing). Returns {clips: [SavedClipSummary], errors: [{candidate_id, message}]}: a candidate whose material was cut from the main edit since the scan stays listed and is reported in errors; the rest are still made.",
         || obj(json!({"project_id": pid_schema(), "candidate_ids": {"type": "array", "items": {"type": "string"}, "description": "ids from find_clips / get_clip_candidates"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}}), &["project_id", "candidate_ids"]),
         agent: true, meta: false, h_create_clips),
-    tool!("list_clips", "List saved clips: {id, title, ranges, format, crop_x, start, end, duration, score, reason, hook, created_at}.",
+    tool!("list_clips", "List saved clips: {id, title, ranges, format, crop_x, crop_y, crop_zoom, start, end, duration, score, reason, hook, created_at}.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: true, meta: false, h_list_clips),
-    tool!("update_clip", "Change a saved clip: title; format (landscape | vertical); crop_x (vertical only: 0 = crop the left of the frame, 0.5 = centre, 1 = right); or its pieces (segment_ids / ranges / start+end — re-snapshots the CURRENT main cut inside them).",
-        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}, "crop_x": {"type": "number"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "clip_id"]),
+    tool!("update_clip", "Change a saved clip: title; format (landscape | vertical); its 9:16 framing (vertical only): crop_x across (0 = crop the left of the frame, 0.5 = centre, 1 = right), crop_zoom (1 = the full frame height, up to 3 = a third of it, closer), crop_y up and down when zoomed (0 = top, 1 = bottom); or its pieces (segment_ids / ranges / start+end — re-snapshots the CURRENT main cut inside them).",
+        || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "title": {"type": "string"}, "format": {"type": "string", "enum": ["landscape", "vertical"]}, "crop_x": {"type": "number"}, "crop_y": {"type": "number"}, "crop_zoom": {"type": "number", "description": "1-3"}, "segment_ids": {"type": "array", "items": {"type": "string"}}, "ranges": {"type": "array", "items": {"type": "object", "properties": {"start": {"type": "number"}, "end": {"type": "number"}}}}, "start": {"type": "number"}, "end": {"type": "number"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_update_clip),
-    tool!("center_clip_on_face", "Frame a clip's 9:16 crop on the speaker: samples frames across the clip, finds faces on-device (Apple Vision), and sets crop_x to centre the median speaker position. Returns {clip, crop_x (null = no confident face, crop unchanged), frames_sampled, frames_with_face}. Runs by itself when a clip is created as, or switched to, vertical. Not for projects that composite a screen recording (set crop_x instead).",
+    tool!("center_clip_on_face", "Frame a clip's 9:16 crop on the speaker: samples frames across the clip, finds faces on-device (Apple Vision), and moves the crop to centre the median speaker position (keeping its zoom; zoomed in, the face sits a little above the middle). Returns {clip, crop_x and crop_y (null = no confident face, crop unchanged), frames_sampled, frames_with_face}. Runs by itself when a clip is created as, or switched to, vertical. Not for projects that composite a screen recording (set crop_x instead).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_center_clip_on_face),
     tool!("delete_clip", "Delete a saved clip.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_delete_clip),
-    tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x).",
+    tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (its 9:16 crop: crop_x, crop_y, crop_zoom).",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "clip_id", "target", "out_path"]),
         agent: false, meta: false, h_export_clip),
     tool!("export_clips", "Export several saved clips into one folder, one file each, named NN-<title>.<ext> in the order given (never overwrites: an existing name gets -2, -3…). target defaults to mp4 (vertical clips render 1080x1920); any export target works. One failure doesn't stop the rest. Returns {results: [{clip_id, path, error}]} in the order given.",

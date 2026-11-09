@@ -98,14 +98,16 @@ export interface ViewState {
   /** Auditioning a clip: play these pieces back to back, then pause. Gaps
    *  between pieces are skipped. Cleared by any seek. */
   audition: Range[] | null;
-  /** The audition is a scan candidate (Shorts screen): the preview shows a
-   *  centred 9:16 window, where its short would start. */
+  /** The audition is a scan candidate (Shorts screen). */
   auditionIsCandidate: boolean;
   /** The clip being assembled in the transcript ("Add to clip"): pieces in
    *  source order, not yet saved. */
   clipDraft: Range[];
   /** The saved 9:16 clip whose crop the preview is framing (drag to move). */
   cropClipId: string | null;
+  /** Shorts screen: the scan candidate whose 9:16 crop the preview shows
+   *  (the last one played), until "done". */
+  cropCandidateId: string | null;
   /** The proposed cut the review bar is on (its number), shown in the
    *  transcript and timeline. */
   focusedCut: number | null;
@@ -129,6 +131,7 @@ export const viewStore = new Store<ViewState>({
   auditionIsCandidate: false,
   clipDraft: [],
   cropClipId: null,
+  cropCandidateId: null,
   focusedCut: null,
   ...loadPrefs(),
 });
@@ -157,11 +160,14 @@ export function setProjectId(projectId: string | null): void {
       audition: null,
       clipDraft: [],
       cropClipId: null,
+      cropCandidateId: null,
     };
   });
 }
 /** Show (or hide, with null) a saved clip's 9:16 crop over the preview. */
 export const setCropClip = (cropClipId: string | null) => patch({ cropClipId });
+/** Show (or hide, with null) a scan candidate's 9:16 crop over the preview. */
+export const setCropCandidate = (cropCandidateId: string | null) => patch({ cropCandidateId });
 export const setScreen = (screen: AppScreen) => patch({ screen });
 export const setPlayhead = (playhead: number) => patch({ playhead: Math.max(0, playhead) });
 
@@ -176,8 +182,9 @@ export function seekTo(t: number): void {
 }
 
 /** Play these pieces back to back once and stop — auditioning a clip (or,
- *  with `candidate`, a scan candidate on the Shorts screen). */
-export function previewRanges(ranges: Range[], opts: { candidate?: boolean } = {}): void {
+ *  with `candidate`, a scan candidate on the Shorts screen: its id, whose
+ *  9:16 crop the preview then shows). */
+export function previewRanges(ranges: Range[], opts: { candidate?: string } = {}): void {
   const pieces = [...ranges].sort((a, b) => a.start - b.start);
   if (pieces.length === 0) return;
   viewStore.setState((s) => ({
@@ -186,6 +193,7 @@ export function previewRanges(ranges: Range[], opts: { candidate?: boolean } = {
     seekNonce: s.seekNonce + 1,
     audition: pieces,
     auditionIsCandidate: !!opts.candidate,
+    cropCandidateId: opts.candidate ?? s.cropCandidateId,
     playing: true,
   }));
 }

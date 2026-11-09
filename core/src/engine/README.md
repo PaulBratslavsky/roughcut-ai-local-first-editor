@@ -59,9 +59,10 @@ This package depends on the following crate modules but does not own them:
 - `ClipSource` (`clips.rs`, re-exported): `Candidate(Uuid)` or
   `Ranges(Vec<SourceRange>)`.
 - `ClipChanges` (`clips.rs`, re-exported, `Default`): a partial update with
-  fields `title`, `ranges`, `format`, and `crop_x`. A `None` field is left
-  unchanged.
-- `FaceCrop` (`clips.rs`, re-exported, `Serialize`): `{ clip, crop_x: Option<f64>, frames_sampled, frames_with_face }`.
+  fields `title`, `ranges`, `format`, `crop_x`, `crop_y`, and `crop_zoom`. A
+  `None` field is left unchanged; `reframes()` is true when any crop field is
+  set.
+- `FaceCrop` (`clips.rs`, re-exported, `Serialize`): `{ clip, crop_x: Option<f64>, crop_y: Option<f64>, frames_sampled, frames_with_face }`.
 - `DurationCutPlan` (`semantic.rs`, `Serialize`): `{ segment_ids, before_s, projected_after_s, target_s, method: "centrality" | "heuristic", notes }`.
   The type is `pub` but its module is private and it is not re-exported, so
   callers only get it as the return value of `plan_duration_cut`.
@@ -132,12 +133,13 @@ This package depends on the following crate modules but does not own them:
 | `set_clip_candidates(id, Vec<ClipCandidate>)`, `get_clip_candidates(id)`            | Replace or read the candidates from one `find_clips` run.                              |
 | `replace_clip_candidates(id, Vec<ClipCandidate>, drop_saved: Option<f64>)`          | A run's final write: with `drop_saved`, drops candidates overlapping a saved clip now. |
 | `begin_clip_scan(id) -> Result<ClipScan>`                                           | Claims the project's one `find_clips` slot; dropping the guard frees it.               |
+| `frame_candidate(id, candidate_id, Option<ClipFraming>) -> Result<ClipCandidate>`   | Sets (clamped) or clears a candidate's `framing`; a clip made from it keeps that framing. |
 | `create_clip(id, ClipSource, title: Option<&str>, format: Option<ClipFormat>)`      | Snapshots the main cut, restricted to the clip's ranges. Returns `SavedClipSummary`.   |
-| `async create_clips(id, &[Uuid], format: Option<ClipFormat>)`                       | Makes each candidate that validates, then frames each vertical one in turn (`MakeClips` progress). Returns `(clips, errors)`. |
+| `async create_clips(id, &[Uuid], format: Option<ClipFormat>)`                       | Makes each candidate that validates, then frames each vertical one in turn (`MakeClips` progress), except one whose candidate had a `framing`. Returns `(clips, errors)`. |
 | `list_clips(id)`, `get_clip(id, clip_id)`                                           | Summaries in creation order, or the full `SavedClip` including its timeline.           |
 | `update_clip(id, clip_id, ClipChanges)`, `delete_clip(id, clip_id)`                 | New ranges re-snapshot the current main cut.                                           |
 | `async center_clip_on_face(id, clip_id) -> Result<FaceCrop>`                        | Face pass that always applies the crop it finds.                                       |
-| `auto_center_clip(id, clip_id)`                                                     | Fire-and-forget face pass that uses compare-and-set on `crop_x`.                       |
+| `auto_center_clip(id, clip_id)`                                                     | Fire-and-forget face pass that uses compare-and-set on the clip's framing.             |
 
 ### Semantic index and search (`semantic.rs`)
 
@@ -285,27 +287,33 @@ This package depends on the following crate modules but does not own them:
   (`start <= last.end + EPS`).
 - `set_ranges` rejects ranges that leave under 1.0 s of kept footage in the
   current cut.
-- `create_clip` defaults: `crop_x = 0.5`, `Landscape`, and title
-  `"Clip {n}"`.
+- `create_clip` defaults: `crop_x = 0.5`, `crop_y = 0.5`, `crop_zoom = 1`,
+  `Landscape`, and title `"Clip {n}"`.
 - `create_clip` from a `Candidate` defaults to `Vertical`, copies the
-  candidate's title, score, reason, and hook, builds the clip from its
-  `pieces`, and removes the candidate only after the clip validates. An
+  candidate's title, score, reason, hook, and `framing` (if the user set one),
+  builds the clip from its `pieces`, and removes the candidate only after the
+  clip validates. The `create_clip` tool skips the background face pass for a
+  candidate with a `framing`. An
   explicit `format` or non-blank `title` argument overrides these defaults.
 - `create_clips` does the same per id inside one `update_project_meta`. An id
   that isn't listed becomes a `ClipBatchError`; one that fails validation
   stays listed and becomes one too. It then awaits the face pass for each
-  vertical clip, with compare-and-set on `crop_x`; a failed pass leaves the
-  crop at 0.5. A clip deleted during framing is left out of the result.
-- `update_clip` clamps `crop_x` to `[0, 1]` and ignores a blank title.
-- `set_crop_if` is compare-and-set: the background face pass writes `crop_x`
-  only if the clip's crop still equals the value captured when the pass
-  started (within `1e-9`). A crop the user set by hand is never overwritten.
-  The test `background_face_pass_never_overrides_a_hand_set_crop` covers this.
+  vertical clip whose candidate had no `framing`, with compare-and-set on the
+  framing; a failed pass leaves the crop centred. A clip deleted during
+  framing is left out of the result.
+- `update_clip` clamps the framing (`ClipFraming::clamped`: positions to
+  `[0, 1]`, zoom to `[1, 3]`, NaN to centred) and ignores a blank title.
+- `set_crop_if` is compare-and-set: the background face pass writes the
+  framing only if the clip's `crop_x`, `crop_y` and `crop_zoom` all still equal
+  the values captured when the pass started (within `1e-9`). A crop the user
+  set by hand, including a zoom, is never overwritten. The test
+  `background_face_pass_never_overrides_a_hand_set_crop` covers this.
+- The face pass keeps the clip's zoom and moves the window: `crop_for_faces`.
 - `face_crop` refuses with `InvalidArg` when `project.screen_media` is set
   (camera-bubble composites) or the project has no media.
 - `face_crop` samples at most `FACE_SAMPLES = 12` frames, each grabbed
   `FACE_FRAME_WIDTH = 640` px wide. If it cannot see a face, it leaves the crop
-  unchanged and returns `crop_x: None`.
+  unchanged and returns `crop_x: None` and `crop_y: None`.
 
 ### Media and transcription (`media.rs`)
 

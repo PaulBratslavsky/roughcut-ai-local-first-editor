@@ -5,7 +5,7 @@ import type { SourceRange } from "./SourceRange";
 /**
  * The lean saved-clip view for listings (no clip dump).
  */
-export type SavedClipSummary = { id: string, title: string, ranges: Array<SourceRange>, format: ClipFormat, crop_x: number, start: number, end: number, 
+export type SavedClipSummary = { id: string, title: string, ranges: Array<SourceRange>, format: ClipFormat, crop_x: number, crop_y: number, crop_zoom: number, start: number, end: number, 
 /**
  * Playable seconds (cuts inside the pieces don't count).
  */

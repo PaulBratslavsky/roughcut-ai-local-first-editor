@@ -220,9 +220,10 @@ There are no subdirectories.
   - `project.timeline` is replaced with `clip.timeline`.
   - The MP4 render gets `clip.piece_spans()` (one input per piece); the main
     `export` gets `[timeline.play_spans()]` (one piece).
-  - `vertical_crop_x` is `Some(clip.crop_x)` only when
+  - `vertical_crop` is `Some(clip.framing())` only when
     `clip.format == ClipFormat::Vertical`, and only the `mp4` render uses it
-    (to render 9:16).
+    (to render 9:16). The NLE writers keep the source frame: a short arrives
+    in Premiere / Final Cut / Resolve as a 16:9 cut, unframed.
 - `expand_tilde` changes a bare `~` or a leading `~/`, which it replaces with
   `dirs::home_dir()` (joined with the rest of the path). A `~user` path, or a
   system with no home directory, leaves the path unchanged.

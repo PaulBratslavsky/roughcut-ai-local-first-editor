@@ -13,6 +13,7 @@ import type {
   ProjectSummary,
   ClipBatchError,
   ClipCandidate,
+  ClipFraming,
   ClipExportResult,
   ClipFormat,
   HostedKeyResult,
@@ -601,15 +602,26 @@ function pieceOverlap(a: SourceRange[], b: SourceRange[]): number {
 }
 const MAX_OVERLAP = 0.3;
 
-/** A saved clip made from a candidate (its pieces, validated first). */
+/** The core's ClipFraming clamp: positions 0..1, zoom 1..3 (NaN → centred). */
+const MAX_ZOOM = 3;
+function clampFraming(f: ClipFraming): ClipFraming {
+  const fit = (v: number, lo: number, hi: number, d: number) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d);
+  return { crop_x: fit(f.crop_x, 0, 1, 0.5), crop_y: fit(f.crop_y, 0, 1, 0.5), crop_zoom: fit(f.crop_zoom, 1, MAX_ZOOM, 1) };
+}
+
+/** A saved clip made from a candidate (its pieces, validated first). It
+ *  keeps the framing the user gave the candidate, if any. */
 function clipFromCandidate(p: Project, c: ClipCandidate, format: ClipFormat): SavedClip {
   const pieces = normalizeRanges(p, c.pieces.length > 0 ? c.pieces : [{ start: c.start, end: c.end }]);
+  const f = c.framing ?? { crop_x: 0.5, crop_y: 0.5, crop_zoom: 1 };
   return {
     id: `clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     title: c.title || `Clip ${p.saved_clips.length + 1}`,
     ranges: pieces,
     format,
-    crop_x: 0.5,
+    crop_x: f.crop_x,
+    crop_y: f.crop_y,
+    crop_zoom: f.crop_zoom,
     start: pieces[0]!.start,
     end: pieces[pieces.length - 1]!.end,
     timeline: restrictTimeline(p.timeline, pieces),
@@ -663,6 +675,8 @@ function clipSummary(c: SavedClip): SavedClipSummary {
     ranges: clone(c.ranges),
     format: c.format,
     crop_x: c.crop_x,
+    crop_y: c.crop_y,
+    crop_zoom: c.crop_zoom,
     start: c.start,
     end: c.end,
     duration: c.ranges.reduce((sum, r) => sum + includedWithin(c.timeline, r.start, r.end), 0),
@@ -762,10 +776,10 @@ const MOCK_FACE_CROP_X = 0.62;
 
 /** Mirror of the core's background face pass for a clip that just became
  *  9:16 — moves the crop only if nobody moved it meanwhile. */
-function mockAutoCenter(projectId: string, clip: { crop_x: number }): void {
-  const before = clip.crop_x;
+function mockAutoCenter(projectId: string, clip: { crop_x: number; crop_y: number; crop_zoom: number }): void {
+  const before = `${clip.crop_x}/${clip.crop_y}/${clip.crop_zoom}`;
   setTimeout(() => {
-    if (clip.crop_x !== before) return;
+    if (`${clip.crop_x}/${clip.crop_y}/${clip.crop_zoom}` !== before) return;
     clip.crop_x = MOCK_FACE_CROP_X;
     emit("clips-changed", { project_id: projectId });
   }, 900);
@@ -1082,6 +1096,7 @@ async function mockFindClips(p: Project, t: Transcript, args: Args): Promise<unk
       method,
       theme: theme || null,
       scorer: w.scorer,
+      framing: null,
     };
   });
   progress("find_clips", p.id, 1, `found ${p.clip_candidates.length} clip candidates`);
@@ -2096,6 +2111,24 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     return { candidates: clone(p.clip_candidates ?? []) };
   },
 
+  frame_candidate(args): unknown {
+    const p = requireProject(args.project_id);
+    const c = (p.clip_candidates ?? []).find((x) => x.id === args.candidate_id);
+    if (!c) throw { code: "not_found", message: `clip candidate ${String(args.candidate_id)}` };
+    if (args.reset) {
+      c.framing = null;
+    } else {
+      const now = c.framing ?? { crop_x: 0.5, crop_y: 0.5, crop_zoom: 1 };
+      c.framing = clampFraming({
+        crop_x: args.crop_x != null ? Number(args.crop_x) : now.crop_x,
+        crop_y: args.crop_y != null ? Number(args.crop_y) : now.crop_y,
+        crop_zoom: args.crop_zoom != null ? Number(args.crop_zoom) : now.crop_zoom,
+      });
+    }
+    emit("clips-changed", { project_id: p.id });
+    return { candidate: clone(c) };
+  },
+
   create_clip(args): unknown {
     const p = requireProject(args.project_id);
     const format = argFormat(args);
@@ -2105,9 +2138,11 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
       throw { code: "invalid_arg", message: `rank ${String(args.rank)} is out of range` };
     }
     let clip: SavedClip;
+    let framedByUser = false;
     if (candidateId) {
       const c = (p.clip_candidates ?? []).find((x) => x.id === candidateId);
       if (!c) throw { code: "not_found", message: `clip candidate ${String(candidateId)}` };
+      framedByUser = !!c.framing;
       // Validate before taking it off the list: a candidate cut from the main
       // edit since the scan stays listed.
       clip = clipFromCandidate(p, c, format ?? "vertical");
@@ -2122,6 +2157,8 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         ranges: pieces,
         format: format ?? "landscape",
         crop_x: 0.5,
+        crop_y: 0.5,
+        crop_zoom: 1,
         start: pieces[0]!.start,
         end: pieces[pieces.length - 1]!.end,
         timeline: restrictTimeline(p.timeline, pieces),
@@ -2134,7 +2171,7 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     const title = String(args.title ?? "").trim();
     if (title) clip.title = title;
     p.saved_clips = [...(p.saved_clips ?? []), clip];
-    if (clip.format === "vertical") mockAutoCenter(p.id, clip);
+    if (clip.format === "vertical" && !framedByUser) mockAutoCenter(p.id, clip);
     return { clip: clipSummary(clip) };
   },
 
@@ -2149,6 +2186,8 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     const format = argFormat(args);
     const made: SavedClip[] = [];
     const errors: ClipBatchError[] = [];
+    // Clips whose candidate the user framed keep that framing (no face pass).
+    const framed = new Set<string>();
     for (const id of ids) {
       const c = (p.clip_candidates ?? []).find((x) => x.id === id);
       if (!c) {
@@ -2160,12 +2199,13 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         p.clip_candidates = p.clip_candidates.filter((x) => x.id !== c.id);
         p.saved_clips = [...(p.saved_clips ?? []), clip];
         made.push(clip);
+        if (c.framing) framed.add(clip.id);
       } catch (e) {
         errors.push({ candidate_id: id, message: (e as { message?: string })?.message ?? String(e) });
       }
     }
     emit("clips-changed", { project_id: p.id });
-    const vertical = made.filter((c) => c.format === "vertical");
+    const vertical = made.filter((c) => c.format === "vertical" && !framed.has(c.id));
     // Compare-and-set, like the core's face pass: each crop moves only if it
     // still has the value it was made with — one someone moved meanwhile wins.
     const madeCrop = new Map(vertical.map((c) => [c.id, c.crop_x]));
@@ -2205,8 +2245,16 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     if (title) c.title = title;
     const wasVertical = c.format === "vertical";
     if (format) c.format = format;
-    if (args.crop_x != null) c.crop_x = Math.min(1, Math.max(0, Number(args.crop_x)));
-    if (!wasVertical && args.crop_x == null && c.format === "vertical" && c.crop_x === 0.5) {
+    const reframes = args.crop_x != null || args.crop_y != null || args.crop_zoom != null;
+    if (reframes) {
+      const f = clampFraming({
+        crop_x: args.crop_x != null ? Number(args.crop_x) : c.crop_x,
+        crop_y: args.crop_y != null ? Number(args.crop_y) : c.crop_y,
+        crop_zoom: args.crop_zoom != null ? Number(args.crop_zoom) : c.crop_zoom,
+      });
+      Object.assign(c, f);
+    }
+    if (!wasVertical && !reframes && c.format === "vertical" && c.crop_x === 0.5) {
       mockAutoCenter(p.id, c);
     }
     return { clip: clipSummary(c) };
@@ -2218,7 +2266,9 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
     if (!c) throw { code: "not_found", message: `clip ${String(args.clip_id)}` };
     await new Promise((r) => setTimeout(r, 600));
     c.crop_x = MOCK_FACE_CROP_X;
-    return { clip: clipSummary(c), crop_x: c.crop_x, frames_sampled: 12, frames_with_face: 12 };
+    // Zoomed in, the face sits a little above the middle (the core's eye line).
+    if (c.crop_zoom > 1) c.crop_y = 0.3;
+    return { clip: clipSummary(c), crop_x: c.crop_x, crop_y: c.crop_y, frames_sampled: 12, frames_with_face: 12 };
   },
 
   delete_clip(args): unknown {

@@ -5,8 +5,8 @@
 use super::Editor;
 use crate::error::{CoreError, Result};
 use crate::model::{
-    pieces_overlap, ClipBatchError, ClipCandidate, ClipFormat, Project, SavedClip, SavedClipSummary,
-    SourceRange, EPS,
+    pieces_overlap, ClipBatchError, ClipCandidate, ClipFormat, ClipFraming, Project, SavedClip,
+    SavedClipSummary, SourceRange, EPS,
 };
 use crate::time::snap_to_frame;
 use chrono::Utc;
@@ -128,7 +128,8 @@ impl Editor {
     }
 
     /// Make several candidates into saved clips, then frame each vertical one
-    /// on the speaker before returning (so an export right after never renders
+    /// on the speaker before returning (one the user framed on the Shorts
+    /// screen keeps that framing instead) (so an export right after never renders
     /// an unframed crop). A candidate that no longer validates — its material
     /// was cut from the main edit since the scan — stays listed and is
     /// reported in the errors; the rest are still made.
@@ -138,9 +139,11 @@ impl Editor {
         candidate_ids: &[Uuid],
         format: Option<ClipFormat>,
     ) -> Result<(Vec<SavedClipSummary>, Vec<ClipBatchError>)> {
-        let (made, errors) = self.update_project_meta(project_id, |p| {
+        let (made, errors, framed) = self.update_project_meta(project_id, |p| {
             let mut made: Vec<SavedClipSummary> = vec![];
             let mut errors: Vec<ClipBatchError> = vec![];
+            // Clips whose candidate the user framed: they keep that framing.
+            let mut framed: Vec<Uuid> = vec![];
             for &id in candidate_ids {
                 let Some(c) = p.clip_candidates.iter().find(|c| c.id == id).cloned() else {
                     errors.push(ClipBatchError {
@@ -154,21 +157,26 @@ impl Editor {
                         if let Some(f) = format {
                             clip.format = f;
                         }
+                        if c.framing.is_some() {
+                            framed.push(clip.id);
+                        }
                         made.push(add_clip(p, clip, Some(id)));
                     }
                     Err(e) => errors.push(ClipBatchError { candidate_id: id, message: e.to_string() }),
                 }
             }
-            Ok((made, errors))
+            Ok((made, errors, framed))
         })?;
 
-        let vertical: Vec<&SavedClipSummary> = made.iter().filter(|c| c.format == ClipFormat::Vertical).collect();
+        let vertical: Vec<&SavedClipSummary> =
+            made.iter().filter(|c| c.format == ClipFormat::Vertical && !framed.contains(&c.id)).collect();
         let n = vertical.len();
         for (i, clip) in vertical.iter().enumerate() {
             make_progress(self, project_id, i as f64 / n as f64, format!("framing {}/{n}", i + 1));
             // A clip it can't frame (no confident face, a composited screen
             // recording, no ffmpeg) keeps its centred crop: not an error.
-            let _ = self.face_crop(project_id, clip.id, Some(clip.crop_x)).await;
+            let to = ClipFraming { crop_x: clip.crop_x, crop_y: clip.crop_y, crop_zoom: clip.crop_zoom };
+            let _ = self.face_crop(project_id, clip.id, Some(to)).await;
         }
         if !made.is_empty() {
             let word = if made.len() == 1 { "short" } else { "shorts" };
@@ -221,9 +229,12 @@ impl Editor {
             if let Some(f) = changes.format {
                 clip.format = f;
             }
-            if let Some(x) = changes.crop_x {
-                clip.crop_x = x.clamp(0.0, 1.0);
-            }
+            let f = clip.framing();
+            clip.set_framing(ClipFraming {
+                crop_x: changes.crop_x.unwrap_or(f.crop_x),
+                crop_y: changes.crop_y.unwrap_or(f.crop_y),
+                crop_zoom: changes.crop_zoom.unwrap_or(f.crop_zoom),
+            });
             let summary = clip.summary();
             p.saved_clips[idx] = clip;
             Ok(summary)
@@ -248,6 +259,8 @@ pub struct FaceCrop {
     pub clip: SavedClipSummary,
     /// The crop it set; None when too few frames showed a face (crop unchanged).
     pub crop_x: Option<f64>,
+    /// Up and down, for a zoomed-in crop (0.5 when not zoomed); None with `crop_x`.
+    pub crop_y: Option<f64>,
     pub frames_sampled: usize,
     pub frames_with_face: usize,
 }
@@ -267,11 +280,30 @@ impl Editor {
         let Ok(clip) = self.get_clip(project_id, clip_id) else { return };
         let editor = self.clone();
         tokio::spawn(async move {
-            let _ = editor.face_crop(project_id, clip_id, Some(clip.crop_x)).await;
+            let _ = editor.face_crop(project_id, clip_id, Some(clip.framing())).await;
         });
     }
 
-    async fn face_crop(&self, project_id: Uuid, clip_id: Uuid, expect: Option<f64>) -> Result<FaceCrop> {
+    /// Frame a candidate's 9:16 crop before it's made (the Shorts screen's
+    /// drag), or with `None` go back to framing it on the speaker when made.
+    pub fn frame_candidate(
+        &self,
+        project_id: Uuid,
+        candidate_id: Uuid,
+        framing: Option<ClipFraming>,
+    ) -> Result<ClipCandidate> {
+        self.update_project_meta(project_id, |p| {
+            let c = p
+                .clip_candidates
+                .iter_mut()
+                .find(|c| c.id == candidate_id)
+                .ok_or_else(|| CoreError::NotFound(format!("clip candidate {candidate_id}")))?;
+            c.framing = framing.map(ClipFraming::clamped);
+            Ok(c.clone())
+        })
+    }
+
+    async fn face_crop(&self, project_id: Uuid, clip_id: Uuid, expect: Option<ClipFraming>) -> Result<FaceCrop> {
         use crate::adapters::face;
         let clip = self.get_clip(project_id, clip_id)?;
         let project = self.with_project(project_id, |p, _| Ok(p.clone()))?;
@@ -299,13 +331,23 @@ impl Editor {
         let (frames, size) = found?;
 
         let (w, h) = size.unwrap_or((media.width, media.height));
-        let crop_x = face::crop_x_for_faces(&frames, w, h);
+        // Keeps the clip's zoom; moves the window onto the speaker.
+        let found = face::crop_for_faces(&frames, w, h, clip.crop_zoom);
         let frames_with_face = frames.iter().filter(|f| face::subject(f).is_some()).count();
-        let clip = match crop_x {
-            Some(x) => self.set_crop_if(project_id, clip_id, x, expect)?,
+        let clip = match found {
+            Some((x, y)) => {
+                let to = ClipFraming { crop_x: x, crop_y: y, ..clip.framing() };
+                self.set_crop_if(project_id, clip_id, to, expect)?
+            }
             None => clip.summary(),
         };
-        Ok(FaceCrop { clip, crop_x, frames_sampled: frames.len(), frames_with_face })
+        Ok(FaceCrop {
+            clip,
+            crop_x: found.map(|f| f.0),
+            crop_y: found.map(|f| f.1),
+            frames_sampled: frames.len(),
+            frames_with_face,
+        })
     }
 
     /// Grab a frame at each time and run face detection on it. Also returns
@@ -333,17 +375,29 @@ impl Editor {
         Ok((frames, size))
     }
 
-    /// Set a clip's crop, unless `expect` is given and the crop has moved
-    /// away from it since (then the clip is returned unchanged).
-    fn set_crop_if(&self, project_id: Uuid, clip_id: Uuid, x: f64, expect: Option<f64>) -> Result<SavedClipSummary> {
+    /// Set a clip's framing, unless `expect` is given and the framing has
+    /// changed since (then the clip is returned unchanged).
+    fn set_crop_if(
+        &self,
+        project_id: Uuid,
+        clip_id: Uuid,
+        to: ClipFraming,
+        expect: Option<ClipFraming>,
+    ) -> Result<SavedClipSummary> {
         self.update_project_meta(project_id, |p| {
             let clip = p
                 .saved_clips
                 .iter_mut()
                 .find(|c| c.id == clip_id)
                 .ok_or_else(|| CoreError::NotFound(format!("clip {clip_id}")))?;
-            if expect.map_or(true, |e| (clip.crop_x - e).abs() < 1e-9) {
-                clip.crop_x = x.clamp(0.0, 1.0);
+            let now = clip.framing();
+            let unchanged = |e: ClipFraming| {
+                (now.crop_x - e.crop_x).abs() < 1e-9
+                    && (now.crop_y - e.crop_y).abs() < 1e-9
+                    && (now.crop_zoom - e.crop_zoom).abs() < 1e-9
+            };
+            if expect.is_none_or(unchanged) {
+                clip.set_framing(to);
             }
             Ok(clip.summary())
         })
@@ -377,6 +431,8 @@ fn blank_clip(p: &Project) -> SavedClip {
         ranges: vec![],
         format: ClipFormat::Landscape,
         crop_x: 0.5,
+        crop_y: 0.5,
+        crop_zoom: 1.0,
         start: 0.0,
         end: 0.0,
         timeline: p.timeline.clone(),
@@ -397,6 +453,9 @@ fn clip_from_candidate(p: &Project, c: &ClipCandidate) -> Result<SavedClip> {
     clip.reason = c.reason.clone();
     clip.hook = c.hook.clone();
     clip.format = ClipFormat::Vertical;
+    if let Some(f) = c.framing {
+        clip.set_framing(f);
+    }
     let pieces =
         if c.pieces.is_empty() { vec![SourceRange { start: c.start, end: c.end }] } else { c.pieces.clone() };
     set_ranges(p, &mut clip, &pieces)?;
@@ -424,6 +483,15 @@ pub struct ClipChanges {
     pub ranges: Option<Vec<SourceRange>>,
     pub format: Option<ClipFormat>,
     pub crop_x: Option<f64>,
+    pub crop_y: Option<f64>,
+    pub crop_zoom: Option<f64>,
+}
+
+impl ClipChanges {
+    /// It moves or zooms the crop.
+    pub fn reframes(&self) -> bool {
+        self.crop_x.is_some() || self.crop_y.is_some() || self.crop_zoom.is_some()
+    }
 }
 
 /// Validate, frame-snap, sort, and merge the pieces, then rebuild the clip's
@@ -486,6 +554,7 @@ mod tests {
             method: "heuristic".into(),
             theme: None,
             scorer: None,
+            framing: None,
         }
     }
 
@@ -531,13 +600,62 @@ mod tests {
         let c = e.create_clip(p.id, ClipSource::Ranges(ranges), None, Some(ClipFormat::Vertical)).unwrap();
         assert_eq!(c.crop_x, 0.5);
 
+        let at = |x: f64| ClipFraming { crop_x: x, ..ClipFraming::CENTRED };
         // The pass started at 0.5; the user dragged the crop to 0.2 meanwhile.
         e.update_clip(p.id, c.id, ClipChanges { crop_x: Some(0.2), ..Default::default() }).unwrap();
-        assert_eq!(e.set_crop_if(p.id, c.id, 0.66, Some(0.5)).unwrap().crop_x, 0.2);
+        assert_eq!(e.set_crop_if(p.id, c.id, at(0.66), Some(at(0.5))).unwrap().crop_x, 0.2);
 
         // Untouched since the pass started: it lands. The explicit button
         // (no expectation) always lands.
-        assert_eq!(e.set_crop_if(p.id, c.id, 0.3, Some(0.2)).unwrap().crop_x, 0.3);
-        assert_eq!(e.set_crop_if(p.id, c.id, 0.66, None).unwrap().crop_x, 0.66);
+        assert_eq!(e.set_crop_if(p.id, c.id, at(0.3), Some(at(0.2))).unwrap().crop_x, 0.3);
+        assert_eq!(e.set_crop_if(p.id, c.id, at(0.66), None).unwrap().crop_x, 0.66);
+
+        // Zoomed in meanwhile (same crop_x): that's a hand-set framing too.
+        e.update_clip(p.id, c.id, ClipChanges { crop_zoom: Some(2.0), ..Default::default() }).unwrap();
+        let s = e.set_crop_if(p.id, c.id, at(0.1), Some(at(0.66))).unwrap();
+        assert_eq!((s.crop_x, s.crop_zoom), (0.66, 2.0));
+    }
+
+    #[tokio::test]
+    async fn a_crop_zooms_within_bounds_and_moves_up_and_down() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        let ranges = vec![SourceRange { start: 10.0, end: 40.0 }];
+        let c = e.create_clip(p.id, ClipSource::Ranges(ranges), None, Some(ClipFormat::Vertical)).unwrap();
+        assert_eq!((c.crop_y, c.crop_zoom), (0.5, 1.0), "a new clip is the full height, centred");
+        let set = |zoom: f64, y: f64| {
+            e.update_clip(p.id, c.id, ClipChanges { crop_zoom: Some(zoom), crop_y: Some(y), ..Default::default() })
+                .unwrap()
+        };
+        let s = set(2.0, 0.25);
+        assert_eq!((s.crop_x, s.crop_y, s.crop_zoom), (0.5, 0.25, 2.0), "other fields stay");
+        let s = set(9.0, 4.0);
+        assert_eq!((s.crop_y, s.crop_zoom), (1.0, ClipFraming::MAX_ZOOM), "clamped");
+        let s = set(0.2, f64::NAN);
+        assert_eq!((s.crop_y, s.crop_zoom), (0.5, 1.0), "never wider than the frame; NaN is centred");
+    }
+
+    #[tokio::test]
+    async fn a_framed_candidate_makes_a_short_with_that_framing_and_no_face_pass() {
+        let e = Editor::test_instance();
+        let p = e.create_project("t", Some("/demo/footage.mp4")).await.unwrap();
+        let (framed, plain) = (candidate(10.0, 30.0), candidate(40.0, 60.0));
+        e.set_clip_candidates(p.id, vec![framed.clone(), plain.clone()]).unwrap();
+        let f = ClipFraming { crop_x: 0.2, crop_y: 0.3, crop_zoom: 1.5 };
+        let c = e.frame_candidate(p.id, framed.id, Some(f)).unwrap();
+        assert_eq!(c.framing, Some(f));
+        assert!(e.frame_candidate(p.id, Uuid::new_v4(), Some(f)).is_err(), "no such candidate");
+        // Out-of-range values are clamped when stored.
+        let wild = ClipFraming { crop_x: -3.0, crop_y: 0.3, crop_zoom: 0.5 };
+        assert_eq!(e.frame_candidate(p.id, plain.id, Some(wild)).unwrap().framing, Some(ClipFraming { crop_x: 0.0, crop_y: 0.3, crop_zoom: 1.0 }));
+        assert_eq!(e.frame_candidate(p.id, plain.id, None).unwrap().framing, None, "reset");
+
+        let (made, errors) = e.create_clips(p.id, &[framed.id, plain.id], None).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let by_start = |s: f64| made.iter().find(|c| (c.start - s).abs() < 0.1).unwrap();
+        let a = by_start(10.0);
+        assert_eq!((a.crop_x, a.crop_y, a.crop_zoom), (0.2, 0.3, 1.5), "the user's framing, untouched");
+        let b = by_start(40.0);
+        assert_eq!((b.crop_y, b.crop_zoom), (0.5, 1.0), "unframed: full height (a face pass may move it across)");
     }
 }

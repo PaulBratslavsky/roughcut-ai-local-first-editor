@@ -136,8 +136,8 @@ impl Editor {
         let (mut project, transcript) = self.snapshot(project_id)?;
         let pieces = clip.piece_spans();
         project.name = format!("{} — {}", project.name, clip.title);
+        let vertical = (clip.format == crate::model::ClipFormat::Vertical).then_some(clip.framing());
         project.timeline = clip.timeline;
-        let vertical = (clip.format == crate::model::ClipFormat::Vertical).then_some(clip.crop_x);
         self.write_export(&project, transcript.as_ref(), target, out_path, &pieces, vertical, sink).await
     }
 
@@ -213,7 +213,7 @@ impl Editor {
         target: &str,
         out_path: &str,
         pieces: &[Vec<PlaySpan>],
-        vertical_crop_x: Option<f64>,
+        vertical_crop: Option<crate::model::ClipFraming>,
         sink: &SharedSink,
     ) -> Result<String> {
         let out_path = &expand_tilde(out_path);
@@ -225,7 +225,7 @@ impl Editor {
                 out_path,
                 audio_offset_s: project.audio_offset_s,
                 screen: project.screen_media.as_ref().map(|m| (m, &project.layout)),
-                vertical_crop_x,
+                vertical_crop,
             };
             self.video().render_mp4(&job, sink).await?;
             return Ok(out_path.to_string());

@@ -1432,6 +1432,7 @@ fn to_candidate(
         method: method.to_string(),
         theme: theme.map(str::to_string),
         scorer: w.scorer.clone(),
+        framing: None,
     }
 }
 

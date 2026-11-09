@@ -21,6 +21,16 @@ ranges: Array<SourceRange>, format: ClipFormat,
  */
 crop_x: number, 
 /**
+ * Vertical only, when zoomed in: where the crop sits up and down
+ * (0 = top, 0.5 = centred, 1 = bottom).
+ */
+crop_y: number, 
+/**
+ * Vertical only: how far the crop zooms in. 1 = the full frame height;
+ * 2 = half the height, twice as close (up to [`ClipFraming::MAX_ZOOM`]).
+ */
+crop_zoom: number, 
+/**
  * The overall span (first piece's start → last piece's end).
  */
 start: number, end: number, timeline: Timeline, 
