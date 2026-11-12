@@ -331,15 +331,326 @@ pub struct FlowReview {
     pub method: String,
 }
 
+/// One cut point as the viewer hears it: the kept speech on each side of a
+/// run of removed speech, read word by word (see [`flow_seams`]).
 struct Boundary {
-    before: Vec<TranscriptSegment>,
-    excluded: Vec<TranscriptSegment>,
-    after: Vec<TranscriptSegment>,
+    /// Kept speech just before the cut, ending at its last kept word.
+    before: String,
+    /// The last kept word ends a sentence.
+    before_ends_sentence: bool,
+    /// The segment holding the last kept word before the cut.
+    before_segment: Uuid,
+    /// Kept speech just after the cut, from its first kept word.
+    after: String,
+    /// The segment holding the first kept word after the cut.
+    after_segment: Uuid,
+    /// The start of the removed speech, and how many segments it touches.
+    cut: String,
+    cut_segments: usize,
+    /// The segments to restore to finish the sentence the cut broke.
+    repair: Vec<Uuid>,
 }
 
-/// Walk the cut boundaries of the CURRENT timeline: deterministic checks
-/// (sentence sliced mid-thought, orphaned connectives) plus an LLM judgment
-/// of each boundary with its before/cut/after context.
+/// A word counts as kept when it sits inside an included clip, give or take
+/// this much: clip edges are frame-snapped, words carry their own start/end.
+const KEEP_TOLERANCE_S: f64 = 0.05;
+/// About two segments of context on each side of a cut, for the model.
+const CONTEXT_CHARS: usize = 240;
+/// A repair restores at most this many segments: the sentence the cut broke,
+/// never the whole cut section.
+const MAX_REPAIR_SEGMENTS: usize = 3;
+
+fn ends_sentence(text: &str) -> bool {
+    text.trim_end().ends_with(['.', '!', '?', '…'])
+}
+
+/// Lowercase letters and digits only, as `detect` compares filler words.
+fn normalize_word(w: &str) -> String {
+    w.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// One spoken unit of the seam walk: a word, or a whole segment when the
+/// segment has no word timings (the segment-level check).
+struct Token {
+    /// Index into the speech segments.
+    seg: usize,
+    /// Its share of the segment's text, with the punctuation and space after
+    /// it: one segment's tokens concatenate back to its text.
+    text: String,
+    /// Its words, normalized (one for a word token).
+    norm: Vec<String>,
+    kept: bool,
+    /// A filler ("um") or part of a filler segment: cutting it never breaks a
+    /// sentence, and a kept one is looked past at a seam.
+    filler: bool,
+    /// A sentence ends after it.
+    ends: bool,
+}
+
+/// Each word's share of the segment `text`: from its first letter (the
+/// start of the text, for the first word) to the next word's first letter
+/// (the end of the text, for the last word). Words are matched to the text
+/// by counting letters and digits, which survives the cleanup pass adding
+/// punctuation and capitals to `text` while the words stay raw ("ai" in
+/// "use AI. Don't"); when cleanup changed the spelling the count is scaled,
+/// so a share lands near its word. None when either side has no letters.
+fn word_shares(text: &str, words: &[crate::model::Word]) -> Option<Vec<std::ops::Range<usize>>> {
+    let letters: Vec<usize> =
+        text.char_indices().filter(|(_, c)| c.is_alphanumeric()).map(|(i, _)| i).collect();
+    let counts: Vec<usize> =
+        words.iter().map(|w| w.text.chars().filter(|c| c.is_alphanumeric()).count()).collect();
+    let total: usize = counts.iter().sum();
+    if letters.is_empty() || total == 0 {
+        return None;
+    }
+    let mut starts: Vec<usize> = Vec::with_capacity(words.len());
+    let mut before = 0;
+    for (k, n) in counts.iter().enumerate() {
+        starts.push(if k == 0 {
+            0
+        } else {
+            let at = (before * letters.len() + total / 2) / total;
+            let mut start = letters.get(at).copied().unwrap_or(text.len());
+            // A token that opens with an apostrophe ("'t") owns it in the text.
+            let lead = words[k].text.chars().take_while(|c| !c.is_alphanumeric()).count();
+            for _ in 0..lead {
+                match text[..start].chars().next_back() {
+                    Some(c) if !c.is_alphanumeric() && !c.is_whitespace() => start -= c.len_utf8(),
+                    _ => break,
+                }
+            }
+            start.max(starts[k - 1])
+        });
+        before += n;
+    }
+    Some((0..words.len()).map(|k| starts[k]..starts.get(k + 1).copied().unwrap_or(text.len())).collect())
+}
+
+/// The included clips as merged source spans (a split leaves two touching
+/// included clips; a word across it still plays).
+fn included_spans(timeline: &crate::model::Timeline) -> Vec<(f64, f64)> {
+    let mut spans: Vec<(f64, f64)> = vec![];
+    for c in timeline.included_clips() {
+        match spans.last_mut() {
+            Some(last) if c.source_in - last.1 < 1e-6 => last.1 = last.1.max(c.source_out),
+            _ => spans.push((c.source_in, c.source_out)),
+        }
+    }
+    spans
+}
+
+/// A word plays when it lies inside one included span, within
+/// [`KEEP_TOLERANCE_S`], and its middle is inside it: a word the cut clips
+/// by more than the tolerance, or mostly outside, is not kept.
+fn word_kept(start: f64, end: f64, spans: &[(f64, f64)]) -> bool {
+    let mid = (start + end) / 2.0;
+    spans.iter().any(|&(a, b)| {
+        start >= a - KEEP_TOLERANCE_S
+            && end <= b + KEEP_TOLERANCE_S
+            && mid >= a - 1e-6
+            && mid <= b + 1e-6
+    })
+}
+
+fn flow_tokens(
+    speech: &[TranscriptSegment],
+    timeline: &crate::model::Timeline,
+    fillers: &[String],
+) -> Vec<Token> {
+    let spans = included_spans(timeline);
+    let mut out = vec![];
+    for (si, seg) in speech.iter().enumerate() {
+        let shares = if seg.words.is_empty() { None } else { word_shares(&seg.text, &seg.words) };
+        if let Some(shares) = shares {
+            for (w, share) in seg.words.iter().zip(shares) {
+                let norm = normalize_word(&w.text);
+                if norm.is_empty() {
+                    continue; // punctuation: its share is empty, the word before holds it
+                }
+                let text = seg.text[share].to_string();
+                out.push(Token {
+                    seg: si,
+                    ends: ends_sentence(&text) || ends_sentence(&w.text),
+                    filler: seg.is_filler || fillers.contains(&norm),
+                    kept: word_kept(w.start, w.end, &spans),
+                    norm: vec![norm],
+                    text,
+                });
+            }
+        } else {
+            // No word timings: the whole segment, kept when most of it plays.
+            let overlap: f64 =
+                spans.iter().map(|&(a, b)| (seg.end.min(b) - seg.start.max(a)).max(0.0)).sum();
+            let norm: Vec<String> =
+                seg.text.split_whitespace().map(normalize_word).filter(|w| !w.is_empty()).collect();
+            out.push(Token {
+                seg: si,
+                ends: ends_sentence(&seg.text),
+                filler: seg.is_filler || (!norm.is_empty() && norm.iter().all(|w| fillers.contains(w))),
+                kept: overlap > (seg.end - seg.start) * 0.5,
+                norm,
+                text: seg.text.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The text of `idx` (ascending token indexes), spaced where tokens aren't
+/// neighbors in one segment.
+fn tokens_text(tokens: &[Token], idx: &[usize]) -> String {
+    let mut out = String::new();
+    let mut last: Option<usize> = None;
+    for &k in idx {
+        if let Some(l) = last {
+            let adjacent = l + 1 == k && tokens[l].seg == tokens[k].seg;
+            if !adjacent && !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                out.push(' ');
+            }
+        }
+        out.push_str(&tokens[k].text);
+        last = Some(k);
+    }
+    out.trim().to_string()
+}
+
+/// The removed words say again what's kept right beside them ("the [the]
+/// store", "[we should] we should go"): cutting a repeat reads cleanly.
+fn is_repeat(removed: &[&str], tokens: &[Token], last_before: usize, first_after: usize) -> bool {
+    let spoken = |t: &&Token| t.kept && !t.filler;
+    let after: Vec<&str> = tokens[first_after..]
+        .iter()
+        .filter(spoken)
+        .flat_map(|t| t.norm.iter().map(String::as_str))
+        .take(removed.len())
+        .collect();
+    let mut before: Vec<&str> = tokens[..=last_before]
+        .iter()
+        .rev()
+        .filter(spoken)
+        .flat_map(|t| t.norm.iter().rev().map(String::as_str))
+        .take(removed.len())
+        .collect();
+    before.reverse();
+    after == removed || before == removed
+}
+
+/// Walk the cut points of `timeline` word by word: a seam is a run of
+/// removed words between two kept ones, so a cut inside a segment reads the
+/// words that actually play on each side. Segments without word timings are
+/// one unit, kept when most of them play. Fillers are looked past, and a
+/// run that removes only fillers or a repeat is not a seam.
+fn flow_seams(
+    speech: &[TranscriptSegment],
+    timeline: &crate::model::Timeline,
+    fillers: &[String],
+) -> Vec<Boundary> {
+    let tokens = flow_tokens(speech, timeline, fillers);
+    let mut out = vec![];
+    let mut prev: Option<usize> = None; // the last kept, non-filler token
+    for (j, t) in tokens.iter().enumerate() {
+        if !t.kept || t.filler {
+            continue;
+        }
+        if let Some(i) = prev {
+            let removed: Vec<usize> = (i + 1..j).filter(|&k| !tokens[k].kept).collect();
+            let spoken: Vec<&str> = removed
+                .iter()
+                .filter(|&&k| !tokens[k].filler)
+                .flat_map(|&k| tokens[k].norm.iter().map(String::as_str))
+                .collect();
+            if !spoken.is_empty() && !is_repeat(&spoken, &tokens, i, j) {
+                out.push(seam(speech, &tokens, i, j, &removed));
+            }
+        }
+        prev = Some(j);
+    }
+    out
+}
+
+/// The seam between kept tokens `i` and `j`, with `removed` between them.
+fn seam(speech: &[TranscriptSegment], tokens: &[Token], i: usize, j: usize, removed: &[usize]) -> Boundary {
+    let context = |range: &mut dyn Iterator<Item = usize>| -> Vec<usize> {
+        let mut taken = vec![];
+        let mut chars = 0;
+        for k in range {
+            if tokens[k].kept {
+                taken.push(k);
+                chars += tokens[k].text.len();
+                if chars >= CONTEXT_CHARS {
+                    break;
+                }
+            }
+        }
+        taken
+    };
+    let mut back = context(&mut (0..=i).rev());
+    back.reverse();
+    let ahead = context(&mut (j..tokens.len()));
+
+    let mut cut_segments: Vec<usize> = removed.iter().map(|&k| tokens[k].seg).collect();
+    cut_segments.dedup(); // tokens run in segment order
+    // Restore from the first removed word to the one that ends the sentence:
+    // the segments that finish what the cut broke, a few at most.
+    let mut repair: Vec<Uuid> = vec![];
+    for &k in removed {
+        let id = speech[tokens[k].seg].id;
+        if !repair.contains(&id) {
+            if repair.len() == MAX_REPAIR_SEGMENTS {
+                break;
+            }
+            repair.push(id);
+        }
+        if !tokens[k].filler && tokens[k].ends {
+            break;
+        }
+    }
+    Boundary {
+        before: tokens_text(tokens, &back),
+        before_ends_sentence: tokens[i].ends,
+        before_segment: speech[tokens[i].seg].id,
+        after: tokens_text(tokens, &ahead),
+        after_segment: speech[tokens[j].seg].id,
+        cut: tokens_text(tokens, &removed[..removed.len().min(24)]),
+        cut_segments: cut_segments.len(),
+        repair,
+    }
+}
+
+/// The deterministic checks at each seam: the kept speech before it stops
+/// mid-sentence, or the speech after it resumes on a connective or a
+/// dangling reference.
+fn seam_issues(boundaries: &[Boundary]) -> Vec<FlowIssue> {
+    const CONNECTIVES: [&str; 8] =
+        ["so ", "and ", "but ", "because ", "which ", "that's why", "like i said", "as i "];
+    let mut issues = vec![];
+    for b in boundaries {
+        if !b.before_ends_sentence {
+            issues.push(FlowIssue {
+                kind: "broken_sentence".into(),
+                severity: "high".into(),
+                at_segment: b.before_segment,
+                description: format!("cut lands mid-thought after “…{}”", tail(&b.before, 50)),
+                restore_segment_ids: b.repair.clone(),
+            });
+        }
+        let lower = b.after.to_lowercase();
+        if CONNECTIVES.iter().any(|c| lower.starts_with(c)) {
+            issues.push(FlowIssue {
+                kind: "abrupt_start".into(),
+                severity: "medium".into(),
+                at_segment: b.after_segment,
+                description: format!(
+                    "after the cut, speech resumes mid-argument: “{}…”",
+                    head(&b.after, 60)
+                ),
+                restore_segment_ids: vec![],
+            });
+        }
+    }
+    issues
+}
+
 /// Snap a cut range [start, end] to clean WORD or SENTENCE boundaries using
 /// the transcript's word-level timings, so a cut never clips mid-word. The
 /// kept content BEFORE the cut ends at a word/sentence end (we snap `start`),
@@ -458,83 +769,17 @@ pub(crate) async fn review_flow_using(
     client: Option<&dyn crate::adapters::InferenceClient>,
 ) -> Result<FlowReview> {
     let speech = speech_segments(editor, project_id)?;
-    let included: Vec<bool> = editor.with_project(project_id, |p, _| {
-        Ok(speech
-            .iter()
-            .map(|s| {
-                let overlap: f64 = p
-                    .timeline
-                    .included_clips()
-                    .map(|c| (s.end.min(c.source_out) - s.start.max(c.source_in)).max(0.0))
-                    .sum();
-                overlap > (s.end - s.start) * 0.5
-            })
-            .collect())
-    })?;
-
-    // Collect boundaries: runs of excluded speech between included speech.
-    let mut boundaries: Vec<Boundary> = vec![];
-    let mut i = 0;
-    while i < speech.len() {
-        if !included[i] {
-            let cut_start = i;
-            while i < speech.len() && !included[i] {
-                i += 1;
-            }
-            let before: Vec<_> = (0..cut_start)
-                .rev()
-                .filter(|&j| included[j])
-                .take(2)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|j| speech[j].clone())
-                .collect();
-            let after: Vec<_> =
-                (i..speech.len()).filter(|&j| included[j]).take(2).map(|j| speech[j].clone()).collect();
-            if !before.is_empty() && !after.is_empty() {
-                boundaries.push(Boundary {
-                    before,
-                    excluded: speech[cut_start..i].to_vec(),
-                    after,
-                });
-            }
-        } else {
-            i += 1;
-        }
+    // The user's own filler words count as fillers too (as in `detect`).
+    let mut fillers: Vec<String> =
+        crate::detect::DEFAULT_FILLERS.iter().map(|s| s.to_string()).collect();
+    if let Ok(prefs) = editor.get_preferences() {
+        fillers.extend(prefs.custom_filler_words.iter().map(|w| normalize_word(w)));
     }
+    let boundaries =
+        editor.with_project(project_id, |p, _| Ok(flow_seams(&speech, &p.timeline, &fillers)))?;
 
-    let mut issues: Vec<FlowIssue> = vec![];
     // Deterministic pass — cheap, always on.
-    for b in &boundaries {
-        let prev = b.before.last().unwrap();
-        let next = b.after.first().unwrap();
-        let prev_trim = prev.text.trim_end();
-        if !prev_trim.ends_with(['.', '!', '?', '…']) {
-            issues.push(FlowIssue {
-                kind: "broken_sentence".into(),
-                severity: "high".into(),
-                at_segment: prev.id,
-                description: format!("cut lands mid-thought after “…{}”", tail(prev_trim, 50)),
-                restore_segment_ids: b.excluded.iter().map(|s| s.id).collect(),
-            });
-        }
-        let lower = next.text.trim_start().to_lowercase();
-        const CONNECTIVES: [&str; 8] =
-            ["so ", "and ", "but ", "because ", "which ", "that's why", "like i said", "as i "];
-        if CONNECTIVES.iter().any(|c| lower.starts_with(c)) {
-            issues.push(FlowIssue {
-                kind: "abrupt_start".into(),
-                severity: "medium".into(),
-                at_segment: next.id,
-                description: format!(
-                    "after the cut, speech resumes mid-argument: “{}…”",
-                    head(next.text.trim(), 60)
-                ),
-                restore_segment_ids: vec![],
-            });
-        }
-    }
+    let mut issues: Vec<FlowIssue> = seam_issues(&boundaries);
 
     // LLM pass — judges each boundary in context; capped to keep one call.
     // The client is only made for it: the default deterministic review must
@@ -570,10 +815,10 @@ pub(crate) async fn review_flow_using(
             .map(|(n, b)| {
                 format!(
                     "BOUNDARY {n}\nbefore: {}\n[CUT: {} segment(s), e.g. “{}”]\nafter: {}",
-                    b.before.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "),
-                    b.excluded.len(),
-                    head(&b.excluded[0].text, 70),
-                    b.after.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "),
+                    b.before,
+                    b.cut_segments,
+                    head(&b.cut, 70),
+                    b.after,
                 )
             })
             .collect::<Vec<_>>()
@@ -628,14 +873,14 @@ pub(crate) async fn review_flow_using(
                         issues.push(FlowIssue {
                             kind: "flow".into(),
                             severity: "high".into(),
-                            at_segment: b.after.first().unwrap().id,
+                            at_segment: b.after_segment,
                             description: if v.why.is_empty() {
                                 "the model judged this cut point unnatural".into()
                             } else {
                                 v.why
                             },
                             restore_segment_ids: if v.restore {
-                                b.excluded.iter().map(|s| s.id).collect()
+                                b.repair.clone()
                             } else {
                                 vec![]
                             },
@@ -1214,5 +1459,238 @@ mod tests {
         // A weak model emitting [2,2,2] targets ONE beat — must not refuse.
         assert!(!refuse(&[2, 2, 2], 4));
         assert!(!refuse(&[0, 0], 3));
+    }
+
+    // ---- flow review seams, word by word
+
+    use crate::model::{ClipOrigin, Timeline, Word};
+
+    /// Speech laid end to end, 0.31 s a word. Each line is (segment text,
+    /// raw words): the text is punctuated and capitalized as after cleanup,
+    /// the words stay raw whisper tokens ("didn 't", lowercase, no
+    /// punctuation) — the real transcripts look like this.
+    fn speech(lines: &[(&str, &str)]) -> Vec<TranscriptSegment> {
+        let mut t = 1.0;
+        lines
+            .iter()
+            .map(|(text, raw)| {
+                let words: Vec<Word> = raw
+                    .split_whitespace()
+                    .map(|w| {
+                        let word = Word { text: w.into(), start: t, end: t + 0.31, confidence: 0.9 };
+                        t += 0.31;
+                        word
+                    })
+                    .collect();
+                TranscriptSegment {
+                    id: Uuid::new_v4(),
+                    start: words.first().map(|w| w.start).unwrap_or(t),
+                    end: words.last().map(|w| w.end).unwrap_or(t),
+                    text: (*text).into(),
+                    words,
+                    is_filler: false,
+                    is_silence: false,
+                    take_group_id: None,
+                    is_best_take: false,
+                }
+            })
+            .collect()
+    }
+
+    /// The `n`th word `text` of a segment.
+    fn word<'a>(s: &'a TranscriptSegment, text: &str, n: usize) -> &'a Word {
+        s.words.iter().filter(|w| w.text == text).nth(n).expect("word in segment")
+    }
+
+    fn timeline(speech: &[TranscriptSegment]) -> Timeline {
+        Timeline::new(speech.last().unwrap().end + 1.0)
+    }
+
+    /// Cut `[from, to]` with frame-snapped edges (24 fps), as the range ops do.
+    fn cut(tl: &mut Timeline, from: f64, to: f64) {
+        let snap = |t| crate::time::snap_to_frame(t, 24.0);
+        tl.set_range_included(snap(from), snap(to), false, ClipOrigin::Manual);
+    }
+
+    fn review(speech: &[TranscriptSegment], tl: &Timeline) -> (Vec<Boundary>, Vec<FlowIssue>) {
+        let fillers: Vec<String> = crate::detect::DEFAULT_FILLERS.iter().map(|s| s.to_string()).collect();
+        let seams = flow_seams(speech, tl, &fillers);
+        let issues = seam_issues(&seams);
+        (seams, issues)
+    }
+
+    /// The two false alarms from a real supercut: each kept segment's FULL
+    /// text was read, though the cut sat right after a sentence end inside
+    /// it ("…use AI. | Don't make this") or the first word of the next,
+    /// mostly cut, segment was kept ("…software | engineer.").
+    #[test]
+    fn a_cut_after_a_sentence_end_inside_a_segment_is_not_flagged() {
+        let s = speech(&[
+            (
+                "Folks share this story: how I got laid off from X because I didn't use AI. Don't make this",
+                "folks share this story how i got laid off from x because i didn 't use ai don 't make this",
+            ),
+            ("mistake. And the reason I bring this up is simple.", "mistake and the reason i bring this up is simple"),
+            ("Here is what I do now.", "here is what i do now"),
+            (
+                "and your ability to build things is your new value as a software",
+                "and your ability to build things is your new value as a software",
+            ),
+            (
+                "engineer. So I spent the weekend on something else entirely.",
+                "engineer so i spent the weekend on something else entirely",
+            ),
+            ("That is the whole point.", "that is the whole point"),
+        ]);
+        let mut tl = timeline(&s);
+        cut(&mut tl, word(&s[0], "ai", 0).end, s[2].start);
+        cut(&mut tl, word(&s[4], "engineer", 0).end, s[5].start);
+
+        let (seams, issues) = review(&s, &tl);
+        assert_eq!(seams.len(), 2);
+        assert!(seams[0].before.ends_with("because I didn't use AI."), "{}", seams[0].before);
+        assert!(seams[0].after.starts_with("Here is what I do now."), "{}", seams[0].after);
+        assert!(seams[1].before.ends_with("as a software engineer."), "{}", seams[1].before);
+        assert!(issues.is_empty(), "clean seams flagged: {issues:?}");
+    }
+
+    /// A cut that really ends mid-sentence is flagged at word level — even
+    /// inside a segment whose own text ends cleanly ("…right?"), which the
+    /// segment-level check could never see — and a kept connective after
+    /// the cut still reads as an abrupt start.
+    #[test]
+    fn a_cut_mid_sentence_is_flagged() {
+        let s = speech(&[
+            (
+                "So the problem is that editing takes forever, right?",
+                "so the problem is that editing takes forever right",
+            ),
+            (
+                "You record twenty minutes and then you spend hours cutting.",
+                "you record twenty minutes and then you spend hours cutting",
+            ),
+            ("And here's the key part, you stay in control.", "and here 's the key part you stay in control"),
+        ]);
+        let mut tl = timeline(&s);
+        cut(&mut tl, word(&s[0], "editing", 0).end, s[2].start);
+
+        let (seams, issues) = review(&s, &tl);
+        assert_eq!(seams.len(), 1);
+        let broken: Vec<&FlowIssue> = issues.iter().filter(|i| i.kind == "broken_sentence").collect();
+        assert_eq!(broken.len(), 1, "{issues:?}");
+        assert_eq!(broken[0].severity, "high");
+        assert_eq!(broken[0].at_segment, s[0].id);
+        assert!(broken[0].description.contains("the problem is that editing”"), "{}", broken[0].description);
+        assert!(!broken[0].description.contains("forever"), "reads only the kept words");
+        let abrupt: Vec<&FlowIssue> = issues.iter().filter(|i| i.kind == "abrupt_start").collect();
+        assert_eq!(abrupt.len(), 1, "{issues:?}");
+        assert_eq!(abrupt[0].at_segment, s[2].id);
+        assert!(abrupt[0].description.contains("And here's the key part"), "{}", abrupt[0].description);
+    }
+
+    /// A long cut section that slices a sentence: the suggestion restores the
+    /// segments that finish that sentence, not the section (the old check
+    /// named every excluded segment — up to 105 of them).
+    #[test]
+    fn restore_suggestions_stay_local_to_the_seam() {
+        let mut lines = vec![
+            ("Welcome back.", "welcome back"),
+            ("We picked the cheaper plan because the old", "we picked the cheaper plan because the old"),
+            ("one cost too much. Then the bill doubled.", "one cost too much then the bill doubled"),
+        ];
+        for _ in 0..6 {
+            lines.push(("A long tangent about something else entirely.", "a long tangent about something else entirely"));
+        }
+        lines.push(("Here is the fix.", "here is the fix"));
+        let s = speech(&lines);
+        let mut tl = timeline(&s);
+        cut(&mut tl, word(&s[1], "plan", 0).end, s[9].start);
+
+        let (_, issues) = review(&s, &tl);
+        let broken: Vec<&FlowIssue> = issues.iter().filter(|i| i.kind == "broken_sentence").collect();
+        assert_eq!(broken.len(), 1, "{issues:?}");
+        assert_eq!(broken[0].restore_segment_ids, vec![s[1].id, s[2].id]);
+
+        // Unpunctuated speech: nothing marks where the sentence ends, so the
+        // suggestion stops after a few segments.
+        let raw: Vec<(&str, &str)> = lines.iter().map(|(_, r)| (*r, *r)).collect();
+        let s = speech(&raw);
+        let mut tl = timeline(&s);
+        cut(&mut tl, word(&s[1], "plan", 0).end, s[9].start);
+        let (_, issues) = review(&s, &tl);
+        let broken: Vec<&FlowIssue> = issues.iter().filter(|i| i.kind == "broken_sentence").collect();
+        assert_eq!(broken.len(), 1, "{issues:?}");
+        assert_eq!(broken[0].restore_segment_ids, vec![s[1].id, s[2].id, s[3].id]);
+    }
+
+    /// Cutting a filler or a repeated word inside a sentence leaves the
+    /// sentence whole: no seam to judge.
+    #[test]
+    fn fillers_and_repeats_cut_inside_a_sentence_are_not_seams() {
+        let s = speech(&[
+            ("I think, um, we should we should go now.", "i think um we should we should go now"),
+            ("The the plan is ready.", "the the plan is ready"),
+        ]);
+        let mut tl = timeline(&s);
+        // "um" and the first "we should"…
+        cut(&mut tl, word(&s[0], "um", 0).start, word(&s[0], "should", 0).end);
+        // …and the stuttered "the".
+        cut(&mut tl, word(&s[1], "the", 0).start, word(&s[1], "the", 0).end);
+        let (seams, issues) = review(&s, &tl);
+        assert!(seams.is_empty() && issues.is_empty(), "{issues:?}");
+    }
+
+    /// Segments without word timings keep the segment-level check: one unit,
+    /// kept when most of it plays, its full text read.
+    #[test]
+    fn segments_without_words_are_judged_whole() {
+        let mut s = speech(&[
+            ("This sentence ends here.", "this sentence ends here"),
+            ("and this one", "and this one"),
+            ("keeps going until", "keeps going until"),
+            ("the very end.", "the very end"),
+        ]);
+        for seg in &mut s {
+            seg.words.clear();
+        }
+        let mut tl = timeline(&s);
+        cut(&mut tl, s[2].start, s[2].end);
+        // A sliver off the last segment's start: still mostly kept, no seam.
+        cut(&mut tl, s[3].start, s[3].start + 0.2);
+
+        let (seams, issues) = review(&s, &tl);
+        assert_eq!(seams.len(), 1);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].kind, "broken_sentence");
+        assert_eq!(issues[0].at_segment, s[1].id);
+        assert!(issues[0].description.contains("and this one"));
+        assert_eq!(issues[0].restore_segment_ids, vec![s[2].id]);
+    }
+
+    /// Kept words are read off the timeline with a small tolerance: a clip
+    /// edge a frame inside a kept word keeps it; a word clipped by more, or
+    /// mostly outside, is not kept.
+    #[test]
+    fn a_word_is_kept_within_a_frame_of_its_clip() {
+        let spans = [(1.0, 2.0)];
+        assert!(word_kept(1.7, 2.03, &spans), "a frame past the edge");
+        assert!(word_kept(0.98, 1.3, &spans), "a frame before the start");
+        assert!(!word_kept(1.8, 2.3, &spans), "clipped by 0.3 s");
+        assert!(!word_kept(2.0, 2.04, &spans), "the next word, outside");
+        assert!(word_kept(1.5, 1.5, &spans), "a zero-length word inside");
+    }
+
+    /// Word shares follow the cleaned text even where whisper split a word
+    /// ("didn 't") or cleanup added punctuation the raw words lack.
+    #[test]
+    fn word_shares_map_raw_words_onto_the_cleaned_text() {
+        let text = "I didn't use AI. Don't";
+        let words: Vec<Word> = "i didn 't use ai don 't"
+            .split_whitespace()
+            .map(|w| Word { text: w.into(), start: 0.0, end: 0.0, confidence: 1.0 })
+            .collect();
+        let shares = word_shares(text, &words).unwrap();
+        let parts: Vec<&str> = shares.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(parts, vec!["I ", "didn", "'t ", "use ", "AI. ", "Don", "'t"]);
     }
 }

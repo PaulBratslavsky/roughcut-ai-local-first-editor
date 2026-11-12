@@ -894,18 +894,29 @@ handler!(h_generate_captions, |e, a, _s| {
     Ok(json!({ "srt": export::srt::write(&project, &t) }))
 });
 
+/// Approve a write an external MCP client asked for: the user's click in the
+/// app, unless it lands inside the trusted export folder they set in Setup.
+/// Every other caller (the UI, the in-app agent) needs no approval here.
+async fn approve_external_write(e: &Editor, s: ActionSource, target: &str, prompt: String) -> Result<()> {
+    if s != ActionSource::McpClient || e.export_is_trusted(target) {
+        return Ok(());
+    }
+    if e.request_confirmation(&prompt).await {
+        return Ok(());
+    }
+    Err(CoreError::Unavailable(
+        "export denied: the user did not approve this externally-requested write. Exports into the \
+         trusted export folder (get_preferences: trusted_export_folder; the user sets it in the \
+         app's Setup) need no approval"
+            .into(),
+    ))
+}
+
 handler!(h_export, |e, a, s| {
     let target = arg_str(a, "target")?.to_string();
     let out_path = arg_str(a, "out_path")?.to_string();
-    if s == ActionSource::McpClient
-        && !e
-            .request_confirmation(&format!("Export {target} to {out_path}? (requested by an external MCP client)"))
-            .await
-    {
-        return Err(CoreError::Unavailable(
-            "export denied: the user did not approve this externally-requested write".into(),
-        ));
-    }
+    let prompt = format!("Export {target} to {out_path}? (requested by an external MCP client)");
+    approve_external_write(e, s, &out_path, prompt).await?;
     let path = e.export(arg_uuid(a, "project_id")?, &target, &out_path).await?;
     Ok(json!({ "path": path }))
 });
@@ -1058,17 +1069,8 @@ handler!(h_export_clip, |e, a, s| {
     let clip_id = arg_uuid(a, "clip_id")?;
     let target = arg_str(a, "target")?.to_string();
     let out_path = arg_str(a, "out_path")?.to_string();
-    if s == ActionSource::McpClient
-        && !e
-            .request_confirmation(&format!(
-                "Export a clip as {target} to {out_path}? (requested by an external MCP client)"
-            ))
-            .await
-    {
-        return Err(CoreError::Unavailable(
-            "export denied: the user did not approve this externally-requested write".into(),
-        ));
-    }
+    let prompt = format!("Export a clip as {target} to {out_path}? (requested by an external MCP client)");
+    approve_external_write(e, s, &out_path, prompt).await?;
     let path = e.export_clip(project_id, clip_id, &target, &out_path).await?;
     Ok(json!({ "path": path }))
 });
@@ -1083,18 +1085,11 @@ handler!(h_export_clips, |e, a, s| {
         return Err(CoreError::InvalidArg("clip_ids is empty: pass the ids of the saved clips to export".into()));
     }
     crate::export::check_target(&target)?;
-    if s == ActionSource::McpClient
-        && !e
-            .request_confirmation(&format!(
-                "Export {} clips as {target} to {out_dir}? (requested by an external MCP client)",
-                clip_ids.len()
-            ))
-            .await
-    {
-        return Err(CoreError::Unavailable(
-            "export denied: the user did not approve this externally-requested write".into(),
-        ));
-    }
+    let prompt = format!(
+        "Export {} clips as {target} to {out_dir}? (requested by an external MCP client)",
+        clip_ids.len()
+    );
+    approve_external_write(e, s, &out_dir, prompt).await?;
     let results = e.export_clips(project_id, &clip_ids, &out_dir, &target).await?;
     Ok(json!({ "results": results }))
 });
@@ -1347,7 +1342,7 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("generate_captions", "Produce SRT captions for the current cut.",
         || obj(json!({"project_id": pid_schema()}), &["project_id"]),
         agent: false, meta: false, h_generate_captions),
-    tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript).",
+    tool!("export", "Export the current cut. target: premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt (plain-text transcript). From an external MCP client, the user approves the write in the app unless it lands inside trusted_export_folder (get_preferences), which the user sets in the app.",
         || obj(json!({"project_id": pid_schema(), "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "target", "out_path"]),
         agent: false, meta: false, h_export),
     tool!("find_clips", "Find the moments that work as standalone SHORT-FORM clips (YouTube Shorts / Reels / TikTok): sentence-aligned stretches of the current cut, scored 0-100 for a scroll-stopping hook, making sense with no context, and a payoff. Returns ranked candidates {id, start, end, pieces, duration, title, hook, reason, score}; they persist until the next run (get_clip_candidates). theme: only moments ABOUT this topic (a few words, e.g. 'AI tools' — found by transcript search, judged by the model). count (default 8, at most 60), min_s/max_s playable length bounds (default 15-60). scan: true judges moments from every part of the video and skips moments already saved as clips (use with a larger count, e.g. 40); it can take minutes, longer than some clients wait — the list still persists, so read it with get_clip_candidates. min_score drops moments the model scored below it. One run per project at a time. Scored by the app's model (on-device, unless the user switched the app to Hosted, then Claude) when reachable, else heuristically: method says which, and each candidate's scorer names the model. Save one with create_clip (rank), several with create_clips.",
@@ -1374,10 +1369,10 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("delete_clip", "Delete a saved clip.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}}), &["project_id", "clip_id"]),
         agent: false, meta: false, h_delete_clip),
-    tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x).",
+    tool!("export_clip", "Export one saved clip. Same targets as export (premiere_xml | fcp_xml | resolve_xml | edl | otio | mp4 | srt | txt); a vertical clip's mp4 renders 1080x1920 (a full-height crop at crop_x). From an external MCP client, the user approves the write in the app unless it lands inside trusted_export_folder (get_preferences), which the user sets in the app.",
         || obj(json!({"project_id": pid_schema(), "clip_id": {"type": "string"}, "target": {"type": "string"}, "out_path": {"type": "string"}}), &["project_id", "clip_id", "target", "out_path"]),
         agent: false, meta: false, h_export_clip),
-    tool!("export_clips", "Export several saved clips into one folder, one file each, named NN-<title>.<ext> in the order given (never overwrites: an existing name gets -2, -3…). target defaults to mp4 (vertical clips render 1080x1920); any export target works. One failure doesn't stop the rest. Returns {results: [{clip_id, path, error}]} in the order given.",
+    tool!("export_clips", "Export several saved clips into one folder, one file each, named NN-<title>.<ext> in the order given (never overwrites: an existing name gets -2, -3…). target defaults to mp4 (vertical clips render 1080x1920); any export target works. One failure doesn't stop the rest. Returns {results: [{clip_id, path, error}]} in the order given. From an external MCP client, the user approves the write in the app unless it lands inside trusted_export_folder (get_preferences), which the user sets in the app.",
         || obj(json!({"project_id": pid_schema(), "clip_ids": {"type": "array", "items": {"type": "string"}}, "out_dir": {"type": "string", "description": "folder to write into (created if missing; ~ expands)"}, "target": {"type": "string", "description": "mp4 (default) | premiere_xml | fcp_xml | resolve_xml | edl | otio | srt | txt"}}), &["project_id", "clip_ids", "out_dir"]),
         agent: false, meta: false, h_export_clips),
     tool!("create_project", "Create a project, optionally importing a media file immediately.",
@@ -1434,9 +1429,9 @@ static REGISTRY: &[ToolSpec] = &[
     tool!("delete_checkpoint", "Delete a saved checkpoint.",
         || obj(json!({"project_id": pid_schema(), "checkpoint_id": {"type": "string"}}), &["project_id", "checkpoint_id"]),
         agent: false, meta: false, h_delete_checkpoint),
-    tool!("get_preferences", "Get user preferences.", || obj(json!({}), &[]),
+    tool!("get_preferences", "Get user preferences. trusted_export_folder is where exports need no approval (null = every export asks).", || obj(json!({}), &[]),
         agent: false, meta: false, h_get_preferences),
-    tool!("set_preferences", "Update user preferences: pass only the keys to change (merged into the current preferences; unknown keys are rejected). Only the user, in the app, can point inference_endpoint off this machine.",
+    tool!("set_preferences", "Update user preferences: pass only the keys to change (merged into the current preferences; unknown keys are rejected). Only the user, in the app, can point inference_endpoint off this machine or change trusted_export_folder.",
         || obj(json!({"preferences": {"type": "object"}}), &["preferences"]),
         agent: false, meta: false, h_set_preferences),
 ];

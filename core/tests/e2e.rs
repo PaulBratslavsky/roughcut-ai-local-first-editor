@@ -370,6 +370,99 @@ async fn setup_status_reports_capabilities() {
 }
 
 #[tokio::test]
+async fn external_exports_skip_approval_only_inside_the_trusted_folder() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    struct ChanSink(tokio::sync::mpsc::UnboundedSender<(String, Value)>);
+    impl roughcut_core::events::EventSink for ChanSink {
+        fn emit(&self, event: &str, payload: Value) {
+            let _ = self.0.send((event.to_string(), payload));
+        }
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let editor = Editor::new(
+        Box::new(roughcut_core::store::SqliteStore::open_in_memory().unwrap()),
+        Box::new(roughcut_core::adapters::MockVideoEngine),
+        Box::new(roughcut_core::adapters::MockTranscriber),
+        Arc::new(ChanSink(tx)),
+        true,
+    );
+    editor.require_confirmations_for_tests(true);
+    let p = call(&editor, "create_project", json!({ "name": "trust", "file_path": "/demo/x.mp4" })).await;
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    // The "user" denies every prompt; count how many arrive.
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (ed2, asked2) = (editor.clone(), asked.clone());
+    tokio::spawn(async move {
+        while let Some((name, payload)) = rx.recv().await {
+            if name == "confirm-request" {
+                asked2.fetch_add(1, Ordering::SeqCst);
+                let id = uuid::Uuid::parse_str(payload["id"].as_str().unwrap()).unwrap();
+                ed2.resolve_confirmation(id, false);
+            }
+        }
+    });
+    let export = |path: String| {
+        let editor = editor.clone();
+        let pid = pid.clone();
+        async move {
+            tools::dispatch(
+                &editor,
+                "export",
+                &json!({ "project_id": pid, "target": "edl", "out_path": path }),
+                Caller::Mcp,
+            )
+            .await
+        }
+    };
+
+    let trusted = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let out_file = |d: &tempfile::TempDir, rel: &str| d.path().join(rel).to_string_lossy().into_owned();
+
+    // No folder set: every MCP export asks (and is denied here).
+    let err = export(out_file(&trusted, "a.edl")).await.unwrap_err().to_string();
+    assert!(err.contains("trusted_export_folder"), "denial names the way out: {err}");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+
+    // No caller can set the folder through the tool registry.
+    let set = json!({ "preferences": { "trusted_export_folder": trusted.path() } });
+    for caller in [Caller::Mcp, Caller::Ui] {
+        let err = tools::dispatch(&editor, "set_preferences", &set, caller).await.unwrap_err().to_string();
+        assert!(err.contains("only be changed in the app"), "got: {err}");
+    }
+
+    // The user sets it in the app: exports inside it go through unasked,
+    // into new subfolders too.
+    editor.set_trusted_export_folder(Some(trusted.path().to_str().unwrap())).unwrap();
+    let prefs = call(&editor, "get_preferences", json!({})).await;
+    assert!(prefs["trusted_export_folder"].as_str().is_some());
+    let ok = export(out_file(&trusted, "cuts/today.edl")).await.unwrap();
+    assert!(std::path::Path::new(ok["path"].as_str().unwrap()).exists());
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "no prompt inside the trusted folder");
+
+    // Anything that would land outside still asks: another folder, a `..`
+    // walk out, or a symlink inside the folder that points elsewhere.
+    assert!(export(out_file(&outside, "b.edl")).await.is_err());
+    let walk_out = format!("{}/../{}/c.edl", trusted.path().display(), outside.path().file_name().unwrap().to_string_lossy());
+    assert!(export(walk_out).await.is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), trusted.path().join("link")).unwrap();
+        assert!(export(out_file(&trusted, "link/d.edl")).await.is_err());
+        assert!(!outside.path().join("d.edl").exists());
+    }
+    assert!(asked.load(Ordering::SeqCst) >= 3);
+
+    // Clearing it (the user, in the app) puts every export back behind a prompt.
+    editor.set_trusted_export_folder(None).unwrap();
+    let before = asked.load(Ordering::SeqCst);
+    assert!(export(out_file(&trusted, "e.edl")).await.is_err());
+    assert_eq!(asked.load(Ordering::SeqCst), before + 1);
+}
+
+#[tokio::test]
 async fn external_destructive_ops_require_confirmation() {
     use std::sync::Arc;
     struct ChanSink(tokio::sync::mpsc::UnboundedSender<(String, Value)>);

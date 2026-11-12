@@ -239,6 +239,13 @@ impl Editor {
                     .into(),
             ));
         }
+        // Widening where MCP clients may write without asking is the user's
+        // call, in Setup — no caller can do it through this tool.
+        if next.trusted_export_folder != current.trusted_export_folder {
+            return Err(CoreError::InvalidArg(
+                "trusted_export_folder can only be changed in the app (Setup ▸ Exports from AI tools)".into(),
+            ));
+        }
         if source != ActionSource::Ui
             && next.inference_endpoint != current.inference_endpoint
             && !is_loopback_url(&next.inference_endpoint)
@@ -250,6 +257,21 @@ impl Editor {
             )));
         }
         self.set_preferences(next)
+    }
+
+    /// Set (or clear, with None) the folder MCP exports may write into
+    /// without asking. The user's action in the app only: a Tauri shell
+    /// command, never a registry tool, so no MCP client or agent can widen
+    /// its own write access (same rule as the model switch, ADR-0007).
+    pub fn set_trusted_export_folder(&self, folder: Option<&str>) -> Result<Preferences> {
+        let folder = match folder.map(str::trim).filter(|f| !f.is_empty()) {
+            None => None,
+            Some(f) => Some(crate::export::canonical_folder(f)?),
+        };
+        let _write = self.inner.prefs_write.lock().unwrap();
+        let mut prefs = self.get_preferences()?;
+        prefs.trusted_export_folder = folder;
+        self.set_preferences(prefs)
     }
 
     /// Presentation layout — project metadata, persisted, not journaled.

@@ -444,7 +444,9 @@ offline fallback.
 - `outline_transcript` — beats in chunks of 120 segments, cached per
   transcript and model (kv `outline:{id}`).
 - `review_flow` — finds seams that read broken after cuts (mid-sentence cuts,
-  orphaned connectives). Rule-based by default; `llm: true` adds the model.
+  orphaned connectives), reading the kept words on each side of every cut, so
+  cuts inside a segment are judged on what actually plays. Rule-based by
+  default; `llm: true` adds the model.
 - `story_edit` — a whole story-level edit in one call: outline, choose beats to
   cut against the instruction, apply, re-read every cut point, restore what
   breaks the flow, summarize. Several model calls; one per project at a time.
@@ -564,6 +566,11 @@ Two MCP-only behaviours:
   `export_clips` and `delete_project` from an MCP client emit
   `confirm-request`; the app shows a dialog and answers with the
   `confirm_action` command. No answer in 120 s counts as no.
+  An export that lands inside the trusted export folder
+  (`Preferences.trusted_export_folder`, `~` and symlinks resolved, `..` never
+  counts) skips the prompt. Only the user sets that folder, in Setup, through
+  the `set_trusted_export_folder` shell command; `set_preferences` refuses it
+  for every caller, so an AI tool can't widen its own write access.
   `ROUGHCUT_NO_CONFIRM=1` turns this off.
 - **Opening switches the app.** When an MCP client calls `open_project`, the
   core emits `project-opened` and the app shows that project. The UI's own

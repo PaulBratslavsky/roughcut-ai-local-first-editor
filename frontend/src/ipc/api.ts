@@ -11,6 +11,7 @@ import {
   mockOn,
   mockSetHostedKey,
   mockSetHostedModel,
+  mockSetTrustedExportFolder,
   mockSetModelMode,
   mockSwitch,
 } from "./mockApi";
@@ -119,7 +120,7 @@ export async function getSetupStatus(): Promise<SetupStatus> {
 // turns Hosted on or handles the key. Errors reject with
 // `{ error: { code, message } }` (codes include hosted_no_key,
 // hosted_not_consented, hosted_key_rejected, invalid_argument).
-import type { HostedKeyResult, KeyCheck, ModelMode, ModelStatus } from "./types";
+import type { HostedKeyResult, KeyCheck, ModelMode, ModelStatus, Preferences } from "./types";
 
 /** In memory: no network, no key-store read. */
 export async function getModelStatus(): Promise<ModelStatus> {
@@ -131,6 +132,13 @@ export async function getModelStatus(): Promise<ModelStatus> {
 export async function setModelMode(mode: ModelMode, consent: boolean): Promise<ModelStatus> {
   if (isTauri) return invoke<ModelStatus>("set_model_mode", { mode, consent });
   return mockSetModelMode(mode, consent);
+}
+
+/** The folder MCP exports may write into without asking (null clears it).
+ *  A shell command, not a registry tool: only the user, in Setup, sets it. */
+export async function setTrustedExportFolder(folder: string | null): Promise<Preferences> {
+  if (isTauri) return invoke<Preferences>("set_trusted_export_folder", { folder });
+  return mockSetTrustedExportFolder(folder);
 }
 
 /** One of claude-opus-5-5 | claude-sonnet-5-5 | claude-haiku-5-5. */

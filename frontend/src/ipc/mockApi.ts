@@ -239,6 +239,12 @@ export async function mockSetModelMode(mode: ModelMode, consent: boolean): Promi
   return mockModelStatus();
 }
 
+export async function mockSetTrustedExportFolder(folder: string | null): Promise<Preferences> {
+  await sleep(40);
+  state.preferences.trusted_export_folder = folder && folder.trim() ? folder.trim() : null;
+  return clone(state.preferences);
+}
+
 export async function mockSetHostedModel(model: string): Promise<ModelStatus> {
   await sleep(40);
   if (!HOSTED_MODELS.some(([m]) => m === model)) {
@@ -523,6 +529,7 @@ const state: MockState = {
     model_mode: "local",
     hosted_model: "claude-opus-5-5",
     hosted_consent_at: null,
+    trusted_export_folder: null,
   },
 };
 
@@ -1179,6 +1186,13 @@ const tools: Record<string, (args: Args) => Promise<unknown> | unknown> = {
         code: "invalid_argument",
         message:
           "invalid argument: model_mode, hosted_model and hosted_consent_at can only be changed in the app (the LOCAL / HOSTED switch and Setup)",
+      };
+    }
+    if ((next.trusted_export_folder ?? null) !== (state.preferences.trusted_export_folder ?? null)) {
+      throw {
+        code: "invalid_argument",
+        message:
+          "invalid argument: trusted_export_folder can only be changed in the app (Setup ▸ Exports from AI tools)",
       };
     }
     state.preferences = next;

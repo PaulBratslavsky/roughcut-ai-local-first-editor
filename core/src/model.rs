@@ -602,6 +602,12 @@ pub struct Preferences {
     /// start without it.
     #[serde(default)]
     pub hosted_consent_at: Option<DateTime<Utc>>,
+    /// Exports an external MCP client asks for skip the approval prompt when
+    /// they land inside this folder (absolute, symlink-resolved). Only the
+    /// user, in the app, changes it (never `set_preferences`); None = every
+    /// MCP export asks.
+    #[serde(default)]
+    pub trusted_export_folder: Option<String>,
 }
 
 fn default_embedding_model() -> String {
@@ -718,6 +724,7 @@ impl Default for Preferences {
             model_mode: ModelMode::Local,
             hosted_model: default_hosted_model(),
             hosted_consent_at: None,
+            trusted_export_folder: None,
         }
     }
 }
@@ -1228,11 +1235,12 @@ mod tests {
     fn old_preferences_load_in_local_mode_with_opus_as_the_hosted_model() {
         let mut doc = serde_json::to_value(Preferences::default()).unwrap();
         let obj = doc.as_object_mut().unwrap();
-        for k in ["model_mode", "hosted_model", "hosted_consent_at"] {
+        for k in ["model_mode", "hosted_model", "hosted_consent_at", "trusted_export_folder"] {
             obj.remove(k);
         }
         let p: Preferences = serde_json::from_value(doc).unwrap();
         assert_eq!(p.model_mode, ModelMode::Local);
+        assert!(p.trusted_export_folder.is_none(), "no folder until the user picks one");
         assert_eq!(p.hosted_model, "claude-opus-5-5");
         assert!(p.hosted_consent_at.is_none());
         assert_eq!(hosted_model_name("claude-sonnet-5-5"), "Claude Sonnet 5.5");

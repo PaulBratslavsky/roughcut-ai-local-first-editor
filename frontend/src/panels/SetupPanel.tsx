@@ -4,7 +4,8 @@
 // ships lean; models arrive on demand.
 
 import { useEffect, useRef, useState } from "react";
-import { logPath, openExternal, revealPath } from "../ipc/api";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { callTool, logPath, openExternal, revealPath, setTrustedExportFolder } from "../ipc/api";
 import {
   checkHostedKey,
   setHostedKey,
@@ -18,7 +19,7 @@ import {
   onAppEvent,
   startManagedLlm,
 } from "../ipc/api";
-import type { KeyCheck, ProgressEvent, ProgressTask, SetupStatus, WhisperTier } from "../ipc/types";
+import type { KeyCheck, Preferences, ProgressEvent, ProgressTask, SetupStatus, WhisperTier } from "../ipc/types";
 import {
   HOSTED_MODEL_CHOICES,
   applyModelStatus,
@@ -224,6 +225,61 @@ function ModelsRow({ focus, notice }: { focus: boolean; notice: string | null })
       {status.last_error && status.last_error !== dismissedError && status.last_error !== result?.text && (
         <p className="setup-detail warn">Last Hosted error: {status.last_error}</p>
       )}
+      {error && <p className="setup-detail warn">{error}</p>}
+    </section>
+  );
+}
+
+/** Where AI tools (MCP clients) may export without asking. Only set here, by
+ *  the user: no tool can change it, so an AI tool can't widen its own write
+ *  access. Outside this folder, every export they ask for still needs a click. */
+function TrustedExportRow() {
+  const [folder, setFolder] = useState<string | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    callTool<Preferences>("get_preferences")
+      .then((p) => setFolder(p.trusted_export_folder ?? null))
+      .catch((e) => setError(errText(e)));
+  }, []);
+  const save = async (next: string | null) => {
+    setError(null);
+    try {
+      const p = await setTrustedExportFolder(next);
+      setFolder(p.trusted_export_folder ?? null);
+    } catch (e) {
+      setError(errText(e));
+    }
+  };
+  const choose = async () => {
+    const picked = await openFileDialog({ directory: true, multiple: false, title: "Folder AI tools may export into" });
+    if (typeof picked === "string") await save(picked);
+  };
+  if (folder === undefined && !error) return null;
+  return (
+    <section className="setup-row">
+      <div className="setup-row-head">
+        <StatusDot ok={!!folder} />
+        <strong>Exports from AI tools</strong>
+        <span className="setup-sub">where Claude and other MCP clients may export without asking</span>
+      </div>
+      <p className="setup-detail">
+        {folder ? (
+          <>
+            <code>{folder}</code> — exports into this folder (or below it) go through unasked; anywhere else still
+            asks you first.
+          </>
+        ) : (
+          <>Not set: every export an AI tool asks for waits for your approval here.</>
+        )}
+        <button className="primary-btn tier-btn" onClick={() => void choose()}>
+          {folder ? "Change…" : "Choose folder…"}
+        </button>
+        {folder && (
+          <button className="primary-btn tier-btn" onClick={() => void save(null)}>
+            Clear
+          </button>
+        )}
+      </p>
       {error && <p className="setup-detail warn">{error}</p>}
     </section>
   );
@@ -552,6 +608,9 @@ export function SetupPanel({
                 </div>
               )}
             </section>
+
+            {/* ---- exports from AI tools ---- */}
+            <TrustedExportRow />
 
             {/* ---- app log ---- */}
             {logFile && (

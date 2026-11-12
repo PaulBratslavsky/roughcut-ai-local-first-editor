@@ -102,6 +102,10 @@ receive results or file paths.
 - Engine detection: `whisper_native_enabled() -> bool`
   (`cfg!(feature = "whisper-native")`), `whisper_available() -> bool`
   (`whisper-cli` on PATH).
+- DTW word times: `pub enum DtwPreset` (whisper.cpp's alignment-head presets,
+  `cli_name()` for `whisper-cli -dtw`) and
+  `dtw_preset_for_model(&Path) -> Option<DtwPreset>`, from the model file name
+  (`ggml-<model>[-<weights>].bin`; quantized files share the base model's preset).
 
 ### `inference.rs`
 
@@ -355,11 +359,29 @@ There are no child directories with contracts.
 ### Transcription
 
 - `WhisperCli` passes `-l <language>` only when `language` is non-empty and
-  not `"auto"`. Segments with empty text are dropped, and tokens that start
-  with `[_` are skipped. Timestamps are converted from ms to seconds.
+  not `"auto"`. For a model with a DTW preset it adds `-dtw <preset>` (and
+  `-nfa` when the build has it: flash attention silently turns DTW off) if
+  `whisper-cli -h` lists the flags, and reruns without them if that run fails.
+  Timestamps are converted from ms to seconds.
 - `WhisperRs` uses greedy decoding (`best_of=1`) with token timestamps, on
   `min(available_parallelism, 8)` threads. Its progress is mapped to the
-  `0.25..0.98` band so the bar never moves backwards.
+  `0.25..0.98` band so the bar never moves backwards. For a model with a DTW
+  preset it loads the context with DTW token timestamps (flash attention
+  off); if the model rejects the preset's heads (`create_state` fails) it
+  loads again without DTW.
+- Both build segments through `assemble_segments`. Segments with empty text
+  are dropped, and tokens that start with `[_` are skipped. A token with a DTW
+  time (`t_dtw`, centiseconds, -1 = none; ignored if more than 2 s outside its
+  segment) ends at it and starts where the previous token ended. Then: a span
+  longer than 2 × the median span (median capped at 0.7 s) keeps only its
+  tail, so a pause stays a gap; a DTW word's end moves up to 0.1 s into a
+  following gap; DTW punctuation is zero-length at the end of the word before
+  it (or the start of the next word at a segment's start); a segment with DTW
+  words is resized to its words. A token without a usable DTW time keeps its
+  token timestamps. Words are then clamped into order (`start <= end <= next
+  start`), into their segment, and into the audio's length, and segments into
+  non-overlapping order. `model_used` gets a `+dtw` suffix when any word was
+  timed by DTW.
 - `MockTranscriber` emits progress 0.25, 0.5, 0.75, 1.0, sleeping 120 ms after each.
 
 ### Inference and embeddings

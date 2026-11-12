@@ -23,4 +23,11 @@ hosted_model: string,
  * When the user confirmed what Hosted mode sends. Hosted runs refuse to
  * start without it.
  */
-hosted_consent_at: string | null, };
+hosted_consent_at: string | null, 
+/**
+ * Exports an external MCP client asks for skip the approval prompt when
+ * they land inside this folder (absolute, symlink-resolved). Only the
+ * user, in the app, changes it (never `set_preferences`); None = every
+ * MCP export asks.
+ */
+trusted_export_folder: string | null, };

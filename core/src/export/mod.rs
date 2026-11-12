@@ -103,7 +103,65 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Where a write to `path` would really land: absolute, `~` expanded, with
+/// the nearest existing ancestor symlink-resolved and the rest appended.
+/// None for a relative path or one with `..` (or `.`) parts, so a path can't
+/// walk out of a folder after the check.
+fn resolve_for_write(path: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Path};
+    let p = std::path::PathBuf::from(expand_tilde(path));
+    if !p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+        return None;
+    }
+    let mut existing: &Path = &p;
+    let mut rest = vec![];
+    while !existing.exists() {
+        rest.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+    let mut out = existing.canonicalize().ok()?;
+    for part in rest.iter().rev() {
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// True when writing to `target` (a file or folder) lands inside `folder`
+/// (an existing folder), after resolving `~` and symlinks. The folder itself
+/// counts, so an export into it as a folder is inside.
+pub fn is_inside_folder(folder: &str, target: &str) -> bool {
+    let Ok(folder) = std::path::Path::new(&expand_tilde(folder)).canonicalize() else {
+        return false;
+    };
+    if !folder.is_dir() {
+        return false;
+    }
+    resolve_for_write(target).is_some_and(|t| t.starts_with(&folder))
+}
+
+/// `folder` as an absolute, symlink-resolved path, checked to be an existing
+/// folder — the form `trusted_export_folder` is stored in.
+pub(crate) fn canonical_folder(folder: &str) -> Result<String> {
+    let path = Path::new(&expand_tilde(folder))
+        .canonicalize()
+        .map_err(|e| CoreError::InvalidArg(format!("folder {folder}: {e}")))?;
+    if !path.is_dir() {
+        return Err(CoreError::InvalidArg(format!("{folder} is not a folder")));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 impl Editor {
+    /// True when an export an external MCP client asked for may skip the
+    /// user's approval: `target` lands inside the trusted export folder the
+    /// user set in the app. Never true when no folder is set.
+    pub fn export_is_trusted(&self, target: &str) -> bool {
+        self.get_preferences()
+            .ok()
+            .and_then(|p| p.trusted_export_folder)
+            .is_some_and(|folder| is_inside_folder(&folder, target))
+    }
+
     /// The `export` tool: writes the target file and returns its path.
     pub async fn export(&self, project_id: Uuid, target: &str, out_path: &str) -> Result<String> {
         let (project, transcript) = self.snapshot(project_id)?;
@@ -338,6 +396,35 @@ impl EventSink for BatchSink {
             ((self.index as f64 + fraction) / n).clamp(0.0, 1.0),
             format!("{}/{} · {} · {message}", self.index + 1, self.total, self.title),
         );
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::is_inside_folder;
+
+    #[test]
+    fn only_paths_that_land_inside_the_folder_count() {
+        let folder = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let f = folder.path().to_str().unwrap();
+        let inside = |rel: &str| folder.path().join(rel).to_string_lossy().into_owned();
+
+        assert!(is_inside_folder(f, &inside("cut.mp4")));
+        assert!(is_inside_folder(f, &inside("new/sub/cut.mp4")), "folders that don't exist yet");
+        assert!(is_inside_folder(f, f), "the folder itself, as an export_clips out_dir");
+        assert!(!is_inside_folder(f, &other.path().join("cut.mp4").to_string_lossy()));
+        assert!(!is_inside_folder(f, &format!("{f}/../escape.mp4")), "`..` never counts");
+        assert!(!is_inside_folder(f, "cut.mp4"), "relative paths never count");
+        assert!(!is_inside_folder("/no/such/folder", &inside("cut.mp4")));
+        // A sibling whose name starts with the folder's name is not inside it.
+        let sibling = format!("{f}-evil/cut.mp4");
+        assert!(!is_inside_folder(f, &sibling));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(other.path(), folder.path().join("link")).unwrap();
+            assert!(!is_inside_folder(f, &inside("link/cut.mp4")), "symlinks out of the folder");
+        }
     }
 }
 

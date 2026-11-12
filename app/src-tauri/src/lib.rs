@@ -128,6 +128,16 @@ async fn set_model_mode(
     state.editor.set_model_mode(mode, consent).map_err(|e| e.to_json())
 }
 
+/// Where MCP clients may export without asking — the user's choice in
+/// Setup, never a registry tool (an AI tool can't widen its own write access).
+#[tauri::command]
+async fn set_trusted_export_folder(
+    state: State<'_, AppState>,
+    folder: Option<String>,
+) -> Result<roughcut_core::model::Preferences, Value> {
+    state.editor.set_trusted_export_folder(folder.as_deref()).map_err(|e| e.to_json())
+}
+
 #[tauri::command]
 async fn set_hosted_model(
     state: State<'_, AppState>,
@@ -312,6 +322,7 @@ pub fn run() {
             setup_status,
             model_status,
             set_model_mode,
+            set_trusted_export_folder,
             set_hosted_model,
             set_hosted_key,
             check_hosted_key,
