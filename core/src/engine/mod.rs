@@ -89,7 +89,19 @@ pub struct Inner {
     /// Serialises every preferences load-modify-save, so a slow tool call
     /// can't write back a model switch the user changed meanwhile.
     pub(crate) prefs_write: Mutex<()>,
+    /// The asset cache this editor may sweep ([`Editor::sweep_asset_cache`]).
+    /// Unset (no sweeping) unless `bootstrap` opened the app's own library:
+    /// an editor on any other store must never judge the real cache.
+    pub(crate) asset_cache: std::sync::OnceLock<AssetCacheSweep>,
     state: Mutex<HashMap<Uuid, ProjectState>>,
+}
+
+/// Where the sweep looks, and how recent a change marks a folder as busy.
+pub(crate) struct AssetCacheSweep {
+    pub root: std::path::PathBuf,
+    pub busy_window: std::time::Duration,
+    /// Held while a sweep runs; a second one meanwhile is skipped.
+    pub running: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -119,6 +131,7 @@ impl Editor {
                 scans: Mutex::new(HashSet::new()),
                 route: route::RouteState::new(Arc::new(crate::secrets::KeyringStore::hosted())),
                 prefs_write: Mutex::new(()),
+                asset_cache: std::sync::OnceLock::new(),
                 state: Mutex::new(HashMap::new()),
             }),
         }
@@ -128,7 +141,19 @@ impl Editor {
     /// toolchain exists, fixture adapters otherwise (demo mode).
     pub fn bootstrap(sink: SharedSink) -> Result<Self> {
         let store = SqliteStore::open(&SqliteStore::default_path())?;
-        Self::bootstrap_with_store(Box::new(store), sink)
+        let editor = Self::bootstrap_with_store(Box::new(store), sink)?;
+        // The app's own library, so its cache is this editor's to sweep. In
+        // the background: launch doesn't wait on it.
+        let _ = editor.inner.asset_cache.set(AssetCacheSweep {
+            root: crate::asset_cache::root(),
+            busy_window: crate::asset_cache::BUSY_WINDOW,
+            running: Mutex::new(()),
+        });
+        let sweeper = editor.clone();
+        std::thread::spawn(move || {
+            let _ = sweeper.sweep_asset_cache();
+        });
+        Ok(editor)
     }
 
     pub fn bootstrap_with_store(store: Box<dyn Store>, sink: SharedSink) -> Result<Self> {

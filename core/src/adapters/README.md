@@ -292,8 +292,11 @@ There are no child directories with contracts.
 - The asset cache directory is `<data_dir>/cache/<asset_cache_key>`. The key is
   the first 16 hex chars of SHA-256 over `"v4:"` + path + file size + mtime
   seconds, so it follows **file identity, not media id**: projects that share
-  footage share assets. Bump the `"v4:"` prefix to invalidate old caches. (The
-  `VideoEngine::media_assets` doc comment still says `<media id>`.)
+  footage share assets. Bump the `"v4:"` prefix to invalidate old caches; the
+  old folders are then removed by `Editor::sweep_asset_cache`, since no live
+  media maps to them. Paths come from `crate::asset_cache` (`dir_for`, and
+  `ensure_dir_for`, which also writes `source.json` with the source path, so
+  the sweep can tell a folder's source while that source is offline).
 - `media_assets` regenerates peaks only when `peaks.bin` is missing, and
   thumbnails only when `thumb_0001.jpg` is missing. The thumbnail interval is
   `(duration/240).clamp(1, 10)` s. It never builds `play.mp4`: it reports it
@@ -454,8 +457,9 @@ There are no child directories with contracts.
   - `transcribe.rs`: `whisper-cli`; `which whisper-cli` (blocking
     `std::process`, also run inside every `capabilities::probe()`).
 - **Filesystem writes.**
-  - `<data_dir>/cache/<key>/`: `peaks.bin`, `peaks_raw.bin`, `thumb_%04d.jpg`,
-    `play.mp4.part` renamed to `play.mp4`.
+  - `<data_dir>/cache/<key>/`: `source.json`, `peaks.bin`, `peaks_raw.bin`,
+    `thumb_%04d.jpg`, `play.mp4.part` renamed to `play.mp4`. Removed by
+    `Editor::sweep_asset_cache` once no live project uses the source.
   - Caller-supplied `out_path` (MP4, WAV, PNG). Existing files are overwritten
     with `-y`.
   - `<wav_path>.transcript.json`, written by `whisper-cli` and never cleaned up.

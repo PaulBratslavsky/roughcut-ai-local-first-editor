@@ -76,7 +76,7 @@ pub trait VideoEngine: Send + Sync {
     /// aspect), written as PNG to `out_path`. Face finding samples these.
     async fn extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()>;
     /// Waveform peaks + thumbnail filmstrip, generated once and cached in
-    /// `<data dir>/cache/<media id>/`.
+    /// `<data dir>/cache/<asset_cache_key>/` (see `crate::asset_cache`).
     async fn media_assets(&self, media: &Media) -> Result<MediaAssets>;
 }
 
@@ -316,8 +316,7 @@ impl VideoEngine for FfmpegCli {
         // Cache by file identity (path + size + mtime), NOT media id: every
         // project pointing at the same footage — duplicates, re-imports,
         // MCP-created projects — shares one set of peaks/thumbnails.
-        let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-        std::fs::create_dir_all(&cache)?;
+        let cache = crate::asset_cache::ensure_dir_for(media)?;
 
         // ---- waveform peaks (u8 per 1/PEAKS_PER_SECOND s) -------------------
         let peaks_file = cache.join("peaks.bin");
@@ -376,7 +375,7 @@ impl VideoEngine for FfmpegCli {
 
 /// The preview copy, if one was already built for this source.
 pub fn playable_copy_path(media: &Media) -> Option<String> {
-    let play = crate::store::data_dir().join("cache").join(asset_cache_key(media)).join("play.mp4");
+    let play = crate::asset_cache::dir_for(media).join("play.mp4");
     play.is_file().then(|| play.to_string_lossy().into_owned())
 }
 
@@ -423,8 +422,7 @@ async fn build_playable_copy(media: &Media) -> Result<Option<String>> {
     let Some(fix) = playable_fix(&container_info(&media.file_path).await?) else {
         return Ok(None);
     };
-    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-    std::fs::create_dir_all(&cache)?;
+    let cache = crate::asset_cache::ensure_dir_for(media)?;
     let play = cache.join("play.mp4");
     // One copy per cache key at a time (RAII: released even on panic).
     static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -760,14 +758,14 @@ pub async fn decode_raw_peaks(file_path: &str) -> Result<Vec<u8>> {
 /// Raw analysis peaks for `media`, from cache or a one-off decode (caches
 /// that predate raw peaks get backfilled). None = no ffmpeg/decoder.
 pub async fn load_raw_peaks(media: &Media) -> Option<Vec<u8>> {
-    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-    let raw_file = cache.join("peaks_raw.bin");
+    let raw_file = crate::asset_cache::dir_for(media).join("peaks_raw.bin");
     if let Ok(bytes) = std::fs::read(&raw_file) {
         return Some(bytes);
     }
     let raw = decode_raw_peaks(&media.file_path).await.ok()?;
-    let _ = std::fs::create_dir_all(&cache);
-    let _ = std::fs::write(&raw_file, &raw);
+    if crate::asset_cache::ensure_dir_for(media).is_ok() {
+        let _ = std::fs::write(&raw_file, &raw);
+    }
     Some(raw)
 }
 
