@@ -100,6 +100,8 @@ pub enum Event {
     },
     TranscribeEnd { project: Uuid, ms: u64, segments: usize, model: String },
     TranscribeFailed { project: Uuid, stage: &'static str, ms: u64, code: &'static str, error: ErrText },
+    /// The asset-cache sweep removed something (`Editor::sweep_asset_cache`).
+    CacheSweep { removed: u32, freed_bytes: u64, kept: u32, ms: u64 },
 }
 
 #[derive(Debug, Serialize)]

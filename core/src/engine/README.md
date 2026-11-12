@@ -70,7 +70,7 @@ This package depends on the following crate modules but does not own them:
 | Method                                                | Notes                                                                                                                                                                  |
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `new(store, video, transcriber, sink, demo)`          | Empty state. Confirmations off. No embedder override.                                                                                                                  |
-| `bootstrap(sink) -> Result<Self>`                     | Opens `SqliteStore` at `SqliteStore::default_path()`, then calls `bootstrap_with_store`.                                                                               |
+| `bootstrap(sink) -> Result<Self>`                     | Opens `SqliteStore` at `SqliteStore::default_path()`, then calls `bootstrap_with_store`. Only this constructor lets the editor sweep the asset cache, and it starts one sweep on a background thread. |
 | `bootstrap_with_store(store, sink) -> Result<Self>`   | Production wiring with `AutoVideoEngine` and `AutoTranscriber`. Confirmations follow `ROUGHCUT_NO_CONFIRM`. Runs `purge_trash(30)` and `secrets::remove_legacy_plaintext()` at startup.                         |
 | `test_instance() -> Self`                             | In-memory SQLite with `inference_endpoint = http://127.0.0.1:9/v1`, `MockVideoEngine`, `MockTranscriber`, `NullSink`, `demo = true`, and an in-memory key store (`MemoryStore`).                                 |
 | `demo_mode() -> bool`                                 | `inner.demo \|\| capabilities::probe().demo()`, re-evaluated on every call.                                                                                             |
@@ -91,6 +91,7 @@ This package depends on the following crate modules but does not own them:
 | `list_projects() -> Result<Vec<ProjectSummary>>`                         | Passes through to `Store::list_projects`.                                                                          |
 | `delete_project(id)` / `restore_project(id)`                             | Soft delete (sets `deleted_at`) and undelete.                                                                      |
 | `purge_trash(days) -> Result<u32>`                                       | Hard-deletes projects trashed more than `days` days ago.                                                           |
+| `sweep_asset_cache() -> Result<asset_cache::SweepReport>`                | Removes `<data dir>/cache/` folders no live project's media uses (see `asset_cache`). A no-op unless `bootstrap` made the editor. |
 | `get_timeline(id)`, `get_transcript(id)`                                 | Read accessors.                                                                                                    |
 | `async media_assets(id) -> Result<adapters::video::MediaAssets>`         | Waveform peaks and thumbnail paths, plus the playable copy (`playback_path`) or why it failed (`playback_error`). Starts building a missing copy in the background. |
 | `get_preferences()`, `set_preferences(prefs)`                            | Full load and full replace. `set_preferences` does no validation.                                                  |
@@ -313,7 +314,16 @@ This package depends on the following crate modules but does not own them:
 ### Projects and preferences (`projects.rs`)
 
 - `delete_project` is a soft delete. It never touches the source video, and
-  it evicts the project from the cache.
+  it evicts the project from the cache. It then runs `sweep_asset_cache`, so
+  the project's peaks, thumbnails and preview copy go unless another live
+  project uses the same footage. A restore rebuilds them when the project is
+  opened.
+- `sweep_asset_cache` keeps the folders of every live project's `media` and
+  `screen_media`, from the store and from loaded projects. A project that
+  fails to load makes it return that error before anything is removed. It
+  runs only for an editor made by `bootstrap` (`set_asset_cache_for_tests`
+  points a test editor at a temp folder), and one at a time per editor: a
+  sweep asked for while one runs is skipped.
 - `purge_trash` hard-deletes only projects whose `deleted_at` is older than
   `now - days`.
 - `update_preferences` requires the patch to be a JSON object.
@@ -417,6 +427,8 @@ This package depends on the following crate modules but does not own them:
   - `load_preferences` / `save_preferences`.
   - `load_embeddings` / `save_embeddings`.
   - `list_projects` / `delete_project`: the trash purge.
+  - `list_projects` / `load_project`: `sweep_asset_cache` reads every live
+    project.
   - `bootstrap` opens or creates the SQLite DB at `SqliteStore::default_path()`.
 - **OS key store** (`route.rs` through `SecretStore`): reads, writes and
   deletes the Hosted API key; `bootstrap_with_store` deletes plaintext keys
@@ -459,7 +471,11 @@ This package depends on the following crate modules but does not own them:
     once the transcriber returns. A failed audio extraction skips the removal
     (see Known caveats).
   - The face pass writes PNG frames under `data_dir()/cache/faces/<uuid>/` and
-    removes the directory afterwards.
+    removes the directory afterwards. A pass cut short leaves it for
+    `sweep_asset_cache`.
+  - `sweep_asset_cache` (after `delete_project`, and at launch) removes unused
+    folders under `data_dir()/cache/` and writes a `cache_sweep` log line when
+    it freed anything.
   - `load_raw_peaks` reads or writes `data_dir()/cache/<key>/peaks_raw.bin`
     for the rough cut and confirmed-silence cuts.
   - `append_media` writes `data_dir()/media/joined-<timestamp>-<8 hex>.mp4`
@@ -481,6 +497,8 @@ This package depends on the following crate modules but does not own them:
     `capabilities::probe()` on every call.
 - **Startup:** `bootstrap_with_store` runs `purge_trash(30)`, which
   hard-deletes projects that have been in the trash for more than 30 days.
+  `bootstrap` then sweeps the asset cache on a `std::thread`, so launch
+  doesn't wait on it.
 
 ## Verification
 

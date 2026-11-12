@@ -76,7 +76,7 @@ pub trait VideoEngine: Send + Sync {
     /// aspect), written as PNG to `out_path`. Face finding samples these.
     async fn extract_frame(&self, media: &Media, at: f64, width: u32, out_path: &str) -> Result<()>;
     /// Waveform peaks + thumbnail filmstrip, generated once and cached in
-    /// `<data dir>/cache/<media id>/`.
+    /// `<data dir>/cache/<asset_cache_key>/` (see `crate::asset_cache`).
     async fn media_assets(&self, media: &Media) -> Result<MediaAssets>;
 }
 
@@ -316,8 +316,7 @@ impl VideoEngine for FfmpegCli {
         // Cache by file identity (path + size + mtime), NOT media id: every
         // project pointing at the same footage — duplicates, re-imports,
         // MCP-created projects — shares one set of peaks/thumbnails.
-        let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-        std::fs::create_dir_all(&cache)?;
+        let cache = crate::asset_cache::ensure_dir_for(media)?;
 
         // ---- waveform peaks (u8 per 1/PEAKS_PER_SECOND s) -------------------
         let peaks_file = cache.join("peaks.bin");
@@ -376,7 +375,7 @@ impl VideoEngine for FfmpegCli {
 
 /// The preview copy, if one was already built for this source.
 pub fn playable_copy_path(media: &Media) -> Option<String> {
-    let play = crate::store::data_dir().join("cache").join(asset_cache_key(media)).join("play.mp4");
+    let play = crate::asset_cache::dir_for(media).join("play.mp4");
     play.is_file().then(|| play.to_string_lossy().into_owned())
 }
 
@@ -397,7 +396,9 @@ pub fn playable_copy_failure(media: &Media) -> Option<String> {
 /// Build the web-playable copy when the source needs one: an MP4 whose index
 /// sits at the end, audio WebKit can't play, or a container WebKit can't open
 /// at all (OBS's `.mkv`, `.webm`, `.avi`, …). Stream copy where the codecs
-/// allow it, with +faststart, written to `.part` then renamed, so a crash
+/// allow it, a 1080p H.264 proxy for codecs they don't and for sources larger
+/// than 1080p (`playable_fix`), with +faststart, written to `.part` then
+/// renamed, so a crash
 /// never leaves a half-copy that looks playable. Idempotent and deduplicated;
 /// Ok(None) = the source plays as-is (or another task is building the copy).
 /// A failure is remembered for the rest of the run (`playable_copy_failure`)
@@ -431,8 +432,7 @@ async fn build_playable_copy(media: &Media) -> Result<Option<String>> {
     let Some(fix) = fix else {
         return Ok(None);
     };
-    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-    std::fs::create_dir_all(&cache)?;
+    let cache = crate::asset_cache::ensure_dir_for(media)?;
     let play = cache.join("play.mp4");
     // One copy per cache key at a time (RAII: released even on panic).
     static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -465,6 +465,9 @@ struct ContainerInfo {
     /// ffprobe `format_name`: "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi", …
     format_name: String,
     video_codec: Option<String>,
+    /// The first video stream's coded size; 0 when unknown.
+    width: u32,
+    height: u32,
     audio_codec: Option<String>,
     audio_channels: u32,
 }
@@ -479,8 +482,10 @@ impl ContainerInfo {
 /// How to build the preview copy.
 #[derive(Debug, Clone, PartialEq)]
 struct PlayableFix {
-    /// Convert the video to H.264 (a codec WebKit can't play, in a container
-    /// it can't open); otherwise the video is copied as-is.
+    /// Convert the video to H.264, at most 1080p: a codec WebKit can't play
+    /// (in a container it can't open), or a frame larger than 1080p, whose
+    /// copy would be as big as the source (7.8 GB for 25 min of 4K at
+    /// 45 Mbps). Otherwise the video is copied as-is.
     reencode_video: bool,
     /// HEVC copied into MP4 needs the `hvc1` tag, or Apple players refuse it.
     tag_hvc1: bool,
@@ -504,7 +509,7 @@ async fn container_info(path: &str) -> Result<ContainerInfo> {
     let mut cmd = Command::new(probe);
     cmd.args([
         "-v", "error",
-        "-show_entries", "format=format_name:stream=codec_type,codec_name,channels",
+        "-show_entries", "format=format_name:stream=codec_type,codec_name,channels,width,height",
         "-of", "json",
         path,
     ]);
@@ -521,18 +526,28 @@ fn parse_container_info(json: &str) -> Option<ContainerInfo> {
     let first = |kind: &str| streams.iter().find(|s| s["codec_type"] == kind).cloned();
     let video = first("video");
     let audio = first("audio");
+    let size = |key: &str| video.as_ref().and_then(|s| s[key].as_u64()).unwrap_or(0) as u32;
     Some(ContainerInfo {
         format_name,
+        width: size("width"),
+        height: size("height"),
         video_codec: video.and_then(|s| s["codec_name"].as_str().map(str::to_string)),
         audio_codec: audio.as_ref().and_then(|s| s["codec_name"].as_str().map(str::to_string)),
         audio_channels: audio.and_then(|s| s["channels"].as_u64()).unwrap_or(0) as u32,
     })
 }
 
-/// None = the original plays in the preview as-is.
+/// The preview copy's largest frame, on its shorter side (so a portrait
+/// 2160x3840 phone video counts as 4K too).
+const PREVIEW_MAX_SIDE: u32 = 1080;
+
+/// None = the original plays in the preview as-is. A source that needs a copy
+/// anyway and is larger than 1080p gets a 1080p proxy instead of a full-size
+/// copy; one that plays as-is is never copied, whatever its size.
 fn playable_fix(info: &ContainerInfo, index_at_end: bool) -> Option<PlayableFix> {
     let is_mp4 = info.is_mp4();
     let hevc = info.video_codec.as_deref() == Some("hevc");
+    let too_big = info.width.min(info.height) > PREVIEW_MAX_SIDE;
     let audio = match info.audio_codec.as_deref() {
         None => AudioFix::None,
         Some(_) if info.audio_channels > 2 => AudioFix::StereoAac,
@@ -546,11 +561,17 @@ fn playable_fix(info: &ContainerInfo, index_at_end: bool) -> Option<PlayableFix>
         if !index_at_end && audio != AudioFix::StereoAac {
             return None;
         }
-        return Some(PlayableFix { reencode_video: false, tag_hvc1: hevc, audio });
+        return Some(PlayableFix { reencode_video: too_big, tag_hvc1: hevc, audio });
     }
     let plays = matches!(info.video_codec.as_deref(), None | Some("h264") | Some("hevc"));
-    Some(PlayableFix { reencode_video: !plays, tag_hvc1: hevc, audio })
+    Some(PlayableFix { reencode_video: !plays || too_big, tag_hvc1: hevc, audio })
 }
+
+/// The shorter side scaled down to 1080 if larger (aspect kept), and both
+/// sides even, which yuv420p needs (a browser screen recording can be
+/// 1365x767). Applied after ffmpeg's autorotation, so portrait sources fit too.
+const PREVIEW_SCALE: &str =
+    "scale=w='if(gt(iw,ih),-2,min(1080,trunc(iw/2)*2))':h='if(gt(iw,ih),min(1080,trunc(ih/2)*2),-2)'";
 
 /// ffmpeg arguments between `-i <source>` and the output path.
 fn playable_args(fix: &PlayableFix) -> Vec<&'static str> {
@@ -564,9 +585,17 @@ fn playable_args(fix: &PlayableFix) -> Vec<&'static str> {
         args.extend(["-map", "0:a:0?"]);
     }
     if fix.reencode_video {
-        // yuv420p needs even dimensions (a browser screen recording can be 1365x767).
-        args.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]);
-        args.extend(["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]);
+        // A preview proxy: quick to make (8-10x real time from 4K on an M4
+        // Pro), small (about 1 GB for 25 min), a keyframe every 60 frames for
+        // quick seeks. Only the preview plays it; render and export read the
+        // original.
+        args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]);
+        args.extend(["-maxrate", "8M", "-bufsize", "16M", "-g", "60", "-pix_fmt", "yuv420p"]);
+        args.extend(["-vf", PREVIEW_SCALE]);
+        // Every frame keeps the source's timestamp, as a stream copy would:
+        // no frames added or dropped (OBS writes variable frame rates), and
+        // none rounded to a 1/fps grid (up to half a frame off otherwise).
+        args.extend(["-fps_mode", "passthrough", "-enc_time_base:v", "demux"]);
     } else {
         args.extend(["-c:v", "copy"]);
         if fix.tag_hvc1 {
@@ -796,14 +825,14 @@ pub async fn decode_raw_peaks(file_path: &str) -> Result<Vec<u8>> {
 /// Raw analysis peaks for `media`, from cache or a one-off decode (caches
 /// that predate raw peaks get backfilled). None = no ffmpeg/decoder.
 pub async fn load_raw_peaks(media: &Media) -> Option<Vec<u8>> {
-    let cache = crate::store::data_dir().join("cache").join(asset_cache_key(media));
-    let raw_file = cache.join("peaks_raw.bin");
+    let raw_file = crate::asset_cache::dir_for(media).join("peaks_raw.bin");
     if let Ok(bytes) = std::fs::read(&raw_file) {
         return Some(bytes);
     }
     let raw = decode_raw_peaks(&media.file_path).await.ok()?;
-    let _ = std::fs::create_dir_all(&cache);
-    let _ = std::fs::write(&raw_file, &raw);
+    if crate::asset_cache::ensure_dir_for(media).is_ok() {
+        let _ = std::fs::write(&raw_file, &raw);
+    }
     Some(raw)
 }
 
@@ -1333,16 +1362,24 @@ mod tests {
 mod playable_tests {
     use super::{
         join_signature, parse_container_info, playable_args, playable_fix, AudioFix, ContainerInfo,
-        PlayableFix,
+        PlayableFix, PREVIEW_MAX_SIDE, PREVIEW_SCALE,
     };
 
     fn info(format: &str, video: Option<&str>, audio: Option<&str>, channels: u32) -> ContainerInfo {
         ContainerInfo {
             format_name: format.into(),
             video_codec: video.map(str::to_string),
+            width: 0,
+            height: 0,
             audio_codec: audio.map(str::to_string),
             audio_channels: channels,
         }
+    }
+
+    fn sized(mut info: ContainerInfo, width: u32, height: u32) -> ContainerInfo {
+        info.width = width;
+        info.height = height;
+        info
     }
 
     const MP4: &str = "mov,mp4,m4a,3gp,3g2,mj2";
@@ -1410,6 +1447,11 @@ mod playable_tests {
             {"codec_name":"aac","codec_type":"audio","channels":1}],
             "format":{"format_name":"matroska,webm"}}"#;
         assert_eq!(parse_container_info(json), Some(info(MKV, Some("h264"), Some("aac"), 2)));
+        let with_size = json.replace(r#""codec_type":"video""#, r#""codec_type":"video","width":3840,"height":2160"#);
+        assert_eq!(
+            parse_container_info(&with_size),
+            Some(sized(info(MKV, Some("h264"), Some("aac"), 2), 3840, 2160))
+        );
         // Unreadable output is an error, never "not an MP4, no audio" (that
         // would build a silent copy of a file that was fine).
         assert_eq!(parse_container_info("not json"), None);
@@ -1425,7 +1467,87 @@ mod playable_tests {
         let silent = playable_fix(&info(MKV, Some("h264"), None, 0), false).unwrap();
         assert!(!playable_args(&silent).contains(&"0:a:0?"));
         let vp9 = playable_fix(&info(MKV, Some("vp9"), Some("opus"), 2), false).unwrap();
-        assert!(playable_args(&vp9).contains(&"scale=trunc(iw/2)*2:trunc(ih/2)*2"));
+        assert!(playable_args(&vp9).windows(2).any(|w| w == ["-vf", PREVIEW_SCALE]));
+        assert!(PREVIEW_SCALE.contains(&format!("min({PREVIEW_MAX_SIDE},")));
+    }
+
+    #[test]
+    fn a_source_larger_than_1080p_that_needs_a_copy_gets_a_1080p_proxy() {
+        for (w, h) in [(3840, 2160), (2160, 3840), (2560, 1440)] {
+            let mkv = playable_fix(&sized(info(MKV, Some("h264"), Some("aac"), 2), w, h), false).unwrap();
+            assert!(mkv.reencode_video, "{w}x{h} mkv");
+            let late_mp4 = playable_fix(&sized(info(MP4, Some("hevc"), Some("aac"), 2), w, h), true).unwrap();
+            assert!(late_mp4.reencode_video, "{w}x{h} mp4 with its index at the end");
+            let args = playable_args(&late_mp4);
+            assert!(args.windows(2).any(|w| w == ["-vf", PREVIEW_SCALE]), "{args:?}");
+            assert!(!args.windows(2).any(|w| w == ["-c:v", "copy"]), "{args:?}");
+            assert!(!args.contains(&"-tag:v"), "hvc1 is only for copied HEVC");
+        }
+        // It still plays as-is: no copy at all, whatever the size.
+        assert_eq!(playable_fix(&sized(info(MP4, Some("h264"), Some("aac"), 2), 3840, 2160), false), None);
+        // 1080p, landscape or portrait, is still a fast stream copy.
+        for (w, h) in [(1920, 1080), (1080, 1920)] {
+            let fix = playable_fix(&sized(info(MKV, Some("h264"), Some("aac"), 2), w, h), false).unwrap();
+            assert!(!fix.reencode_video, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn reencodes_keep_every_source_timestamp() {
+        let fix = playable_fix(&sized(info(MKV, Some("h264"), Some("aac"), 2), 3840, 2160), false).unwrap();
+        let args = playable_args(&fix);
+        assert!(args.windows(2).any(|w| w == ["-fps_mode", "passthrough"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-enc_time_base:v", "demux"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c:a", "copy"]), "AAC stereo audio is still copied");
+    }
+
+    /// Real ffmpeg (`cargo test -p roughcut-core -- --ignored proxy`): the
+    /// proxy is 1080p on its shorter side and every frame keeps its time.
+    #[tokio::test]
+    #[ignore]
+    async fn real_ffmpeg_proxy_is_1080p_with_the_source_timestamps() {
+        use super::{container_info, ffmpeg_cmd, ffprobe_path, FfmpegCli};
+        let tmp = tempfile::tempdir().unwrap();
+        let frames = |path: &std::path::Path| {
+            let out = std::process::Command::new(ffprobe_path().unwrap())
+                .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pts_time"])
+                .args(["-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.split(',').next()?.parse::<f64>().ok())
+                .collect::<Vec<_>>()
+        };
+        for (size, want) in [("3840x2160", (1920, 1080)), ("2160x3840", (1080, 1920))] {
+            // An OBS-like .mkv with an odd frame rate, plus stereo AAC.
+            let src = tmp.path().join(format!("{size}.mkv"));
+            let mut cmd = ffmpeg_cmd().unwrap();
+            cmd.args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate=29.97")]);
+            cmd.args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]);
+            cmd.args(["-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-ac", "2"]);
+            cmd.arg(&src);
+            FfmpegCli::run(&mut cmd, "test source").await.unwrap();
+
+            let info = container_info(&src.to_string_lossy()).await.unwrap();
+            let fix = playable_fix(&info, false).unwrap();
+            assert!(fix.reencode_video, "{size}");
+            let out = tmp.path().join(format!("{size}.mp4"));
+            let mut cmd = ffmpeg_cmd().unwrap();
+            cmd.args(["-hide_banner", "-v", "error", "-y", "-i"]).arg(&src);
+            cmd.args(playable_args(&fix)).arg(&out);
+            FfmpegCli::run(&mut cmd, "test proxy").await.unwrap();
+
+            let made = container_info(&out.to_string_lossy()).await.unwrap();
+            assert_eq!((made.width, made.height), want, "{size}");
+            assert_eq!(made.video_codec.as_deref(), Some("h264"));
+            assert_eq!(made.audio_codec.as_deref(), Some("aac"));
+            let (a, b) = (frames(&src), frames(&out));
+            assert_eq!(a.len(), b.len(), "{size}: frame count");
+            let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+            assert!(worst < 0.0005, "{size}: a frame moved {worst} s");
+        }
     }
 
     #[test]

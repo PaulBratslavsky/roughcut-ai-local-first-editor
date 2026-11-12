@@ -267,8 +267,11 @@ There are no child directories with contracts.
 - The asset cache directory is `<data_dir>/cache/<asset_cache_key>`. The key is
   the first 16 hex chars of SHA-256 over `"v4:"` + path + file size + mtime
   seconds, so it follows **file identity, not media id**: projects that share
-  footage share assets. Bump the `"v4:"` prefix to invalidate old caches. (The
-  `VideoEngine::media_assets` doc comment still says `<media id>`.)
+  footage share assets. Bump the `"v4:"` prefix to invalidate old caches; the
+  old folders are then removed by `Editor::sweep_asset_cache`, since no live
+  media maps to them. Paths come from `crate::asset_cache` (`dir_for`, and
+  `ensure_dir_for`, which also writes `source.json` with the source path, so
+  the sweep can tell a folder's source while that source is offline).
 - `media_assets` regenerates peaks only when `peaks.bin` is missing, and
   thumbnails only when `thumb_0001.jpg` is missing. The thumbnail interval is
   `(duration/240).clamp(1, 10)` s. It never builds `play.mp4`: it reports it
@@ -291,21 +294,37 @@ There are no child directories with contracts.
      in memory, not on disk, so a restart (say, after fixing ffmpeg) tries
      again.
 - `build_playable_copy`: one ffprobe call (`container_info`: `format_name`,
-  the first video and audio streams' codecs, the audio channel count) and the
+  the first video stream's codec and size, the first audio stream's codec and
+  channel count) and the
   pure `playable_fix(&ContainerInfo, index_at_end)` decide whether a copy is
   needed and how (unit tests in `playable_tests`). ffprobe output that
   `parse_container_info` can't read (no JSON, no format name) is an error,
   not "not an MP4, no audio".
   - **MP4 / MOV** (`format_name` lists `mp4` or `mov`): a copy only when
     `moov` comes after `mdat` (`needs_faststart`) or the first audio stream has
-    more than 2 channels. Video is copied; audio is copied, or converted to
-    stereo AAC when it has more than 2 channels.
+    more than 2 channels. Video is copied (or made a 1080p proxy, below);
+    audio is copied, or converted to stereo AAC when it has more than 2
+    channels.
   - **Any other container** (OBS's `.mkv`, `.webm`, `.avi`, …): always a copy.
     H.264 or HEVC video is copied; any other video codec (VP9, AV1, …) is
-    converted to H.264 (`libx264 -preset fast -crf 18 -pix_fmt yuv420p`),
-    which takes minutes rather than seconds. AAC audio with at most 2 channels
-    is copied; anything else becomes stereo AAC (192k); no audio stream
-    gives `-an`.
+    converted to H.264. AAC audio with at most 2 channels is copied; anything
+    else becomes stereo AAC (192k); no audio stream gives `-an`.
+  - **Larger than 1080p** (the shorter side over `PREVIEW_MAX_SIDE` = 1080, so
+    2560×1440 and portrait 2160×3840 count): when a copy is needed anyway, the
+    video is converted instead of copied, into a 1080p proxy. A stream copy
+    is as big as the source (25 min of 4K at 45 Mbps was 7.8 GB); the proxy
+    is about 1 GB, but takes minutes rather than seconds (about 8–10× real
+    time from 4K on an M4 Pro). A source that plays as-is is never copied,
+    whatever its size. Unknown size (0) counts as small. Copies built before
+    this rule stay at full size until their source changes.
+  - Every conversion uses one recipe: `libx264 -preset veryfast -crf 23
+    -maxrate 8M -bufsize 16M -g 60 -pix_fmt yuv420p`, with
+    `-fps_mode passthrough -enc_time_base:v demux` so every frame keeps the
+    source's timestamp, as a stream copy does (no frames added or dropped for
+    OBS's variable frame rate, none rounded to a 1/fps grid, which moved
+    frames by up to half a frame). Needs ffmpeg 5.1 or later. The
+    `#[ignore]`d `real_ffmpeg_proxy_is_1080p_with_the_source_timestamps`
+    test checks this against the installed ffmpeg.
   - HEVC copied into the MP4 is tagged `hvc1` (`-tag:v hvc1`); Apple players
     refuse it otherwise.
   - Only the first video track and the first audio track are mapped
@@ -315,9 +334,10 @@ There are no child directories with contracts.
     ffmpeg would pick the audio track with the most channels (OBS's track 2,
     say). Subtitle and data tracks are dropped (`-sn -dn`, e.g. OBS
     chapters), and the copy is `+faststart`.
-  - The H.264 conversion also scales to even dimensions
-    (`-vf scale=trunc(iw/2)*2:trunc(ih/2)*2`), because `yuv420p` needs them
-    (a browser screen recording can be 1365×767).
+  - The conversion scales with `PREVIEW_SCALE`: the shorter side down to
+    1080 if larger, aspect kept, and both sides even, because `yuv420p` needs
+    them (a browser screen recording can be 1365×767). ffmpeg autorotates
+    before the filter, so a rotated phone video fits by its displayed shape.
   - ffmpeg runs with `-hide_banner -v error`, so a failure's message carries
     the real reason.
   - When ffprobe fails, an MP4 whose index is at the end is still copied
@@ -414,8 +434,9 @@ There are no child directories with contracts.
   - `transcribe.rs`: `whisper-cli`; `which whisper-cli` (blocking
     `std::process`, also run inside every `capabilities::probe()`).
 - **Filesystem writes.**
-  - `<data_dir>/cache/<key>/`: `peaks.bin`, `peaks_raw.bin`, `thumb_%04d.jpg`,
-    `play.mp4.part` renamed to `play.mp4`.
+  - `<data_dir>/cache/<key>/`: `source.json`, `peaks.bin`, `peaks_raw.bin`,
+    `thumb_%04d.jpg`, `play.mp4.part` renamed to `play.mp4`. Removed by
+    `Editor::sweep_asset_cache` once no live project uses the source.
   - Caller-supplied `out_path` (MP4, WAV, PNG). Existing files are overwritten
     with `-y`.
   - `<wav_path>.transcript.json`, written by `whisper-cli` and never cleaned up.
