@@ -9,7 +9,9 @@
 //!   `thumb_%04d.jpg`, `play.mp4` (`play.mp4.part` while it builds) and
 //!   `source.json`, the source's path. The key needs the file's size and
 //!   mtime, so while a source is offline (an unplugged drive) the path is
-//!   the only way to tell which folder is its.
+//!   the only way to tell which folder is its. A folder without
+//!   `source.json` (made before it existed) is kept while any live source is
+//!   offline, since it might be that source's.
 //! - `faces/<uuid>/`: frames for one face-crop pass, removed when the pass
 //!   ends. A pass cut short (the app quit mid-pass) leaves its folder.
 //! - `<uuid>/` (legacy): the first asset cache, keyed by media id, written
@@ -86,8 +88,18 @@ impl InUse {
         }
     }
 
+    /// Kept when a live source maps to the folder's key, or might: its
+    /// recorded source is a live source that's offline now, or it records no
+    /// source (made before `source.json` existed) while any live source is
+    /// offline, since that source's folder can't be told apart from the rest.
     fn keeps(&self, key: &str, dir: &Path) -> bool {
-        self.keys.contains(key) || source_of(dir).is_some_and(|p| self.offline.contains(&p))
+        if self.keys.contains(key) {
+            return true;
+        }
+        match source_of(dir) {
+            Some(path) => self.offline.contains(&path),
+            None => !self.offline.is_empty(),
+        }
     }
 }
 
@@ -119,7 +131,10 @@ pub fn sweep(root: &Path, in_use: &InUse, busy_after: SystemTime) -> SweepReport
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == FACES {
             for pass in std::fs::read_dir(&path).into_iter().flatten().flatten() {
-                if pass.file_type().is_ok_and(|t| t.is_dir()) && !busy(&pass.path(), busy_after) {
+                // A pass is `faces/<uuid>/`; any other name isn't ours.
+                let is_pass = pass.file_type().is_ok_and(|t| t.is_dir())
+                    && Uuid::parse_str(&pass.file_name().to_string_lossy()).is_ok();
+                if is_pass && !busy(&pass.path(), busy_after) {
                     remove(&pass.path(), &mut report);
                 }
             }
@@ -227,6 +242,7 @@ mod tests {
         write(&face_pass.join("frame_00.png"), 30);
         // Not the cache's: left alone.
         write(&root.join("notes/readme.txt"), 5);
+        write(&root.join(FACES).join("notes/readme.txt"), 5);
         write(&root.join(".DS_Store"), 5);
         write(&root.join("ABCDEF0123456789/peaks.bin"), 5);
 
@@ -240,6 +256,7 @@ mod tests {
         assert!(!legacy.exists());
         assert!(!face_pass.exists());
         assert!(root.join(FACES).is_dir(), "only the passes go, not faces/ itself");
+        assert!(root.join(FACES).join("notes/readme.txt").is_file(), "not a pass: no uuid name");
         assert!(root.join("notes/readme.txt").is_file());
         assert!(root.join(".DS_Store").is_file());
         assert!(root.join("ABCDEF0123456789").is_dir());
@@ -271,6 +288,32 @@ mod tests {
         let report = sweep(&root, &InUse::default(), later());
         assert!(!dir.exists());
         assert_eq!(report.removed, 1);
+    }
+
+    #[test]
+    fn keeps_folders_without_a_source_while_a_live_source_is_offline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        // Made before source.json: maybe the offline source's, maybe not.
+        let unmarked = root.join("0123456789abcdef");
+        write(&unmarked.join("play.mp4"), 1000);
+        // Records a source that no live project uses: still removable.
+        let elsewhere = ensure_dir_in(&root, &media(&tmp.path().join("other.mp4"))).unwrap();
+
+        let mut in_use = InUse::default();
+        in_use.add_media(&media(&tmp.path().join("unplugged.mp4")));
+        let report = sweep(&root, &in_use, later());
+        assert!(unmarked.join("play.mp4").is_file());
+        assert!(!elsewhere.exists());
+        assert_eq!((report.removed, report.kept), (1, 1));
+
+        // Nothing live is offline: the folder is known to be unused.
+        let src = tmp.path().join("online.mp4");
+        write(&src, 10);
+        let mut in_use = InUse::default();
+        in_use.add_media(&media(&src));
+        sweep(&root, &in_use, later());
+        assert!(!unmarked.exists());
     }
 
     #[test]

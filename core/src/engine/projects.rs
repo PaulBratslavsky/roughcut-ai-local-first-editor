@@ -114,8 +114,15 @@ impl Editor {
         Ok(())
     }
 
-    /// Bring a trashed project back, edit state and all.
+    /// Bring a trashed project back, edit state and all. Waits for a running
+    /// asset-cache sweep: it counted this project as trashed, so it could
+    /// remove the project's folder after the restore.
     pub fn restore_project(&self, project_id: Uuid) -> Result<Project> {
+        let _no_sweep = self
+            .inner
+            .asset_cache
+            .get()
+            .map(|cache| cache.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         self.ensure_loaded(project_id)?;
         let project = {
             let mut state = self.inner.state.lock().unwrap();
@@ -150,8 +157,9 @@ impl Editor {
     /// no live project's media uses; see [`crate::asset_cache`] for what lives
     /// there. Runs at launch (on a background thread) and at the end of each
     /// `delete_project`. A no-op for an editor `bootstrap` didn't make (tests,
-    /// other stores), and while another sweep runs. A project that can't be
-    /// read stops the sweep: its media is unknown, so nothing is removed.
+    /// other stores), and while another sweep or a `restore_project` runs. A
+    /// project that can't be read stops the sweep: its media is unknown, so
+    /// nothing is removed.
     pub fn sweep_asset_cache(&self) -> Result<crate::asset_cache::SweepReport> {
         use crate::asset_cache::{sweep, InUse, SweepReport};
         let Some(cache) = self.inner.asset_cache.get() else {
@@ -445,5 +453,29 @@ mod tests {
         assert!(folder(&a).is_dir(), "B still uses the shared footage");
         editor.delete_project(b.id).unwrap();
         assert!(!folder(&a).exists());
+    }
+
+    #[tokio::test]
+    async fn a_restore_waits_for_a_running_sweep() {
+        let editor = Editor::test_instance();
+        let tmp = tempfile::tempdir().unwrap();
+        editor.set_asset_cache_for_tests(tmp.path().join("cache"));
+        let p = editor.create_project("A", None).await.unwrap();
+        editor.delete_project(p.id).unwrap();
+
+        // A sweep is running (it holds the lock).
+        let sweeping = editor.inner.asset_cache.get().unwrap().running.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let restorer = editor.clone();
+        let thread = std::thread::spawn(move || {
+            restorer.restore_project(p.id).unwrap();
+            done_tx.send(()).unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(done_rx.try_recv().is_err(), "the restore must not finish mid-sweep");
+        drop(sweeping);
+        done_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("restore after the sweep");
+        thread.join().unwrap();
+        assert!(editor.list_projects().unwrap().iter().any(|s| s.id == p.id && s.deleted_at.is_none()));
     }
 }

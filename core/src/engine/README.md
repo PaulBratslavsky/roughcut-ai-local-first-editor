@@ -357,7 +357,10 @@ This package depends on the following crate modules but does not own them:
   fails to load makes it return that error before anything is removed. It
   runs only for an editor made by `bootstrap` (`set_asset_cache_for_tests`
   points a test editor at a temp folder), and one at a time per editor: a
-  sweep asked for while one runs is skipped.
+  sweep asked for while one runs is skipped. `restore_project` takes the same
+  lock, so a restore waits for a running sweep (which counted the project as
+  trashed) instead of having its folder removed after it, and a sweep asked
+  for during a restore is skipped.
 - `purge_trash` hard-deletes only projects whose `deleted_at` is older than
   `now - days`.
 - `update_preferences` requires the patch to be a JSON object.
