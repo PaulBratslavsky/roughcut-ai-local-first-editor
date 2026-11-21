@@ -249,6 +249,7 @@ the event's fields. Fields that don't apply are left out.
 | `transcribe_start` | info | `project`, `media_s`, `language`, `engine`, `whisper_model` | `Editor::transcribe` |
 | `transcribe_end` | info | `project`, `ms`, `segments`, `model` | `Editor::transcribe` |
 | `transcribe_failed` | error | `project`, `stage` (audio / whisper / save), `ms`, `code`, `error` | `Editor::transcribe` |
+| `cache_sweep` | info | `removed` (folders), `freed_bytes`, `kept`, `ms` | `Editor::sweep_asset_cache`, only when it removed something |
 
 Notes:
 

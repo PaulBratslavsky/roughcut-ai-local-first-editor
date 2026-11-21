@@ -334,7 +334,7 @@ impl Editor {
             clip.timeline.included_clips().map(|c| (c.source_in, c.source_out)).collect();
         let times = face::sample_times(&kept, FACE_SAMPLES);
 
-        let dir = crate::store::data_dir().join("cache").join("faces").join(Uuid::new_v4().to_string());
+        let dir = crate::asset_cache::root().join(crate::asset_cache::FACES).join(Uuid::new_v4().to_string());
         std::fs::create_dir_all(&dir)?;
         let found = self.find_faces(&media, &times, &dir).await;
         let _ = std::fs::remove_dir_all(&dir);

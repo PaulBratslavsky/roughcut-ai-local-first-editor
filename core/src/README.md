@@ -10,7 +10,7 @@ Platform- and binary-dependent work sits behind the traits in
 [`adapters`](./adapters/README.md); the stateful `Editor` that implements every
 operation lives in [`engine`](./engine/README.md).
 
-`lib.rs` declares 24 public modules and re-exports `Editor`
+`lib.rs` declares 28 public modules and re-exports `Editor`
 (`pub use engine::Editor`) and the error types (`pub use error::{CoreError,
 Result}`). The crate is consumed by the Tauri shell (`app/src-tauri`), the MCP
 server ([`mcp`](./mcp/README.md)), the tests in `core/tests/`, and the
@@ -39,7 +39,7 @@ examples in [`core/examples/`](../examples/README.md).
 
 | Module | Role | Key public items |
 | --- | --- | --- |
-| `lib.rs` | Crate root | 26 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
+| `lib.rs` | Crate root | 28 `pub mod`s; `pub use engine::Editor`; `pub use error::{CoreError, Result}` |
 | `model.rs` | The data model (serde; `ts_rs::TS` exports behind feature `ts-bindings`) | `Project`, `Media`, `Transcript`, `TranscriptSegment`, `Word`, `Timeline`, `Clip`, `ClipOrigin`, `Padding`, `EditOp`, `EditAction`, `ActionSource`, `Preferences`, `Aggressiveness`, `ModelTier`, `ProjectSummary`, `SavedClip`, `SavedClipSummary`, `ClipCandidate`, `ClipFormat`, `SourceRange`, `PlaySpan`, `ClipBatchError`, `ClipExportResult`, `pieces_overlap`, `Checkpoint`, `CheckpointSummary`, `CutSuggestion`, `Layout`, `History`, `HistoryEntry`, `ModelMode`, `ModelStatus`, `RouteReason`, `KeyCheck`, `HostedKeyResult`, `HOSTED_MODELS`, `hosted_model_name`, `EPS` |
 | `tools.rs` | The tool registry: one `ToolSpec` row per tool, three callers | `ToolSpec`, `ToolDef`, `Caller`, `defs`, `dispatch`, `registry`, `is_mutating`, `Handler`, `HandlerFuture` |
 | `agent.rs` | The chat agent loop and LLM-with-fallback helpers | `run_instruction`, `run_instruction_with`, `InstructionOutcome`, `HistoryTurn`, `clean_transcript`, `generate_chapters`, `Chapter`, `generate_title_description` |
@@ -58,6 +58,7 @@ examples in [`core/examples/`](../examples/README.md).
 | `download.rs` | Generic streaming HTTP download with progress and an optional sha256 check | `download_to`, `DownloadOpts` |
 | `progress.rs` | Child-process output → progress events | `stream_progress`, `Delimiter` |
 | `inflight.rs` | One background job per key (RAII) | `try_claim`, `InFlight` |
+| `asset_cache.rs` | The `<data dir>/cache/` layout (per-source folders, face-pass frames, legacy media-id folders) and the sweep that removes what no live project uses | `root`, `dir_for`, `ensure_dir_for`, `FACES`, `BUSY_WINDOW`, `InUse`, `sweep`, `SweepReport` |
 | `pty.rs` | In-app terminal sessions | `spawn`, `write`, `resize`, `kill`, `kill_all` |
 | `resolve.rs` | DaVinci Resolve plugin install and timeline push | `status`, `ResolveStatus`, `install_plugin`, `send_timeline`, `SendToResolveOutcome` |
 | `demo.rs` | Fixture transcript for demo mode and tests | `fixture_transcript` |
